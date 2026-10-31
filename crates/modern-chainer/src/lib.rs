@@ -25,8 +25,11 @@ pub use modern_chainer_core::{
 };
 pub use modern_chainer_cpu::{CpuBackend, CpuOps, CpuStorage};
 pub use modern_chainer_cuda::{
-    ComputeType, CudaBackend, CudaGraphRunner, CudaOps, CudaStorage, GraphAdam, GraphLinearTrainer,
-    GraphMatmul, GraphTrainerConfig,
+    ComputeType, CudaBackend, CudaGraphRunner, CudaOps, CudaStaticContext, CudaStaticStep,
+    CudaStorage, GraphAdam, GraphLinearTrainer, GraphMatmul, GraphTrainerConfig,
+    LinearForwardBuffers, LinearForwardStep, LinearMseAdamStep, LinearMseBuffers, StaticBuilder,
+    StaticForwardConfig, StaticForwardInput, StaticLinearConfig, StaticLinearInput,
+    StaticLinearOutput, StaticRun,
 };
 pub use modern_chainer_llm::{
     BatchOutput, BatchPlan, BlockAllocator, ContinuousBatcher, Decoder, DecoderConfig,
@@ -90,9 +93,10 @@ pub mod prelude {
     pub use crate::{
         Activation, Adam, AdamConfig, AutocastGuard, Backend, BatchPlan, BlockAllocator,
         ComputeType, ContinuousBatcher, CpuBackend, CudaBackend, DType, Decoder, DecoderConfig,
-        Device, Error, GradScaler, GraphLinearTrainer, GraphTrainerConfig, Linear, Module,
-        MomentumSGD, Ops, Optimizer, PagedBatchRunner, Parameter, RequestId, Result, Run, RunMode,
-        SGD, Sampler, Shape, StateId, StateKey, StateSpec, StateStore, Step, Tensor, Variable,
+        Device, Error, GradScaler, GraphLinearTrainer, GraphTrainerConfig, Linear,
+        LinearMseAdamStep, Module, MomentumSGD, Ops, Optimizer, PagedBatchRunner, Parameter,
+        RequestId, Result, Run, RunMode, SGD, Sampler, Shape, StateId, StateKey, StateSpec,
+        StateStore, StaticLinearConfig, StaticLinearInput, StaticRun, Step, Tensor, Variable,
         ZeroGrad, autocast, autocast_dtype, generate, is_autocast_enabled, no_grad,
         speculative_generate, zero_grad,
     };

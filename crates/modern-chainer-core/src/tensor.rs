@@ -162,6 +162,11 @@ impl<B: Backend> Tensor<B> {
         &self.storage
     }
 
+    /// Mutable access to storage when this tensor is the sole owner.
+    pub fn storage_mut(&mut self) -> Option<&mut B::Storage> {
+        Arc::get_mut(&mut self.storage)
+    }
+
     pub fn numel(&self) -> usize {
         self.shape.numel()
     }

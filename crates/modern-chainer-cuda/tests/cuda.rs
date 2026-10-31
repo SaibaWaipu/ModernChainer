@@ -860,3 +860,86 @@ fn cuda_graph_linear_trainer_replays_training_steps() {
     assert_eq!(w.len(), 4 * 16);
     assert_eq!(b.len(), 4);
 }
+
+#[test]
+#[serial]
+fn cuda_static_run_linear_training_generalizes_graph_trainer() {
+    use modern_chainer_cuda::{
+        LinearMseAdamStep, StaticLinearConfig, StaticLinearInput, StaticRun,
+    };
+
+    if !is_available() {
+        eprintln!("skipping: CUDA is not available");
+        return;
+    }
+    let backend = CudaBackend::new(0).unwrap();
+    let config = StaticLinearConfig {
+        batch: 32,
+        in_features: 16,
+        out_features: 4,
+        lr: 0.05,
+        beta1: 0.9,
+        beta2: 0.999,
+        eps: 1e-8,
+    };
+    let model = LinearMseAdamStep::new(config, 7).unwrap();
+    let mut run = StaticRun::new(model, backend).unwrap();
+    let mut x = Vec::with_capacity(32 * 16);
+    let mut target = Vec::with_capacity(32 * 4);
+    for row in 0..32 {
+        let features: Vec<f32> = (0..16)
+            .map(|col| ((row * 16 + col) as f32 * 0.01).sin())
+            .collect();
+        for out in 0..4 {
+            let value: f32 = features
+                .iter()
+                .enumerate()
+                .map(|(i, v)| v * ((i + out) as f32 * 0.03).cos())
+                .sum();
+            target.push(value);
+        }
+        x.extend_from_slice(&features);
+    }
+    let input = StaticLinearInput { x, target };
+    run.replay(&input).unwrap();
+    let first = run.output().unwrap().loss;
+    for _ in 0..100 {
+        run.replay(&input).unwrap();
+    }
+    let output = run.output().unwrap();
+    eprintln!("static run loss: {first} -> {}", output.loss);
+    assert!(output.loss < first * 0.2);
+    assert_eq!(output.step, 101);
+    assert_eq!(output.weight.len(), 4 * 16);
+    assert_eq!(output.bias.len(), 4);
+}
+
+#[test]
+#[serial]
+fn cuda_static_run_linear_forward_replays_new_input() {
+    use modern_chainer_cuda::{
+        LinearForwardStep, StaticForwardConfig, StaticForwardInput, StaticRun,
+    };
+
+    if !is_available() {
+        eprintln!("skipping: CUDA is not available");
+        return;
+    }
+    let backend = CudaBackend::new(0).unwrap();
+    let config = StaticForwardConfig {
+        batch: 4,
+        in_features: 8,
+        out_features: 3,
+    };
+    let model = LinearForwardStep::new(config, 3).unwrap();
+    let mut run = StaticRun::new(model, backend).unwrap();
+    let x1: Vec<f32> = (0..32).map(|i| i as f32 * 0.01).collect();
+    let x2: Vec<f32> = (0..32).map(|i| 1.0 - i as f32 * 0.01).collect();
+    run.replay(&StaticForwardInput { x: x1 }).unwrap();
+    let first = run.output().unwrap();
+    run.replay(&StaticForwardInput { x: x2 }).unwrap();
+    let second = run.output().unwrap();
+    assert_eq!(first.len(), 12);
+    assert_eq!(second.len(), 12);
+    assert_ne!(first, second);
+}

@@ -14,12 +14,21 @@ mod graph;
 mod kernels;
 #[cfg(feature = "cuda")]
 mod ops;
+#[cfg(feature = "cuda")]
+mod static_run;
 
 #[cfg(feature = "cuda")]
 pub use backend::{ComputeType, CudaBackend, CudaStorage};
+#[cfg(feature = "cuda")]
 pub use graph::{CudaGraphRunner, GraphAdam, GraphLinearTrainer, GraphMatmul, GraphTrainerConfig};
 #[cfg(feature = "cuda")]
 pub use ops::CudaOps;
+#[cfg(feature = "cuda")]
+pub use static_run::{
+    CudaStaticContext, CudaStaticStep, LinearForwardBuffers, LinearForwardStep, LinearMseAdamStep,
+    LinearMseBuffers, StaticBuilder, StaticForwardConfig, StaticForwardInput, StaticLinearConfig,
+    StaticLinearInput, StaticLinearOutput, StaticRun,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Capability {
