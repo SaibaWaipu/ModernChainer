@@ -824,7 +824,7 @@ pub(crate) fn softmax_last_dim(x: &Tensor<CpuBackend>) -> Result<Tensor<CpuBacke
         }
         let inv = 1.0 / sum;
         for col in 0..cols {
-            out[base + col] = (((slice[col] - max) as f64) * inv) as f32;
+            out[base + col] = (((slice[col] - max) as f64).exp() * inv) as f32;
         }
     }
     make_f32(x, out, x.shape().clone())
@@ -959,7 +959,7 @@ pub(crate) fn attention(
                 if scores[j] == f32::NEG_INFINITY {
                     continue;
                 }
-                let p = (((scores[j] - max) as f64) * inv) as f32;
+                let p = (((scores[j] - max) as f64).exp() * inv) as f32;
                 for d in 0..head_dim {
                     out[q_base + i * head_dim + d] += p * vv[v_base + j * head_dim + d];
                 }
@@ -1128,7 +1128,7 @@ pub(crate) fn paged_attention(
                 let physical = table[logical] as usize;
                 let within = p % block_size;
                 let v_base = ((physical * block_size + within) * heads + head) * head_dim;
-                let prob = (((scores[p] - max) as f64) * inv) as f32;
+                let prob = (((scores[p] - max) as f64).exp() * inv) as f32;
                 for d in 0..head_dim {
                     out[(head * q_seq + i) * head_dim + d] += prob * vv[v_base + d];
                 }
@@ -1285,7 +1285,7 @@ fn paged_attention_item(
                 let physical = table[logical] as usize;
                 let within = p % block_size;
                 let base = ((physical * block_size + within) * heads + head) * head_dim;
-                let prob = (((scores[p] - max) as f64) * inv) as f32;
+                let prob = (((scores[p] - max) as f64).exp() * inv) as f32;
                 for d in 0..head_dim {
                     out[(head * q_seq + i) * head_dim + d] += prob * v_blocks[base + d];
                 }
