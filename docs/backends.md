@@ -166,12 +166,19 @@ stream, runs a closure that only enqueues work, and returns a
 `CudaGraphRunner`.  `graph_matmul` and `graph_adam` preallocate their outputs
 and capture a cuBLAS GEMM / fused Adam kernel respectively.
 
-`GraphLinearTrainer` is the first **Run-level** graph path.  It owns fixed
-buffers for weights, bias, input, target, forward/intermediate tensors,
-gradients and Adam state, then captures forward (cuBLAS + bias), MSE, backward
-(cuBLAS + reduction) and in-place Adam.  The step counter is a device scalar
-advanced by a kernel inside the graph, so replay performs a complete training
-step without host arguments.
+The **Static Step API** generalizes run-level graphs:
+
+- `CudaStaticStep` declares fixed buffers and enqueues one in-place step.
+- `StaticBuilder` allocates the buffers (`Tensor<CudaBackend>`, device scalars).
+- `CudaStaticContext` provides allocation-free in-place primitives: linear,
+  grad_w, MSE, grad reductions, Adam, step bump, host input/output.
+- `StaticRun` owns the buffers, captures the step once and replays it with a
+  new input.
+
+`LinearMseAdamStep` (Linear + MSE + Adam) and `LinearForwardStep` are included.
+The step counter is a device scalar advanced by a kernel inside the graph, so
+replay performs a complete step without host arguments.  `GraphLinearTrainer`
+remains as a convenience wrapper-style API for the Linear+MSE case.
 
 CUDA Graph requires preallocated buffers: allocation and synchronization inside
 the closure are not capturable.  Event tracking is disabled on the backend
@@ -197,7 +204,8 @@ Tests skip when no CUDA driver/runtime is available.
 ### Next
 
 - Full-model f16/bf16 dtype (all ops) and master-weight optimizer state.
-- Generalize Run-level graph capture (static-step trait + in-place decoder state).
+- Static decoder step with device-resident KV / position for graph replay.
+- Backend-agnostic Static Step trait (currently CUDA-specific).
 - Further paged-attention/flash-decode tuning and TTFT/tokens/s benchmarks.
 - Run-level CUDA Graph capture with a memory pool.
 - TTFT/tokens/s and larger transformer benchmarks.

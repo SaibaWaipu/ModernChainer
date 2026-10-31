@@ -33,7 +33,7 @@ class MLP(chainer.Chain):
         return self.l2(F.relu(self.l1(x)))
 ```
 
-## Status (v0.6.0)
+## Status (v0.7.0)
 
 | Area | Status |
 |---|---|
@@ -45,7 +45,7 @@ class MLP(chainer.Chain):
 | Continuous batching | Working: `RequestTable` / `BatchPlan` (logical batching) |
 | Speculative decoding | Working: greedy fork/verify/commit reference |
 | CUDA backend | Working: NVRTC + cuBLAS/cuBLASLt, F32/TF32/F16/BF16 compute types, AMP, memory pool, CUDA Graph, wide paged attention |
-| Run-level CUDA Graph | Working: `GraphLinearTrainer` with fixed buffers and in-place Adam (Linear+MSE) |
+| Static Step API / Run-level CUDA Graph | Working: `CudaStaticStep` + `StaticRun` fixed-buffer execution; includes `LinearMseAdamStep` and `LinearForwardStep` |
 | Python bindings | Core subset: `Tensor`, `Variable`, `F.*`, `L.Linear`, `SGD`/`Adam`, `Chain` |
 | Serialization | Native `.mcn`; Chainer `.npz` reader planned |
 | Trainer / Updater / Extensions | Planned |
@@ -67,6 +67,7 @@ cargo run --release --example speculative
 cargo run --release --example cuda_matmul     # requires a CUDA driver and NVRTC/cuBLAS
 cargo run --release --example cuda_bench
 cargo run --release --example graph_trainer
+cargo run --release --example static_step
 cargo run --release --example vulkan_matmul   # requires a Vulkan loader/ICD
 ```
 
@@ -112,10 +113,11 @@ scaler.step(&mut optimizer, &params)?;
 scale growth/backoff. Autocast lowers GEMM-heavy ops only; LayerNorm, Softmax
 and reductions remain f32.
 
-`GraphLinearTrainer` places parameters, intermediates and Adam state in fixed
-device buffers and captures a complete Linear + MSE + Adam step as a CUDA
-Graph. The step counter is device-resident, so the same graph can be replayed
-repeatedly.
+`CudaStaticStep` is a reusable trait: a model declares fixed buffers and
+enqueues one in-place step. `StaticRun` owns the buffers, captures the CUDA
+Graph, and replays it with a new input. `LinearMseAdamStep` (Linear + MSE +
+Adam) and `LinearForwardStep` are included. The step counter lives on the
+device, so replay performs a complete step without host arguments.
 
 ## Quick start — Python
 
@@ -272,6 +274,7 @@ checked in so improvements are measurable. CUDA (RTX 2070 SUPER) versus PyTorch 
 ```bash
 cargo run --release --example cuda_bench
 cargo run --release --example graph_trainer
+cargo run --release --example static_step
 # PyTorch comparison (CUDA-enabled torch venv)
 CUDA_VISIBLE_DEVICES=<RTX 2070S UUID> \
   /tmp/opencode/torch-venv/bin/python scripts/bench_cuda_vs_pytorch.py
@@ -318,9 +321,9 @@ lavapipe) and skip cleanly when no Vulkan loader is present.
 - CUDA native coverage is elementwise, reductions, matmul, linear, Adam,
   softmax cross entropy, embedding, layer_norm, attention and paged attention.
   Only generic `sum_to` (non-bias) falls back to CPU.
-- CUDA Graph requires preallocated buffers (`graph_matmul` / `graph_adam` /
-  `GraphLinearTrainer`). Arbitrary `Run` / stateful decoder capture still needs
-  a general static-step and in-place state API.
+- CUDA Graph / Static Step requires fixed buffers. `CudaStaticStep` is
+  CUDA-specific; arbitrary `Run` / stateful decoder capture still needs a
+  device-resident KV/position static decoder step.
 - F16/BF16 are supported as compute types and via autocast AMP. Autocast lowers
   GEMM-heavy ops; LayerNorm/Softmax/reductions stay f32. A full-model
   f16/bf16 dtype path is not implemented.
