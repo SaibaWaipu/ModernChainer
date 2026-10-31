@@ -177,6 +177,32 @@ Matmul is near parity; linear and Adam show the benefit of fused epilogues and
 fewer launches. Graph replay helps both, but our Adam graph has one kernel
 versus PyTorch's optimizer step machinery.
 
+## Unified Python device benchmark
+
+`scripts/bench_vs_pytorch.py` now runs the core microbenchmarks through the
+Python API on CPU, CUDA and Vulkan, with PyTorch on the matching device. The
+same RTX 2070 SUPER was used for CUDA and `vulkan:1`.
+
+```bash
+PYTHONPATH="$PWD/python" BENCH_DEVICES=cpu,cuda,vulkan:1 \
+  /tmp/opencode/torch-venv/bin/python scripts/bench_vs_pytorch.py
+```
+
+Milliseconds, `ours / torch`; PyTorch 2.11.0+cu128, 5 warmups, median of 30
+(10 for Adam). CPU uses the PyTorch CPU path.
+
+| Device | matmul 512³ | add 4M | linear fwd+bwd | Adam 1024² | geomean |
+|---|---:|---:|---:|---:|---:|
+| CPU | 0.49 / 0.43 | 2.19 / 8.00 | 0.58 / 0.32 | 3.56 / 4.94 | 1.22 / 1.53 (1.25×) |
+| CUDA | 0.074 / 0.070 | 0.185 / 0.142 | 0.207 / 0.198 | 0.457 / 0.526 | 0.190 / 0.179 (0.94×) |
+| Vulkan:1 | 1.00 / 0.071 | 0.543 / 0.142 | 3.48 / 0.207 | 11.0 / 0.573 | 2.14 / 0.186 (0.09×) |
+
+Python/CUDA is close to PyTorch for this suite; Adam is slightly ahead.
+Python/Vulkan is correct but the 16×16 tiled matmul and CPU-fallback reductions
+make it far slower. Pipeline caching removed repeated WGSL compilation but did
+not close the kernel gap. Native reductions and a faster matmul are the next
+Vulkan milestone.
+
 ## Reproducing the Vulkan numbers
 
 Vulkan correctness is covered by `cargo test -p modern-chainer-vulkan`. The

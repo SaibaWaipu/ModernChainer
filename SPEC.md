@@ -1,6 +1,6 @@
 # Modern Chainer — Specification
 
-Status: v0.11.0 implementation. This document records the product intent, the
+Status: v0.12.0 implementation. This document records the product intent, the
 implemented surface, and the deliberately deferred work.
 
 ## 1. Vision
@@ -61,7 +61,9 @@ Implemented:
 - Data: `Dataset`, `VecDataset`, `BatchIterator`
 - Serialization: native `.mcn` save/load
 - Backends: `CpuBackend`, `VulkanBackend`, `CudaBackend` (NVRTC + cuBLAS),
-  `cuda::probe`, `vulkan::probe`
+  `cuda::probe`, `vulkan::probe`, Vulkan adapter selection
+- Python device execution: `cpu`, `cuda[:n]`, `vulkan[:n]`, shared backend
+  context per device, `synchronize`, unified Python-vs-PyTorch benchmarks
 - State by Run: `Run`, `Step`, `RunContext`, `RunMode`, `StateStore`,
   `StateSpec`, `StateId`, `StateKey`, `StatePlan`, `Transaction`
 - Dense LLM state: `Decoder`, `DecoderConfig`, `KvCacheHandles`,

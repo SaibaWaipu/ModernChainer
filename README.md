@@ -26,7 +26,7 @@ class MLP(chainer.Chain):
         return self.l2(F.relu(self.l1(x)))
 ```
 
-## ステータス（v0.11.0）
+## ステータス（v0.12.0）
 
 | 領域 | 状態 |
 |---|---|
@@ -40,7 +40,7 @@ class MLP(chainer.Chain):
 | CUDA バックエンド | 動作: NVRTC + cuBLAS / cuBLASLt、F32/TF32/F16/BF16 compute type、AMP、メモリプール、CUDA Graph、wide paged attention |
 | Static Step API / Run-level CUDA Graph | 動作: `CudaStaticStep` + `StaticRun`。`LinearMseAdamStep` / `LinearForwardStep` / `StaticDecoderStep` を同梱 |
 | Batched static prefill / decode | 動作: `BatchedStaticDecoder`。可変長 prompt、per-sequence position、F16/BF16 KV、native low-precision decode attention、flash prefill、CUDA Graph replay |
-| Python バインディング | コアサブセット: `Tensor`、`Variable`、`F.*`、`L.Linear`、`SGD`/`Adam`、`Chain` |
+| Python バインディング | CPU / CUDA / Vulkan: `Tensor`、`Variable`、`F.*`、`L.Linear(device=...)`、`SGD`/`Adam`、`Chain`。`Tensor.to(device)`、`chainer.synchronize()` |
 | シリアライズ | ネイティブ `.mcn`、Chainer `.npz` は計画中 |
 | Trainer / Updater / Extensions | 計画中 |
 | ドキュメント | README（日本語）、SPEC / docs（英語） |
@@ -62,6 +62,24 @@ cargo run --release --example static_step
 cargo run --release --example static_decoder
 cargo run --release --example static_batched_decoder
 cargo run --release --example vulkan_matmul   # Vulkan ローダ/ICD が必要
+```
+
+Python から device を選択:
+
+```python
+import chainer
+import chainer.functions as F
+import chainer.links as L
+import chainer.optimizers as O
+
+print(chainer.vulkan_devices())          # ['... GTX 1080 ...', '... RTX 2070 SUPER ...', ...]
+layer = L.Linear(4, 2, device="vulkan:1")
+x = chainer.Variable(chainer.Tensor.from_numpy(x_np, device="vulkan:1"))
+loss = F.sum(layer(x))
+loss.backward()
+optimizer = O.Adam(0.001)
+optimizer.setup(layer.parameters())
+optimizer.update()
 ```
 
 ```rust
@@ -277,6 +295,25 @@ cuBLASLt は bias、および GELU を GEMM エピローグで融合します。
 - [`scripts/bench_vs_pytorch.py`](scripts/bench_vs_pytorch.py)
 - [`docs/benchmarks.md`](docs/benchmarks.md)（英語）
 
+### Python unified device benchmark
+
+CUDA / Vulkan を含めて Python から PyTorch と比較できます。Vulkan は adapter index を指定でき、`vulkan:1` は RTX 2070 SUPER です。
+
+```bash
+PYTHONPATH="$PWD/python" BENCH_DEVICES=cpu,cuda,vulkan:1 \
+  /tmp/opencode/torch-venv/bin/python scripts/bench_vs_pytorch.py
+```
+
+RTX 2070 SUPER、PyTorch 2.11.0+cu128、`matmul 512³` / `add 4M` / `linear fwd+bwd 128×784×256` / `Adam 1024²`。単位 ms、`ours / torch`。
+
+| Device | matmul | add 4M | linear fwd+bwd | Adam | geomean |
+|---|---:|---:|---:|---:|---:|
+| CPU | 0.49 / 0.43 | 2.19 / 8.00 | 0.58 / 0.32 | 3.56 / 4.94 | 1.22 / 1.53 (1.25×) |
+| CUDA | 0.074 / 0.070 | 0.185 / 0.142 | 0.207 / 0.198 | 0.457 / 0.526 | 0.190 / 0.179 (0.94×) |
+| Vulkan:1 | 1.00 / 0.071 | 0.543 / 0.142 | 3.48 / 0.207 | 11.0 / 0.573 | 2.14 / 0.186 (0.09×) |
+
+Python/CUDA はほぼ互角、Python/Vulkan は正しく動くがまだ大幅に遅いです。Vulkan の tiled matmul と CPU フォールバック reduction が主因で、次は native reduction と matmul 最適化です。
+
 ## ビルドとテスト
 
 ```bash
@@ -313,7 +350,8 @@ Vulkan テストは利用可能なアダプタ（NVIDIA / AMD / Intel / Mesa lav
 - static decoder の max_seq は固定バッファ長で制限されます。
 - F16/BF16 は **compute type** と **autocast AMP** に対応しています。autocast は GEMM 系（linear / matmul）を低精度化し、LayerNorm / Softmax / reduction は f32 のままです。モデル全体を f16/bf16 dtype にする経路は未対応です。
 - wide paged attention は block-per-query の CUDA カーネルです。
-- Python の CUDA テンソル API、`Run` / `PagedBatchRunner` / `Trainer` は未公開（Rust ファースト）。
+- Python から CUDA / Vulkan の Tensor / Variable / Linear / SGD / Adam / F.* を実行できます。`Run` / `PagedBatchRunner` / `BatchedStaticDecoder` / `Trainer` は未公開（Rust ファースト）。
+- Vulkan の reduction / softmax CE はまだ CPU フォールバックで、Python でもそのコストが乗ります。CUDA と比べた性能は現状 0.09× 程度です。
 - Paged COW はテンソル単位。ブロック単位の in-place COW と CUDA paged-attention カーネルは今後。
 - リリースはまだ行っていません。
 

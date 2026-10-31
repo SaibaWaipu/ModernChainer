@@ -47,7 +47,9 @@ profiles.
 The Vulkan backend is implemented with `wgpu` configured for the Vulkan backend.
 This gives a portable, memory-safe Vulkan path (NVIDIA, AMD, Intel, Mesa
 lavapipe) without hand-written `unsafe` Vulkan plumbing. WGSL shaders are
-embedded and translated to SPIR-V by naga at pipeline creation.
+embedded and translated to SPIR-V by naga at pipeline creation. Pipelines are
+cached per context, and adapters can be selected by index with
+`VulkanBackend::with_adapter` / Python `vulkan:N`.
 
 ### Implemented kernels
 
@@ -74,6 +76,24 @@ traffic and CPU-side reduction time in those ops.
   submits. There is no async pipelining yet.
 - Readback uses a staging buffer, `map_async`, and `PollType::wait_indefinitely`.
 - Buffers are `STORAGE | COPY_SRC | COPY_DST`; sizes are rounded to 4 bytes.
+
+### Python
+
+The Python API selects Vulkan devices with `vulkan:N`:
+
+```python
+import chainer
+print(chainer.vulkan_devices())
+x = chainer.Tensor.from_numpy(array, device="vulkan:1")
+layer = chainer.links.Linear(16, 8, device="vulkan:1")
+```
+
+`chainer.synchronize("vulkan:1")` waits for queued work. Tensors on the same
+device share one backend context. The unified benchmark
+(`scripts/bench_vs_pytorch.py`) reports Vulkan against PyTorch CUDA; on this
+machine `vulkan:1` is the RTX 2070 SUPER. The current suite is about 0.09×
+PyTorch because matmul is a simple 16×16 tile and reductions still use the CPU
+fallback.
 
 ### Verification
 

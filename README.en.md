@@ -33,7 +33,7 @@ class MLP(chainer.Chain):
         return self.l2(F.relu(self.l1(x)))
 ```
 
-## Status (v0.11.0)
+## Status (v0.12.0)
 
 | Area | Status |
 |---|---|
@@ -47,7 +47,7 @@ class MLP(chainer.Chain):
 | CUDA backend | Working: NVRTC + cuBLAS/cuBLASLt, F32/TF32/F16/BF16 compute types, AMP, memory pool, CUDA Graph, wide paged attention |
 | Static Step API / Run-level CUDA Graph | Working: `CudaStaticStep` + `StaticRun`; includes `LinearMseAdamStep`, `LinearForwardStep` and `StaticDecoderStep` |
 | Batched static prefill / decode | Working: `BatchedStaticDecoder`; variable-length prompts, per-sequence positions, F16/BF16 KV, native low-precision decode attention, flash prefill, CUDA Graph replay |
-| Python bindings | Core subset: `Tensor`, `Variable`, `F.*`, `L.Linear`, `SGD`/`Adam`, `Chain` |
+| Python bindings | CPU / CUDA / Vulkan: `Tensor`, `Variable`, `F.*`, `L.Linear(device=...)`, `SGD`/`Adam`, `Chain`; `Tensor.to(device)`, `chainer.synchronize()` |
 | Serialization | Native `.mcn`; Chainer `.npz` reader planned |
 | Trainer / Updater / Extensions | Planned |
 | Documentation | README (Japanese default + English), `SPEC.md` / `docs/` (English) |
@@ -72,6 +72,24 @@ cargo run --release --example static_step
 cargo run --release --example static_decoder
 cargo run --release --example static_batched_decoder
 cargo run --release --example vulkan_matmul   # requires a Vulkan loader/ICD
+```
+
+Select a device from Python:
+
+```python
+import chainer
+import chainer.functions as F
+import chainer.links as L
+import chainer.optimizers as O
+
+print(chainer.vulkan_devices())          # adapter names in index order
+layer = L.Linear(4, 2, device="vulkan:1")
+x = chainer.Variable(chainer.Tensor.from_numpy(x_np, device="vulkan:1"))
+loss = F.sum(layer(x))
+loss.backward()
+optimizer = O.Adam(0.001)
+optimizer.setup(layer.parameters())
+optimizer.update()
 ```
 
 ```rust
@@ -332,6 +350,29 @@ matmul/Adam updates; the PyTorch Adam graph is measured with
 
 - [`scripts/bench_vs_pytorch.py`](scripts/bench_vs_pytorch.py)
 - [`docs/benchmarks.md`](docs/benchmarks.md)
+
+### Unified Python device benchmark
+
+Python can compare CPU, CUDA and Vulkan against PyTorch. Vulkan accepts an
+adapter index; `vulkan:1` is the RTX 2070 SUPER on this machine.
+
+```bash
+PYTHONPATH="$PWD/python" BENCH_DEVICES=cpu,cuda,vulkan:1 \
+  /tmp/opencode/torch-venv/bin/python scripts/bench_vs_pytorch.py
+```
+
+RTX 2070 SUPER, PyTorch 2.11.0+cu128, `matmul 512³` / `add 4M` /
+`linear fwd+bwd 128×784×256` / `Adam 1024²`. Milliseconds, `ours / torch`.
+
+| Device | matmul | add 4M | linear fwd+bwd | Adam | geomean |
+|---|---:|---:|---:|---:|---:|
+| CPU | 0.49 / 0.43 | 2.19 / 8.00 | 0.58 / 0.32 | 3.56 / 4.94 | 1.22 / 1.53 (1.25×) |
+| CUDA | 0.074 / 0.070 | 0.185 / 0.142 | 0.207 / 0.198 | 0.457 / 0.526 | 0.190 / 0.179 (0.94×) |
+| Vulkan:1 | 1.00 / 0.071 | 0.543 / 0.142 | 3.48 / 0.207 | 11.0 / 0.573 | 2.14 / 0.186 (0.09×) |
+
+Python/CUDA is close to parity. Python/Vulkan is correct but still far slower;
+the tiled matmul and CPU-fallback reductions dominate. Native reductions and
+matmul optimization are next.
 
 ## Build and test
 

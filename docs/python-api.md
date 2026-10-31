@@ -19,11 +19,12 @@ VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release
 
 | Member | Description |
 |---|---|
-| `Tensor.zeros(shape)` | f32 zeros |
-| `Tensor.from_list(flat, shape)` | build from a flat float list |
-| `Tensor.from_numpy(array)` | preserves int64/int32/uint8, otherwise casts f32 |
+| `Tensor.zeros(shape, device="cpu")` | f32 zeros |
+| `Tensor.from_list(flat, shape, device="cpu")` | build from a flat float list |
+| `Tensor.from_numpy(array, device="cpu")` | preserves int64/int32/uint8 on CPU; casts f32 on GPU |
 | `Tensor.numpy()` | NumPy copy (requires NumPy) |
-| `.shape`, `.dtype`, `.ndim`, `.numel()` | metadata |
+| `Tensor.to(device)` | copy to `cpu`, `cuda[:n]` or `vulkan[:n]` |
+| `.shape`, `.dtype`, `.device`, `.ndim`, `.numel()` | metadata |
 | `.tolist()` | flat Python floats |
 
 ### `chainer.Variable`
@@ -35,7 +36,8 @@ VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release
 | `.data` | underlying `Tensor` |
 | `.array` | NumPy view of the data |
 | `.grad` | `Tensor` or `None` |
-| `.shape`, `.requires_grad`, `.grad_fn` | metadata |
+| `.shape`, `.device`, `.requires_grad`, `.grad_fn` | metadata |
+| `.to(device)` | copy data to another device (new variable) |
 | `.backward()` | reverse-mode traversal |
 | `.cleargrad()` | drop the gradient |
 | `.unchain_backward()` | truncate the graph |
@@ -50,8 +52,23 @@ Broadcasting is supported for binary elementwise ops and for
 
 ### `chainer.links` (`L`)
 
-`Linear(in_features, out_features, seed=0)` with `W`, `b`, `parameters()`,
-`cleargrads()` and `__call__`.
+`Linear(in_features, out_features, seed=0, device="cpu")` with `W`, `b`,
+`parameters()`, `cleargrads()` and `__call__`. The layer and its input must be
+on the same device.
+
+### Devices
+
+```python
+chainer.cuda_available()      # CUDA driver + NVRTC/cuBLAS available
+chainer.vulkan_available()    # at least one Vulkan adapter
+chainer.vulkan_devices()      # adapter names, in vulkan:0, vulkan:1 ... order
+chainer.synchronize(device)   # wait for queued CUDA/Vulkan work
+```
+
+Device strings are `cpu`, `cuda`, `cuda:N`, `vulkan`, `vulkan:N`. Vulkan adapter
+selection uses the order returned by `vulkan_devices()`. All tensors on the
+same device share one backend context, so operations can mix tensors created
+independently.
 
 ### `chainer.optimizers` (`O`)
 
@@ -87,8 +104,8 @@ optimizer = O.Adam(0.001)
 optimizer.setup(model.parameters())
 
 for x_np, t_np in batches:
-    x = chainer.Variable(chainer.Tensor.from_numpy(x_np))
-    t = chainer.Variable.constant(chainer.Tensor.from_numpy(t_np))
+    x = chainer.Variable(chainer.Tensor.from_numpy(x_np, device="cuda"))
+    t = chainer.Variable.constant(chainer.Tensor.from_numpy(t_np, device="cuda"))
     loss = F.softmax_cross_entropy(model(x), t)
     optimizer.zero_grad()
     loss.backward()
@@ -104,8 +121,11 @@ for x_np, t_np in batches:
 - **No `FunctionNode` subclassing.** Custom differentiable ops are Rust `Op`
   implementations.
 - **No `.npz` serialization yet.** Use the Rust `modern-chainer-serial` API.
-- **CPU execution only in Python.** The Rust API exposes the Vulkan backend;
-  a Python device selector is planned.
+- **Vulkan performance is not yet competitive.** Device execution works from
+  Python, but reductions and softmax cross entropy still round-trip through
+  the CPU, and the tiled matmul is much slower than cuBLAS.
+- **LLM/static APIs are Rust-only.** `Run`, `PagedBatchRunner` and
+  `BatchedStaticDecoder` are not exposed to Python yet.
 - **No State-by-Run API yet.** `Run`, `StateStore`, the dense KV decoder and
   fork/rollback are available from Rust (`modern_chainer::run` /
   `modern_chainer::llm`). A Python `Run` wrapper is the v0.6 milestone.
@@ -115,5 +135,7 @@ for x_np, t_np in batches:
 ## Testing
 
 `python/tests/test_basic.py` covers import/version, Linear forward/backward,
-SGD updates, `Chain`, and NumPy round-trips. The example
-`python/examples/train_mlp.py` trains a synthetic three-class classifier.
+SGD updates, `Chain`, and NumPy round-trips. `python/tests/test_devices.py`
+runs matmul, Linear backward and Adam on every available CPU/CUDA/Vulkan
+device. The example `python/examples/train_mlp.py` trains a synthetic
+three-class classifier.
