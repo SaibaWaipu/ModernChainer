@@ -62,12 +62,12 @@ Remaining: block-level in-place COW, wider kernels, CUDA.
   `CudaStaticContext` / `StaticRun`), Linear+MSE+Adam, Linear forward,
   `StaticDecoderStep`, and `BatchedStaticDecoder` with captured batched
   prefill/decode over a shared KV cache.
-- Done: per-sequence positions, F16/BF16 KV caches, cuBLAS strided-batched
-  prefill/decode attention, last-token-only LM head, and TTFT/tokens/s
-  benchmarks against PyTorch eager.
-- Next: variable-length / continuous static batching, native low-precision
-  attention, fused flash-attention prefill, backend-agnostic Static Step trait,
-  full-model f16/bf16 dtype.
+- Done: per-sequence positions, F16/BF16 KV caches, variable-length static
+  prefill, native low-precision decode attention, fused flash-attention prefill,
+  last-token-only LM head, and TTFT/tokens/s benchmarks against PyTorch eager.
+- Next: continuous static batching/request admission, faster long-context
+  low-precision decode, larger flash-attention head dimensions,
+  backend-agnostic Static Step trait, full-model f16/bf16 dtype.
 
 ## v0.7 — Training-By-Run
 

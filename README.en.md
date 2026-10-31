@@ -33,7 +33,7 @@ class MLP(chainer.Chain):
         return self.l2(F.relu(self.l1(x)))
 ```
 
-## Status (v0.10.0)
+## Status (v0.11.0)
 
 | Area | Status |
 |---|---|
@@ -46,7 +46,7 @@ class MLP(chainer.Chain):
 | Speculative decoding | Working: greedy fork/verify/commit reference |
 | CUDA backend | Working: NVRTC + cuBLAS/cuBLASLt, F32/TF32/F16/BF16 compute types, AMP, memory pool, CUDA Graph, wide paged attention |
 | Static Step API / Run-level CUDA Graph | Working: `CudaStaticStep` + `StaticRun`; includes `LinearMseAdamStep`, `LinearForwardStep` and `StaticDecoderStep` |
-| Batched static prefill / decode | Working: `BatchedStaticDecoder`; per-sequence positions, F16/BF16 KV, cuBLAS strided-batched attention, CUDA Graph replay |
+| Batched static prefill / decode | Working: `BatchedStaticDecoder`; variable-length prompts, per-sequence positions, F16/BF16 KV, native low-precision decode attention, flash prefill, CUDA Graph replay |
 | Python bindings | Core subset: `Tensor`, `Variable`, `F.*`, `L.Linear`, `SGD`/`Adam`, `Chain` |
 | Serialization | Native `.mcn`; Chainer `.npz` reader planned |
 | Trainer / Updater / Extensions | Planned |
@@ -124,12 +124,14 @@ decode with device-resident KV cache and position). Counters live on the
 device, so the same graph replays without host arguments.
 
 `BatchedStaticDecoder` captures fixed-shape batched prefill and decode as two
-CUDA Graphs over one shared KV cache. Prefill processes `[batch, prefill_len]`
-with cuBLAS strided-batched GEMM and causal softmax, then applies the LM head to
-the last token only. Decode processes one token per batch element with
-per-sequence positions and advances each position inside the graph.
-`KV_DTYPE=f16` or `KV_DTYPE=bf16` halves the KV cache. TTFT and tok/s are measured by
-`examples/static_batched_decoder.rs`.
+CUDA Graphs over one shared KV cache. `prefill_batch(&[&[u32]])` accepts
+variable-length prompts, pads tokens, sets per-sequence positions, and applies
+the LM head only to each real last token. Prefill attention uses a fused flash
+kernel for head_dim ≤ 128 (reading F32/F16/BF16 directly) or cuBLAS
+strided-batched GEMM otherwise. Decode processes one token per batch element
+with per-sequence positions and advances each position inside the graph.
+`KV_DTYPE=f16` / `bf16` decode uses native low-precision attention. TTFT and
+tok/s are measured by `examples/static_batched_decoder.rs`.
 
 ## Quick start — Python
 
@@ -285,21 +287,25 @@ checked in so improvements are measurable. CUDA (RTX 2070 SUPER) versus PyTorch 
 
 Batched static decoder (RTX 2070 SUPER, F32, B=8, decode=32, random weights).
 TTFT is the median batched prefill; decode includes a host loop that copies
-logits to CPU and runs argmax each step.
+logits to CPU and runs argmax each step. GPU clocks vary, so treat these as
+representative.
 
 | Metric | Modern Chainer | PyTorch 2.11 eager | Ratio |
 |---|---:|---:|---:|
-| TTFT (prefill=16) | 0.26 ms | 1.45 ms | 5.5× |
-| prefill (prefill=16) | 487k tok/s | 88k tok/s | 5.5× |
-| decode (context 16→48) | 40.9k tok/s | 6.3k tok/s | 6.5× |
-| TTFT (prefill=512) | 3.04 ms | 5.46 ms | 1.8× |
-| prefill (prefill=512) | 1.35M tok/s | 750k tok/s | 1.8× |
-| decode (context 512→544) | 36.2k tok/s | 6.9k tok/s | 5.3× |
+| TTFT (prefill=16) | 0.26 ms | 1.45–1.58 ms | 5.5× |
+| prefill (prefill=16) | 488k tok/s | 81k–88k tok/s | 5.5× |
+| decode (context 16→48) | 35k–41k tok/s | 4.0k–6.7k tok/s | 5–10× |
+| TTFT (prefill=512) | 7.6 ms | 5.20 ms | 0.69× |
+| prefill (prefill=512) | 540k tok/s | 787k tok/s | 0.69× |
+| decode (context 512→544) | 35.5k tok/s | 6.9k tok/s | 5.1× |
 
-Prefill uses cuBLAS strided-batched GEMM plus causal softmax; decode uses
-batched GEMM attention. KV cache storage is F32 / F16 / BF16; for B=8,
-max_seq=560, 4 layers that is 8 / 4 / 4 MiB. F16/BF16 decode upcasts to an F32
-workspace.
+Variable-length prompts (`VARIABLE=1`, prefill capacity 512) keep TTFT around
+7.6 ms and real-token prefill throughput around 420k tok/s. Prefill uses flash
+attention for head_dim ≤ 128 (reading F32/F16/BF16 directly) or cuBLAS
+strided-batched GEMM; decode uses per-sequence-position GEMM or native
+low-precision attention. KV cache storage is F32 / F16 / BF16; B=8,
+max_seq=560, 4 layers uses 8 / 4 / 4 MiB. F16/BF16 decode attention reads the
+cache directly without upcasting.
 
 ```bash
 cargo run --release --example cuda_bench
@@ -308,6 +314,8 @@ cargo run --release --example static_step
 cargo run --release --example static_decoder
 cargo run --release --example static_batched_decoder
 PREFILL_LEN=512 DECODE_TOKENS=32 KV_DTYPE=f16 \
+  cargo run --release --example static_batched_decoder
+VARIABLE=1 PREFILL_LEN=512 DECODE_TOKENS=32 \
   cargo run --release --example static_batched_decoder
 # PyTorch comparison (CUDA-enabled torch venv)
 CUDA_VISIBLE_DEVICES=<RTX 2070S UUID> \
@@ -357,14 +365,14 @@ lavapipe) and skip cleanly when no Vulkan loader is present.
 - CUDA native coverage is elementwise, reductions, matmul, linear, Adam,
   softmax cross entropy, embedding, layer_norm, attention and paged attention.
   Only generic `sum_to` (non-bias) falls back to CPU.
-- Batched static prefill/decode uses fixed batch and fixed prompt length.
-  Per-sequence positions and `set_positions` are supported, but variable-length
-  prompt batching, continuous admission, and mid-sequence request joins are not.
-- Decode attention runs over the full `max_seq` GEMM, including zero regions
-  beyond each sequence's current position, so large `max_seq` with short
-  sequences is inefficient.
-- F16/BF16 KV is upcast to an F32 workspace during decode; native low-precision
-  attention kernels are future work.
+- Batch size and `prefill_len` capacity are fixed. Variable-length prompts fit
+  within the capacity, but continuous admission, mid-sequence request joins, and
+  prompts larger than the capacity are not supported.
+- F32 decode attention runs over the full `max_seq` GEMM, including zero regions
+  beyond each sequence position, so large `max_seq` with short sequences is
+  inefficient.
+- Native low-precision decode attention supports head_dim ≤ 256; flash prefill
+  supports head_dim ≤ 128. Larger heads fall back to an F32 upcast path.
 - `CudaStaticStep` is CUDA-specific; a generic static step for arbitrary `Run`
   is still future work.
 - The static decoder is bounded by its fixed `max_seq` buffer.

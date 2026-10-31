@@ -126,45 +126,52 @@ Fixed-shape batched decoder, F32, B=8, 32 decoded tokens, random weights,
 4 layers / d_model 64 / 4 heads, RTX 2070 SUPER. PyTorch is 2.11.0+cu128 eager
 with explicit matmul/softmax attention. Both sides copy `[batch, vocab]` logits
 to the host and run argmax each decode step, then copy tokens back; decode
-throughput includes that host loop.
+throughput includes that host loop. GPU clocks vary, so ranges are shown.
 
 | Metric | Modern Chainer | PyTorch eager | Ratio |
 |---|---:|---:|---:|
-| TTFT, prefill 16 | 0.26 ms | 1.45 ms | 5.5× |
-| prefill throughput, 16 | 487k tok/s | 88k tok/s | 5.5× |
-| decode, context 16→48 | 40.9k tok/s | 6.3k tok/s | 6.5× |
-| TTFT, prefill 512 | 3.04 ms | 5.46 ms | 1.8× |
-| prefill throughput, 512 | 1.35M tok/s | 750k tok/s | 1.8× |
-| decode, context 512→544 | 36.2k tok/s | 6.9k tok/s | 5.3× |
+| TTFT, prefill 16 | 0.26 ms | 1.45–1.58 ms | 5.5× |
+| prefill throughput, 16 | 488k tok/s | 81k–88k tok/s | 5.5× |
+| decode, context 16→48 | 35k–41k tok/s | 4.0k–6.7k tok/s | 5–10× |
+| TTFT, prefill 512 | 7.6 ms | 5.20 ms | 0.69× |
+| prefill throughput, 512 | 540k tok/s | 787k tok/s | 0.69× |
+| decode, context 512→544 | 35.5k tok/s | 6.9k tok/s | 5.1× |
+
+Variable-length prompt batching (`VARIABLE=1`, lengths descend from the
+capacity) keeps TTFT around 7.6 ms at capacity 512 and reports real-token
+prefill throughput around 420k tok/s.
 
 KV cache element type (B=8, max_seq=560, 4 layers):
 
 | KV dtype | Cache | TTFT, prefill 512 | Decode, context 512→544 |
 |---|---:|---:|---:|
-| F32 | 8 MiB | 3.04 ms | 36.2k tok/s |
-| F16 | 4 MiB | 3.46 ms | 24.8k–33.8k tok/s |
-| BF16 | 4 MiB | 3.08 ms | 26.8k–33.8k tok/s |
+| F32 | 8 MiB | 7.6 ms | 35.5k tok/s |
+| F16 | 4 MiB | 7.6–8.4 ms | ~19k tok/s |
+| BF16 | 4 MiB | 7.6 ms | ~19k tok/s |
 
 Method:
 
 - Modern Chainer: `cargo run --release --example static_batched_decoder`.
-  Env: `BATCH`, `PREFILL_LEN`, `DECODE_TOKENS`, `MAX_SEQ`, `KV_DTYPE`.
+  Env: `BATCH`, `PREFILL_LEN`, `DECODE_TOKENS`, `MAX_SEQ`, `KV_DTYPE`,
+  `VARIABLE`, `FLASH_PREFILL`, `D_MODEL`, `N_HEADS`, `D_FF`.
   Prefill is one captured graph replay: row-batched linear/LayerNorm/MLP,
-  cuBLAS strided-batched QK and PV, warp causal softmax, then LM head only on
-  the last token per batch. Decode is one captured graph replay per step:
-  per-sequence append/attention with batched GEMMs and a per-sequence softmax
-  mask.
-- PyTorch: `scripts/bench_static_batched_vs_pytorch.py`, same env variables,
-  eager `F.linear`/`F.layer_norm`/`F.gelu`, explicit KV cache and Python
-  per-step dispatch.
+  fused flash attention (head_dim ≤ 128) or cuBLAS strided-batched attention,
+  then LM head only on each real last token. Decode is one captured graph
+  replay per step: per-sequence positions, batched GEMM attention for F32, or
+  native low-precision split-K attention for F16/BF16.
+- PyTorch: `scripts/bench_static_batched_vs_pytorch.py`, same shape, eager
+  `F.linear`/`F.layer_norm`/`F.gelu`, explicit KV cache and Python per-step
+  dispatch.
 - The PyTorch side is eager, not `torch.compile` or a captured graph. The
   comparison measures graph replay plus the kernel layout for this shape, not a
   like-for-like compiler comparison.
 
-Prefill is GEMM-bound rather than the earlier scalar kernel. Decode still scans
-the full `max_seq` GEMM for every step, and F16/BF16 KV is upcast to F32 before
-attention. Native low-precision attention for decode and fused flash-attention
-prefill are the next targets.
+At prefill 512 the workload is dominated by the linear/MLP GEMMs; flash
+attention keeps low-precision KV native but does not make the 64-wide model
+faster than the GEMM path. At larger head dimensions the fused kernel is the
+intended path. F32 decode remains GEMM-based and scans `max_seq`; native
+low-precision decode avoids the upcast but is currently slower at long context
+than the F32 upcast path.
 
 Matmul is near parity; linear and Adam show the benefit of fused epilogues and
 fewer launches. Graph replay helps both, but our Adam graph has one kernel

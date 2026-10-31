@@ -1,6 +1,6 @@
 # Modern Chainer — Specification
 
-Status: v0.10.0 implementation. This document records the product intent, the
+Status: v0.11.0 implementation. This document records the product intent, the
 implemented surface, and the deliberately deferred work.
 
 ## 1. Vision
@@ -221,20 +221,21 @@ sampling.
   `LinearForwardStep`, `StaticDecoderStep` and `BatchedStaticDecoder` cover
   training, forward, one-token decode and fixed-shape batched prefill/decode
   over fixed buffers with device-resident state.
-- Batched static prefill uses cuBLAS strided-batched QK/PV and a warp causal
-  softmax; the LM head runs on last tokens only. Batched decode uses
-  per-sequence positions and batched GEMM attention. KV storage is F32, F16 or
-  BF16 (F16/BF16 upcast to F32 for attention).
+- Batched static prefill accepts variable-length prompts, uses a fused flash
+  attention kernel (head_dim ≤ 128) or cuBLAS strided-batched QK/PV, and runs
+  the LM head on each real last token only. Batched decode uses per-sequence
+  positions, F32 batched GEMM attention, or native F16/BF16 split-K attention.
+  KV storage is F32, F16 or BF16.
 - Wide paged attention: block-per-query kernels for single and batched decode.
 - Only generic `sum_to` (non-bias) falls back to CPU.
 - Verified against CPU for elementwise, matmul, linear, softmax CE, LLM
   kernels, dense decoder logits, paged attention and paged batched decode; a
   40-step Adam loop runs on an RTX 2070 SUPER.
 
-Deferred: variable-length/continuous static batching, native low-precision
-attention and flash-attention prefill, block-level in-place COW,
-optimizer-state migration, Training-By-Run, Python bindings for Run/static
-APIs.
+Deferred: continuous static batching/request admission, faster native
+low-precision long-context decode, flash attention above head_dim 128,
+block-level in-place COW, optimizer-state migration, Training-By-Run, Python
+bindings for Run/static APIs.
 
 ## 5. Autograd semantics
 
@@ -381,8 +382,8 @@ docs/                      architecture, backends, API, benchmarks, roadmap
   and then generates from the replayed graph.
 - `BatchedStaticDecoder` runs fixed-shape batched prefill and decode over a
   shared KV cache in separate captured graphs; prefill/decode logits match the
-  dense CPU decoder per batch element, including per-sequence positions and
-  F16/BF16 caches.
+  dense CPU decoder per batch element, including variable-length prompts,
+  per-sequence positions, F16/BF16 caches, and wide-head flash attention.
 - Memory-pool reuse and zeroed reuse are tested.
 - `cargo fmt`, `cargo clippy -D warnings`, `cargo test` in CI.
 
