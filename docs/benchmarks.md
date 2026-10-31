@@ -93,9 +93,19 @@ equivalence and speculative equality. `PagedBatchRunner` performs a real batched
 decode step over paged KV, but the CPU reference is not performance-tuned: block
 appends copy storage and the attention kernel is scalar. TTFT, inter-token
 latency, tokens/s and block utilisation benchmarks arrive with the CUDA kernels.
-The CUDA backend currently matches CPU for elementwise, matmul, linear, softmax
-cross entropy and a short Adam training loop; no CUDA throughput numbers are
-claimed yet.
+### CUDA reference (not PyTorch CUDA)
+
+`cargo run --release --example cuda_bench`, RTX 2070 SUPER versus this project's
+CPU backend on the Ryzen 5 5600G:
+
+| Workload | CPU | CUDA | Speedup |
+|---|---:|---:|---:|
+| matmul 512³ | 0.508 ms | 0.052 ms | 9.7× |
+| linear 128×784×256 | 0.171 ms | 0.027 ms | 6.4× |
+| Adam 1M params | 1.292 ms | 0.115 ms | 11.2× |
+
+These compare against our own CPU backend, not PyTorch CUDA. PyTorch-CUDA and
+TTFT/tokens/s benchmarks remain future work.
 
 ## Reproducing the Vulkan numbers
 

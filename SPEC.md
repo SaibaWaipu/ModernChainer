@@ -203,12 +203,14 @@ sampling.
 - Device init via the driver API, typed `CudaStorage` (`f32`/`i64`/`u8`),
   host/device copies.
 - NVRTC compiles elementwise, ReLU/SiLU, sqrt, scale, fill, bias-add,
-  transpose and Adam kernels at runtime for the device's compute capability.
+  transpose, reductions, softmax CE, embedding, layer_norm, attention and
+  paged-attention kernels at runtime for the device's compute capability.
 - cuBLAS handles `matmul`, fused `linear`, and `linear_backward`.
-- Reductions, softmax cross entropy, embedding/layer_norm/attention and paged
-  ops currently fall back to CPU; they stay on the same `Ops` ABI.
-- Verified against CPU for elementwise, matmul, linear, softmax cross entropy
-  and a 40-step Adam training loop on an RTX 2070 SUPER.
+- Native paged KV: `paged_append`, `paged_attention`, `paged_attention_batch`.
+- Only generic `sum_to` (non-bias) falls back to CPU.
+- Verified against CPU for elementwise, matmul, linear, softmax CE, LLM
+  kernels, dense decoder logits, paged attention and paged batched decode; a
+  40-step Adam loop runs on an RTX 2070 SUPER.
 
 Deferred: CUDA reduction/attention/paged-attention kernels, block-level
 in-place COW, optimizer-state migration, Training-By-Run, Python bindings.
@@ -259,8 +261,9 @@ subclassing; custom ops must currently be written in Rust.
 - Native kernels: add/sub/mul/div, sqrt, relu, relu backward, SiLU, scale,
   fill, bias add, transpose, fused Adam.
 - Native cuBLAS path: matmul, linear, linear_backward.
-- CPU fallback: reductions, softmax cross entropy, embedding, layer_norm,
-  attention, concat, last-row and paged operations.
+- Native attention, paged append/attention/batch, reductions, softmax CE,
+  embedding, layer_norm, split/merge heads, concat and last-row.
+- Only generic `sum_to` (non-bias) falls back to CPU.
 - Tested on RTX 2070 SUPER (sm_75) and compiled for the detected compute
   capability; GTX 1080 (sm_61) is supported by the same mechanism.
 - `LD_LIBRARY_PATH` must expose `libnvrtc` / `libcublas` when using pip CUDA
@@ -329,7 +332,8 @@ docs/                      architecture, backends, API, benchmarks, roadmap
 - Speculative decoding equality against target-only greedy generation, including
   target/draft position synchronisation.
 - Generation determinism and sampler range checks.
-- CUDA parity: elementwise, matmul, linear, softmax cross entropy and an Adam
+- CUDA parity: elementwise, matmul, linear, softmax CE, reduction, LLM kernels,
+  dense decoder logits, paged attention, paged batched decode and an Adam
   training loop against CPU.
 - `cargo fmt`, `cargo clippy -D warnings`, `cargo test` in CI.
 

@@ -37,7 +37,7 @@ class MLP(chainer.Chain):
 | Batched decode | 動作: `PagedBatchRunner` + batched paged attention |
 | Continuous batching | 動作: `RequestTable` / `BatchPlan`（論理バッチ） |
 | Speculative decoding | 動作: greedy の fork/verify/commit 参照実装 |
-| CUDA バックエンド | 動作: NVRTC + cuBLAS のコア ops、reduction / attention は CPU フォールバック |
+| CUDA バックエンド | 動作: NVRTC + cuBLAS。elementwise / matmul / linear / Adam / LLM attention / paged attention までネイティブ |
 | Python バインディング | コアサブセット: `Tensor`、`Variable`、`F.*`、`L.Linear`、`SGD`/`Adam`、`Chain` |
 | シリアライズ | ネイティブ `.mcn`、Chainer `.npz` は計画中 |
 | Trainer / Updater / Extensions | 計画中 |
@@ -54,6 +54,7 @@ cargo run --release --example continuous_batching
 cargo run --release --example paged_batching
 cargo run --release --example speculative
 cargo run --release --example cuda_matmul     # CUDA ドライバ + NVRTC/cuBLAS が必要
+cargo run --release --example cuda_bench
 cargo run --release --example vulkan_matmul   # Vulkan ローダ/ICD が必要
 ```
 
@@ -202,7 +203,19 @@ let tokens = speculative_generate(&mut target, &mut draft, prompt, 8, 3)?;
 | Adam step 1024×1024 | 3.38–3.81 ms | 4.02–4.98 ms | 1.19–1.40× |
 | **幾何平均** | **~1.20 ms** | **~1.04 ms** | **~0.87–0.91×** |
 
-Adam は勝利、matmul / elementwise はほぼ互角、Linear backward が課題です。目標だった幾何平均 1.2× は未達ですが、ベンチマークハーネスをリポジトリに含めているので改善を測定できます。Paged / batched decode は CPU 参照実装のため、まだ性能評価の対象外です。CUDA はコア ops の正しさを CPU と比較して検証していますが、CUDA の性能測定はまだ行っていません。
+Adam は勝利、matmul / elementwise はほぼ互角、Linear backward が課題です。目標だった幾何平均 1.2× は未達ですが、ベンチマークハーネスをリポジトリに含めているので改善を測定できます。Paged / batched decode は CPU 参照実装のため、まだ PyTorch との比較対象外です。
+
+CUDA（RTX 2070 SUPER）対 CPU（Ryzen 5 5600G）の参考値:
+
+| 処理 | CPU | CUDA | 倍率 |
+|---|---:|---:|---:|
+| matmul 512³ | 0.508 ms | 0.052 ms | 9.7× |
+| linear 128×784×256 | 0.171 ms | 0.027 ms | 6.4× |
+| Adam 1M params | 1.292 ms | 0.115 ms | 11.2× |
+
+```bash
+cargo run --release --example cuda_bench
+```
 
 - [`scripts/bench_vs_pytorch.py`](scripts/bench_vs_pytorch.py)
 - [`docs/benchmarks.md`](docs/benchmarks.md)（英語）
@@ -235,7 +248,8 @@ Vulkan テストは利用可能なアダプタ（NVIDIA / AMD / Intel / Mesa lav
 
 ## 主な制約
 
-- CUDA のネイティブ実装は elementwise / matmul / linear / Adam まで。reduction、softmax cross entropy、LLM の attention / paged ops は CPU フォールバックです。
+- CUDA のネイティブ実装は elementwise / reduction / matmul / linear / Adam / softmax CE / embedding / layer_norm / attention / paged attention まで。汎用 `sum_to`（bias 以外）のみ CPU フォールバックです。
+- CUDA の性能値は PyTorch CUDA との比較ではなく、本プロジェクトの CPU 実装との比較です。
 - Python の CUDA テンソル API、`Run` / `PagedBatchRunner` / `Trainer` は未公開（Rust ファースト）。
 - Paged COW はテンソル単位。ブロック単位の in-place COW と CUDA paged-attention カーネルは今後。
 - リリースはまだ行っていません。

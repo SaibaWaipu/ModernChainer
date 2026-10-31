@@ -44,7 +44,7 @@ class MLP(chainer.Chain):
 | Batched decode | Working: `PagedBatchRunner` + batched paged attention |
 | Continuous batching | Working: `RequestTable` / `BatchPlan` (logical batching) |
 | Speculative decoding | Working: greedy fork/verify/commit reference |
-| CUDA backend | Working: NVRTC + cuBLAS core ops; reductions/attention fall back to CPU |
+| CUDA backend | Working: NVRTC + cuBLAS; elementwise, matmul, linear, Adam, LLM attention and paged attention are native |
 | Python bindings | Core subset: `Tensor`, `Variable`, `F.*`, `L.Linear`, `SGD`/`Adam`, `Chain` |
 | Serialization | Native `.mcn`; Chainer `.npz` reader planned |
 | Trainer / Updater / Extensions | Planned |
@@ -64,6 +64,7 @@ cargo run --release --example continuous_batching
 cargo run --release --example paged_batching
 cargo run --release --example speculative
 cargo run --release --example cuda_matmul     # requires a CUDA driver and NVRTC/cuBLAS
+cargo run --release --example cuda_bench
 cargo run --release --example vulkan_matmul   # requires a Vulkan loader/ICD
 ```
 
@@ -231,8 +232,18 @@ better. These are micro-benchmarks, not a claim about every workload.
 Adam wins, matmul/elementwise are close, and Linear backward is the weak spot.
 The original 1.2× geometric-mean target is not met, but the benchmark harness is
 checked in so improvements are measurable. Paged/batched decode is a CPU
-reference and not yet part of the performance comparison. CUDA core ops are
-verified against CPU, but CUDA performance has not been benchmarked yet.
+reference and not yet part of the PyTorch comparison. CUDA (RTX 2070 SUPER)
+versus this project's CPU backend (Ryzen 5 5600G):
+
+| Workload | CPU | CUDA | Speedup |
+|---|---:|---:|---:|
+| matmul 512³ | 0.508 ms | 0.052 ms | 9.7× |
+| linear 128×784×256 | 0.171 ms | 0.027 ms | 6.4× |
+| Adam 1M params | 1.292 ms | 0.115 ms | 11.2× |
+
+```bash
+cargo run --release --example cuda_bench
+```
 
 - [`scripts/bench_vs_pytorch.py`](scripts/bench_vs_pytorch.py)
 - [`docs/benchmarks.md`](docs/benchmarks.md)
@@ -266,8 +277,10 @@ lavapipe) and skip cleanly when no Vulkan loader is present.
 
 ## Known limitations
 
-- CUDA native coverage is elementwise / matmul / linear / Adam. Reductions,
-  softmax cross entropy and the LLM attention/paged ops fall back to CPU.
+- CUDA native coverage is elementwise, reductions, matmul, linear, Adam,
+  softmax cross entropy, embedding, layer_norm, attention and paged attention.
+  Only generic `sum_to` (non-bias) falls back to CPU.
+- CUDA numbers compare against this project's CPU backend, not PyTorch CUDA.
 - Python does not expose CUDA tensors, `Run`, `PagedBatchRunner` or `Trainer`
   yet (Rust-first).
 - Paged COW is tensor-granularity; block-level in-place COW and CUDA

@@ -114,15 +114,19 @@ and dynamic library loading, so a build does not require the CUDA toolkit or
 | linear | cuBLAS + bias kernel |
 | linear_backward | cuBLAS + transpose |
 | adam_update | fused NVRTC kernel |
+| sum_all / 2-D bias sum_to | NVRTC reductions |
+| softmax CE / backward | NVRTC row kernels |
+| embedding / layer_norm / softmax | NVRTC row kernels |
+| split/merge heads / concat / last-row | NVRTC index kernels |
+| dense attention | NVRTC per-query kernel |
+| paged append / attention / batched attention | NVRTC block-table kernels |
 | to_scalar | device-to-host readback |
 
 ### CPU fallbacks
 
-`sum_all`, `sum_to`, softmax cross entropy and its backward, embedding,
-layer_norm, softmax, split/merge heads, dense attention, concat/last-row and all
-paged state/attention ops currently copy to the CPU backend and upload the
-result. This keeps the full decoder usable on CUDA while the native kernels are
-developed.
+Only generic `sum_to` (shapes other than a 2-D tensor reduced to its trailing
+1-D bias) copies to the CPU backend. Everything on the training and decoder
+paths — including dense and paged attention — is native.
 
 ### Running
 
@@ -132,16 +136,16 @@ Using pip CUDA wheels:
 export LD_LIBRARY_PATH="$PWD/python/.venv/lib/python3.13/site-packages/nvidia/cuda_nvrtc/lib:$PWD/python/.venv/lib/python3.13/site-packages/nvidia/cublas/lib:$PWD/python/.venv/lib/python3.13/site-packages/nvidia/cuda_runtime/lib:$LD_LIBRARY_PATH"
 cargo test -p modern-chainer-cuda
 cargo run --release --example cuda_matmul
+cargo run --release --example cuda_bench
 ```
 
 Tests skip when no CUDA driver/runtime is available.
 
 ### Next
 
-- Native reduction, softmax cross entropy, layer_norm/embedding kernels.
-- Dense and paged attention CUDA kernels.
-- Vectorised batched decode on paged CUDA buffers.
 - cuBLASLt fused GEMM+bias+activation and CUDA Graph capture.
+- Wider/fused paged-attention and flash-decode kernels.
+- CUDA throughput benchmarks against PyTorch CUDA, TTFT/tokens/s.
 
 ## Adding a backend
 

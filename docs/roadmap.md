@@ -40,12 +40,15 @@ vectorised paged attention, vectorised batched step.
 
 Remaining: block-level in-place COW, wider kernels, CUDA.
 
-## v0.5 — CUDA core backend (done)
+## v0.5 — CUDA backend (done)
 
 - `cudarc` dynamic loading, NVRTC kernels, cuBLAS.
-- Native elementwise, matmul, linear/linear_backward, transpose and fused Adam.
-- CPU fallbacks for reductions, softmax CE, attention and paged ops.
-- CPU-parity tests and a CUDA Adam training loop on RTX 2070 SUPER.
+- Native elementwise, reductions, matmul, linear/linear_backward, transpose,
+  fused Adam, softmax CE, embedding, layer_norm, dense attention and paged
+  attention/append/batched attention.
+- Only generic `sum_to` falls back to CPU.
+- CPU-parity tests for decoder logits, LLM kernels and paged batched decode;
+  CUDA Adam training loop and `cuda_bench` on RTX 2070 SUPER.
 
 ## v0.6 — CUDA kernels and throughput
 
