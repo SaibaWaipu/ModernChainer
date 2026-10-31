@@ -175,10 +175,17 @@ The **Static Step API** generalizes run-level graphs:
 - `StaticRun` owns the buffers, captures the step once and replays it with a
   new input.
 
-`LinearMseAdamStep` (Linear + MSE + Adam) and `LinearForwardStep` are included.
-The step counter is a device scalar advanced by a kernel inside the graph, so
-replay performs a complete step without host arguments.  `GraphLinearTrainer`
-remains as a convenience wrapper-style API for the Linear+MSE case.
+`LinearMseAdamStep` (Linear + MSE + Adam), `LinearForwardStep`, and
+`StaticDecoderStep` are included.  The static decoder keeps weights, per-layer
+K/V caches, activations and a position counter in fixed buffers; each replay
+appends one token at the device position, runs causal attention over the cache,
+and advances the position inside the graph.  It matches a dense CPU decoder
+token-by-token.
+
+The step/position counters are device scalars advanced by kernels inside the
+graph, so replay performs a complete step without host arguments.
+`GraphLinearTrainer` remains as a convenience wrapper-style API for the
+Linear+MSE case.
 
 CUDA Graph requires preallocated buffers: allocation and synchronization inside
 the closure are not capturable.  Event tracking is disabled on the backend
@@ -204,7 +211,8 @@ Tests skip when no CUDA driver/runtime is available.
 ### Next
 
 - Full-model f16/bf16 dtype (all ops) and master-weight optimizer state.
-- Static decoder step with device-resident KV / position for graph replay.
+- Batched static prefill and batched static decode.
+- Throughput benchmarks for static decoder vs eager/PyTorch.
 - Backend-agnostic Static Step trait (currently CUDA-specific).
 - Further paged-attention/flash-decode tuning and TTFT/tokens/s benchmarks.
 - Run-level CUDA Graph capture with a memory pool.

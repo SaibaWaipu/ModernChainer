@@ -1,6 +1,6 @@
 # Modern Chainer — Specification
 
-Status: v0.7.0 implementation. This document records the product intent, the
+Status: v0.8.0 implementation. This document records the product intent, the
 implemented surface, and the deliberately deferred work.
 
 ## 1. Vision
@@ -217,9 +217,9 @@ sampling.
   growth/backoff.
 - CUDA Graph capture/replay for preallocated matmul (`graph_matmul`), Adam
   (`graph_adam`), and the generalized Static Step API: `CudaStaticStep`,
-  `StaticBuilder`, `CudaStaticContext`, `StaticRun`. `LinearMseAdamStep` and
-  `LinearForwardStep` demonstrate a training step and a forward step over fixed
-  buffers with device-resident state.
+  `StaticBuilder`, `CudaStaticContext`, `StaticRun`. `LinearMseAdamStep`,
+  `LinearForwardStep` and `StaticDecoderStep` cover training, forward and
+  one-token decode over fixed buffers with device-resident state.
 - Wide paged attention: block-per-query kernels for single and batched decode.
 - Only generic `sum_to` (non-bias) falls back to CPU.
 - Verified against CPU for elementwise, matmul, linear, softmax CE, LLM
@@ -369,7 +369,9 @@ docs/                      architecture, backends, API, benchmarks, roadmap
 - Autocast decoder parity and an AMP training loop with `GradScaler` on CUDA;
   scaler unscale/growth/backoff and inf/nan skipping are tested on CPU.
 - `LinearMseAdamStep` via `StaticRun` drives loss down over 100 steps with the
-  device step counter in sync; `LinearForwardStep` replays with changed inputs.
+  device step counter in sync; `LinearForwardStep` replays with changed inputs;
+  `StaticDecoderStep` matches a dense CPU decoder token-by-token over a prompt
+  and then generates from the replayed graph.
 - Memory-pool reuse and zeroed reuse are tested.
 - `cargo fmt`, `cargo clippy -D warnings`, `cargo test` in CI.
 

@@ -59,10 +59,10 @@ Remaining: block-level in-place COW, wider kernels, CUDA.
   paged attention, CUDA memory pool, F32/TF32/F16/BF16 compute types,
   autocast AMP + GradScaler.
 - Done: generalized Static Step API (`CudaStaticStep` / `StaticBuilder` /
-  `CudaStaticContext` / `StaticRun`) with Linear+MSE+Adam and Linear forward
-  implementations; `GraphLinearTrainer` remains a convenience path.
-- Next: static decoder step with device-resident KV/position, backend-agnostic
-  Static Step trait, full-model f16/bf16 dtype, TTFT/tokens/s.
+  `CudaStaticContext` / `StaticRun`), Linear+MSE+Adam, Linear forward, and
+  `StaticDecoderStep` with device-resident KV/position and token replay.
+- Next: batched static prefill/decode, backend-agnostic Static Step trait,
+  full-model f16/bf16 dtype, TTFT/tokens/s.
 
 ## v0.7 — Training-By-Run
 
