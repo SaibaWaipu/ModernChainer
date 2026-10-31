@@ -116,6 +116,33 @@ impl Ops<CpuBackend> for CpuOps {
         kernels::paged_attention(q, k_blocks, v_blocks, block_table, seq_len, scale, causal)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn paged_append(
+        &self,
+        k_blocks: &Tensor<CpuBackend>,
+        v_blocks: &Tensor<CpuBackend>,
+        block_table: &Tensor<CpuBackend>,
+        len: usize,
+        k_new: &Tensor<CpuBackend>,
+        v_new: &Tensor<CpuBackend>,
+    ) -> Result<(Tensor<CpuBackend>, Tensor<CpuBackend>)> {
+        kernels::paged_append(k_blocks, v_blocks, block_table, len, k_new, v_new)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn paged_attention_batch(
+        &self,
+        q: &Tensor<CpuBackend>,
+        k_blocks: &Tensor<CpuBackend>,
+        v_blocks: &Tensor<CpuBackend>,
+        block_tables: &Tensor<CpuBackend>,
+        seq_lens: &Tensor<CpuBackend>,
+        scale: f64,
+        causal: bool,
+    ) -> Result<Tensor<CpuBackend>> {
+        kernels::paged_attention_batch(q, k_blocks, v_blocks, block_tables, seq_lens, scale, causal)
+    }
+
     fn linear(
         &self,
         x: &Tensor<CpuBackend>,

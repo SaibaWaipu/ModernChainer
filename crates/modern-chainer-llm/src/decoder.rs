@@ -2,6 +2,7 @@ use modern_chainer_core::{Backend, DType, Error, Ops, Result, Rng, Shape, Tensor
 use modern_chainer_run::{Run, RunContext, ScalarValue, StateBuilder, Step};
 
 use crate::kv::{KvCacheHandles, declare_kv_cache};
+use crate::paging::PagedKvCache;
 use crate::sampling::{Sampler, sample_token};
 
 #[derive(Clone, Debug)]
@@ -249,6 +250,170 @@ impl<B: Backend> Decoder<B> {
             ScalarValue::I64((position + seq) as i64),
         )?;
         Ok(last)
+    }
+}
+
+pub(crate) fn select_batch_row<B: Backend>(x: &Tensor<B>, index: usize) -> Result<Tensor<B>> {
+    let dims = x.shape().dims();
+    if dims.is_empty() || index >= dims[0] {
+        return Err(Error::invalid(format!(
+            "batch index {index} out of range for {:?}",
+            dims
+        )));
+    }
+    let row_numel = x.numel() / dims[0];
+    let element = x.dtype().size_in_bytes();
+    let bytes = x.to_bytes()?;
+    let start = index * row_numel * element;
+    let end = start + row_numel * element;
+    Tensor::from_bytes(
+        x.backend().clone(),
+        &bytes[start..end],
+        Shape::new(&dims[1..]),
+        x.dtype(),
+    )
+}
+
+#[allow(clippy::type_complexity)]
+fn stack_paged_layer<B: Backend>(
+    caches: &[Vec<PagedKvCache<B>>],
+    layer: usize,
+) -> Result<(Tensor<B>, Tensor<B>, Tensor<B>, Tensor<B>)> {
+    let first = caches
+        .first()
+        .and_then(|cache| cache.get(layer))
+        .ok_or_else(|| Error::invalid("no paged caches for batch"))?;
+    let num_blocks = first.num_blocks();
+    let block_size = first.block_size();
+    let dims = first.k_blocks().shape().dims();
+    let heads = dims[2];
+    let head_dim = dims[3];
+    let mut k_bytes = Vec::new();
+    let mut v_bytes = Vec::new();
+    let mut tables = Vec::with_capacity(caches.len() * num_blocks);
+    let mut lens = Vec::with_capacity(caches.len());
+    for (batch_index, cache_vec) in caches.iter().enumerate() {
+        let cache = cache_vec
+            .get(layer)
+            .ok_or_else(|| Error::invalid("missing paged cache for layer"))?;
+        if cache.num_blocks() != num_blocks || cache.block_size() != block_size {
+            return Err(Error::invalid("paged cache capacities differ in a batch"));
+        }
+        k_bytes.extend_from_slice(&cache.k_blocks().to_bytes()?);
+        v_bytes.extend_from_slice(&cache.v_blocks().to_bytes()?);
+        let table_bytes = cache.block_table().to_bytes()?;
+        let (chunks, _) = table_bytes.as_chunks::<8>();
+        for chunk in chunks {
+            let physical = i64::from_ne_bytes(*chunk);
+            tables.push(if physical >= 0 {
+                physical + (batch_index * num_blocks) as i64
+            } else {
+                physical
+            });
+        }
+        lens.push(cache.len() as i64);
+    }
+    let backend = first.k_blocks().backend().clone();
+    let total_blocks = caches.len() * num_blocks;
+    let k_blocks = Tensor::from_bytes(
+        backend.clone(),
+        &k_bytes,
+        Shape::new([total_blocks, block_size, heads, head_dim]),
+        DType::F32,
+    )?;
+    let v_blocks = Tensor::from_bytes(
+        backend.clone(),
+        &v_bytes,
+        Shape::new([total_blocks, block_size, heads, head_dim]),
+        DType::F32,
+    )?;
+    let block_tables = Tensor::from_slice(
+        backend.clone(),
+        &tables,
+        Shape::new([caches.len(), num_blocks]),
+        DType::I64,
+    )?;
+    let seq_lens = Tensor::from_slice(backend, &lens, Shape::new([caches.len()]), DType::I64)?;
+    Ok((k_blocks, v_blocks, block_tables, seq_lens))
+}
+
+impl<B: Backend> Decoder<B> {
+    /// Batched decode step (q_seq = 1) over per-request paged KV caches.
+    ///
+    /// This is the real batched path: every request appends one K/V token and a
+    /// single paged-attention kernel runs over the whole batch.  Prefill is
+    /// handled by the dense `Run` path and converted into paged caches by the
+    /// caller.
+    pub fn forward_decode_batch(
+        &self,
+        caches: &mut [Vec<PagedKvCache<B>>],
+        tokens: &[u32],
+    ) -> Result<Tensor<B>> {
+        if tokens.is_empty() {
+            return Err(Error::invalid("batched decode requires at least one token"));
+        }
+        if caches.len() != tokens.len() {
+            return Err(Error::invalid("cache/token batch size mismatch"));
+        }
+        let config = &self.config;
+        if let Some(&token) = tokens.iter().find(|&&token| token as usize >= config.vocab) {
+            return Err(Error::invalid(format!(
+                "token {token} out of range for vocab {}",
+                config.vocab
+            )));
+        }
+        let backend = self.tok_emb.backend().clone();
+        let ops = backend.ops();
+        let batch = tokens.len();
+        let ids: Vec<i64> = tokens.iter().map(|&token| token as i64).collect();
+        let ids = Tensor::from_slice(backend.clone(), &ids, [batch], DType::I64)?;
+        let mut x = ops.embedding(&ids, &self.tok_emb)?;
+        let heads = config.n_heads;
+        let head_dim = config.head_dim();
+        let scale = 1.0 / (head_dim as f64).sqrt();
+
+        for (layer_index, layer) in self.layers.iter().enumerate() {
+            let norm = ops.layer_norm(&x, &layer.ln1_g, &layer.ln1_b, config.eps)?;
+            let q = ops.linear(&norm, &layer.wq, Some(&layer.bq))?;
+            let k_new = ops.linear(&norm, &layer.wk, Some(&layer.bk))?;
+            let v_new = ops.linear(&norm, &layer.wv, Some(&layer.bv))?;
+            let q = q.reshape([batch, heads, 1, head_dim])?;
+            let k_new = k_new.reshape([batch, heads, 1, head_dim])?;
+            let v_new = v_new.reshape([batch, heads, 1, head_dim])?;
+
+            for (batch_index, cache_vec) in caches.iter_mut().enumerate() {
+                let k_row = select_batch_row(&k_new, batch_index)?;
+                let v_row = select_batch_row(&v_new, batch_index)?;
+                let cache = cache_vec
+                    .get_mut(layer_index)
+                    .ok_or_else(|| Error::invalid("missing paged cache for layer"))?;
+                cache.append(&k_row, &v_row)?;
+            }
+
+            let (k_blocks, v_blocks, block_tables, seq_lens) =
+                stack_paged_layer(caches, layer_index)?;
+            let attn = ops.paged_attention_batch(
+                &q,
+                &k_blocks,
+                &v_blocks,
+                &block_tables,
+                &seq_lens,
+                scale,
+                true,
+            )?;
+            let attn = attn.reshape([batch, config.d_model])?;
+            let attn = ops.linear(&attn, &layer.wo, Some(&layer.bo))?;
+            x = ops.add(&x, &attn)?;
+
+            let norm = ops.layer_norm(&x, &layer.ln2_g, &layer.ln2_b, config.eps)?;
+            let hidden = ops.linear(&norm, &layer.w1, Some(&layer.b1))?;
+            let hidden = ops.silu(&hidden)?;
+            let hidden = ops.linear(&hidden, &layer.w2, Some(&layer.b2))?;
+            x = ops.add(&x, &hidden)?;
+        }
+
+        let x = ops.layer_norm(&x, &self.ln_f_g, &self.ln_f_b, config.eps)?;
+        ops.linear(&x, &self.lm_head, None)
     }
 }
 

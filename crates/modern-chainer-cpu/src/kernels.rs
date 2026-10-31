@@ -1137,3 +1137,246 @@ pub(crate) fn paged_attention(
     }
     make_f32(q, out, Shape::new([heads, q_seq, head_dim]))
 }
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paged_append(
+    k_blocks: &Tensor<CpuBackend>,
+    v_blocks: &Tensor<CpuBackend>,
+    block_table: &Tensor<CpuBackend>,
+    len: usize,
+    k_new: &Tensor<CpuBackend>,
+    v_new: &Tensor<CpuBackend>,
+) -> Result<(Tensor<CpuBackend>, Tensor<CpuBackend>)> {
+    if k_blocks.rank() != 4 || v_blocks.rank() != 4 {
+        return Err(Error::invalid(
+            "paged_append blocks must be [num_blocks, block_size, heads, head_dim]",
+        ));
+    }
+    if k_blocks.shape().dims() != v_blocks.shape().dims() {
+        return Err(Error::invalid("paged_append k/v block shapes differ"));
+    }
+    if k_new.rank() != 3 || v_new.rank() != 3 {
+        return Err(Error::invalid(
+            "paged_append new K/V must be [heads, n, head_dim]",
+        ));
+    }
+    if k_new.shape().dims() != v_new.shape().dims() {
+        return Err(Error::invalid("paged_append new K/V shapes differ"));
+    }
+    if block_table.rank() != 1 || block_table.dtype() != DType::I64 {
+        return Err(Error::invalid(
+            "paged_append block_table must be i64 [max_blocks]",
+        ));
+    }
+    let (num_blocks, block_size, heads, head_dim) = (
+        k_blocks.shape().dims()[0],
+        k_blocks.shape().dims()[1],
+        k_blocks.shape().dims()[2],
+        k_blocks.shape().dims()[3],
+    );
+    if k_new.shape().dims() != [heads, k_new.shape().dims()[1], head_dim] {
+        return Err(Error::invalid(
+            "paged_append K/V head dimensions do not match",
+        ));
+    }
+    let n = k_new.shape().dims()[1];
+    if n == 0 {
+        return Ok((k_blocks.clone(), v_blocks.clone()));
+    }
+    let table = block_table.as_slice::<i64>()?;
+    let mut out_k = f32_slice(k_blocks)?.to_vec();
+    let mut out_v = f32_slice(v_blocks)?.to_vec();
+    let new_k = f32_slice(k_new)?;
+    let new_v = f32_slice(v_new)?;
+
+    for i in 0..n {
+        let position = len + i;
+        let logical = position / block_size;
+        let within = position % block_size;
+        if logical >= table.len() {
+            return Err(Error::invalid(format!(
+                "paged_append logical block {logical} exceeds table {}",
+                table.len()
+            )));
+        }
+        let physical = table[logical];
+        if physical < 0 || physical as usize >= num_blocks {
+            return Err(Error::invalid(format!(
+                "paged_append block table entry {logical} is unallocated"
+            )));
+        }
+        let physical = physical as usize;
+        for head in 0..heads {
+            for d in 0..head_dim {
+                let src = (head * n + i) * head_dim + d;
+                let dst = ((physical * block_size + within) * heads + head) * head_dim + d;
+                out_k[dst] = new_k[src];
+                out_v[dst] = new_v[src];
+            }
+        }
+    }
+
+    Ok((
+        make_f32(k_blocks, out_k, k_blocks.shape().clone())?,
+        make_f32(v_blocks, out_v, v_blocks.shape().clone())?,
+    ))
+}
+
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+fn paged_attention_item(
+    q: &[f32],
+    k_blocks: &[f32],
+    v_blocks: &[f32],
+    table: &[i64],
+    num_blocks: usize,
+    block_size: usize,
+    heads: usize,
+    q_seq: usize,
+    head_dim: usize,
+    seq_len: usize,
+    scale: f64,
+    causal: bool,
+) -> Result<Vec<f32>> {
+    let mut out = vec![0f32; heads * q_seq * head_dim];
+    let offset = seq_len.saturating_sub(q_seq);
+    for head in 0..heads {
+        for i in 0..q_seq {
+            let mut scores = vec![f32::NEG_INFINITY; seq_len];
+            let mut max = f32::NEG_INFINITY;
+            for p in 0..seq_len {
+                if causal && p > offset + i {
+                    continue;
+                }
+                let logical = p / block_size;
+                let physical = table[logical];
+                if physical < 0 || physical as usize >= num_blocks {
+                    return Err(Error::invalid(format!(
+                        "block table entry {logical} points outside {num_blocks} blocks"
+                    )));
+                }
+                let physical = physical as usize;
+                let within = p % block_size;
+                let base = ((physical * block_size + within) * heads + head) * head_dim;
+                let mut dot = 0f64;
+                for d in 0..head_dim {
+                    dot += q[(head * q_seq + i) * head_dim + d] as f64 * k_blocks[base + d] as f64;
+                }
+                let score = (dot * scale) as f32;
+                scores[p] = score;
+                if score > max {
+                    max = score;
+                }
+            }
+            if max == f32::NEG_INFINITY {
+                continue;
+            }
+            let mut sum = 0f64;
+            for &score in &scores {
+                if score != f32::NEG_INFINITY {
+                    sum += ((score - max) as f64).exp();
+                }
+            }
+            let inv = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+            for p in 0..seq_len {
+                if scores[p] == f32::NEG_INFINITY {
+                    continue;
+                }
+                let logical = p / block_size;
+                let physical = table[logical] as usize;
+                let within = p % block_size;
+                let base = ((physical * block_size + within) * heads + head) * head_dim;
+                let prob = (((scores[p] - max) as f64) * inv) as f32;
+                for d in 0..head_dim {
+                    out[(head * q_seq + i) * head_dim + d] += prob * v_blocks[base + d];
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paged_attention_batch(
+    q: &Tensor<CpuBackend>,
+    k_blocks: &Tensor<CpuBackend>,
+    v_blocks: &Tensor<CpuBackend>,
+    block_tables: &Tensor<CpuBackend>,
+    seq_lens: &Tensor<CpuBackend>,
+    scale: f64,
+    causal: bool,
+) -> Result<Tensor<CpuBackend>> {
+    if q.rank() != 4 {
+        return Err(Error::invalid(
+            "paged_attention_batch q must be [batch, heads, q_seq, head_dim]",
+        ));
+    }
+    if k_blocks.rank() != 4 || v_blocks.rank() != 4 {
+        return Err(Error::invalid(
+            "paged_attention_batch blocks must be [total_blocks, block_size, heads, head_dim]",
+        ));
+    }
+    if block_tables.rank() != 2 || block_tables.dtype() != DType::I64 {
+        return Err(Error::invalid(
+            "paged_attention_batch block_tables must be i64 [batch, max_blocks]",
+        ));
+    }
+    if seq_lens.rank() != 1 || seq_lens.dtype() != DType::I64 {
+        return Err(Error::invalid(
+            "paged_attention_batch seq_lens must be i64 [batch]",
+        ));
+    }
+    let (batch, heads, q_seq, head_dim) = (
+        q.shape().dims()[0],
+        q.shape().dims()[1],
+        q.shape().dims()[2],
+        q.shape().dims()[3],
+    );
+    let (num_blocks, block_size, block_heads, block_dim) = (
+        k_blocks.shape().dims()[0],
+        k_blocks.shape().dims()[1],
+        k_blocks.shape().dims()[2],
+        k_blocks.shape().dims()[3],
+    );
+    if block_heads != heads || block_dim != head_dim {
+        return Err(Error::invalid(
+            "paged_attention_batch head dimensions do not match",
+        ));
+    }
+    let max_blocks = block_tables.shape().dims()[1];
+    if block_tables.shape().dims()[0] != batch || seq_lens.numel() != batch {
+        return Err(Error::invalid(
+            "paged_attention_batch batch dimension mismatch",
+        ));
+    }
+    let qv = f32_slice(q)?;
+    let kv = f32_slice(k_blocks)?;
+    let vv = f32_slice(v_blocks)?;
+    let tables = block_tables.as_slice::<i64>()?;
+    let lens = seq_lens.as_slice::<i64>()?;
+    let output_len = heads * q_seq * head_dim;
+
+    let outputs: Result<Vec<Vec<f32>>> = (0..batch)
+        .into_par_iter()
+        .map(|batch_index| {
+            let seq_len = lens[batch_index];
+            if seq_len < 0 {
+                return Err(Error::invalid("negative sequence length"));
+            }
+            let seq_len = seq_len as usize;
+            if seq_len == 0 || q_seq > seq_len || seq_len > max_blocks * block_size {
+                return Err(Error::invalid(format!(
+                    "invalid seq_len {seq_len} for q_seq {q_seq} and {max_blocks} blocks"
+                )));
+            }
+            let table = &tables[batch_index * max_blocks..(batch_index + 1) * max_blocks];
+            let q_slice = &qv[batch_index * output_len..(batch_index + 1) * output_len];
+            paged_attention_item(
+                q_slice, kv, vv, table, num_blocks, block_size, heads, q_seq, head_dim, seq_len,
+                scale, causal,
+            )
+        })
+        .collect();
+    let outputs = outputs?;
+    let out: Vec<f32> = outputs.into_iter().flatten().collect();
+    make_f32(q, out, Shape::new([batch, heads, q_seq, head_dim]))
+}
