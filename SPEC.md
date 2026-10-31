@@ -145,7 +145,7 @@ Acceptance gates proposed in the design phase:
 | peak memory | ≤ PyTorch |
 | geometric mean (CPU/CUDA) | 1.2×, no item below 0.9× |
 
-Current CPU result on the checked-in micro-suite is a ~0.87× geometric mean
+Current CPU result on the checked-in micro-suite is a ~0.87–0.91× geometric mean
 (Adam wins, Linear backward loses). CUDA and transformer/ResNet benchmarks are
 blocked on the CUDA backend. See `docs/benchmarks.md` for the full table and
 caveats.

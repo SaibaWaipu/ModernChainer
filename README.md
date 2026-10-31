@@ -127,7 +127,7 @@ better. These are micro-benchmarks, not a claim about every workload.
 | elementwise add (4M f32) | 2.23–2.30 ms | 1.95–2.16 ms | 0.85–0.97× |
 | linear fwd+bwd 128×784×256 | 0.54–0.61 ms | 0.32 ms | 0.52–0.60× |
 | Adam step 1024×1024 | 3.38–3.81 ms | 4.02–4.98 ms | 1.19–1.40× |
-| **geometric mean** | **~1.20 ms** | **~1.04 ms** | **~0.87×** |
+| **geometric mean** | **~1.20 ms** | **~1.04 ms** | **~0.87–0.91×** |
 
 The original acceptance target was a 1.2× geometric mean. The current engine
 wins on fused Adam and is close on matmul/elementwise, but loses on
