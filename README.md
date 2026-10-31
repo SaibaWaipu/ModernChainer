@@ -123,7 +123,7 @@ contract: a `BatchPlan` lists requests, and speculative decoding uses
 `fork`/`snapshot`/verify/commit instead of hidden cache surgery.
 
 ```rust
-let mut batcher = ContinuousBatcher::new(decoder, CpuBackend::new(), 7)?;
+let mut batcher = ContinuousBatcher::new(decoder, CpuBackend::new(), 7);
 batcher.add_request(vec![1, 2, 3], 5, Sampler::Greedy)?;
 let output = batcher.step()?;              // prefill/decode plan is visible
 ```
