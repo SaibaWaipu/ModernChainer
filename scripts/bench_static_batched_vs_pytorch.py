@@ -6,6 +6,7 @@ random, so this measures kernels and scheduling, not model quality.
 
 from __future__ import annotations
 
+import os
 import statistics
 import time
 
@@ -19,10 +20,10 @@ D_MODEL = 64
 N_LAYERS = 4
 N_HEADS = 4
 D_FF = 128
-MAX_SEQ = 128
-BATCH = 8
-PREFILL = 16
-DECODE_TOKENS = 32
+BATCH = int(os.getenv("BATCH", "8"))
+PREFILL = int(os.getenv("PREFILL_LEN", "16"))
+DECODE_TOKENS = int(os.getenv("DECODE_TOKENS", "32"))
+MAX_SEQ = int(os.getenv("MAX_SEQ", str(max(128, PREFILL + DECODE_TOKENS + 16))))
 DTYPE = torch.float32
 
 
@@ -141,6 +142,7 @@ def main() -> None:
     print(f"device: {torch.cuda.get_device_name()}")
     print(f"batch: {BATCH}")
     print(f"prefill_len: {PREFILL}")
+    print(f"max_seq: {MAX_SEQ}")
     print(f"prefill tokens: {BATCH * PREFILL}")
     print(f"TTFT (batched prefill): {ttft * 1e3:.3f} ms")
     print(f"prefill throughput: {BATCH * PREFILL / ttft:.1f} tok/s")

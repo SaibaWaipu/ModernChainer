@@ -25,7 +25,7 @@ pub use graph::{CudaGraphRunner, GraphAdam, GraphLinearTrainer, GraphMatmul, Gra
 pub use ops::CudaOps;
 #[cfg(feature = "cuda")]
 pub use static_run::{
-    BatchedStaticDecoder, CudaStaticContext, CudaStaticStep, LinearForwardBuffers,
+    BatchedStaticDecoder, CudaStaticContext, CudaStaticStep, KvDType, LinearForwardBuffers,
     LinearForwardStep, LinearMseAdamStep, LinearMseBuffers, StaticBuilder, StaticDecoderBuffers,
     StaticDecoderInput, StaticDecoderOutput, StaticDecoderStep, StaticForwardConfig,
     StaticForwardInput, StaticLinearConfig, StaticLinearInput, StaticLinearOutput, StaticRun,

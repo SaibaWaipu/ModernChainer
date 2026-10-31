@@ -5,6 +5,358 @@ use cudarc::nvrtc::{CompileOptions, compile_ptx_with_opts};
 use modern_chainer_core::{Error, Result};
 
 const SOURCE: &str = r#"
+__device__ __forceinline__ float warp_sum_f32(float value) {
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        value += __shfl_down_sync(0xffffffffu, value, offset);
+    }
+    return value;
+}
+
+__device__ __forceinline__ float warp_max_f32(float value) {
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        value = fmaxf(value, __shfl_down_sync(0xffffffffu, value, offset));
+    }
+    return value;
+}
+
+__device__ float block_reduce_sum(float value, float* shared) {
+    int tid = threadIdx.x;
+    shared[tid] = value;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) shared[tid] += shared[tid + stride];
+        __syncthreads();
+    }
+    float result = shared[0];
+    __syncthreads();
+    return result;
+}
+
+__device__ float block_reduce_max(float value, float* shared) {
+    int tid = threadIdx.x;
+    shared[tid] = value;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) shared[tid] = fmaxf(shared[tid], shared[tid + stride]);
+        __syncthreads();
+    }
+    float result = shared[0];
+    __syncthreads();
+    return result;
+}
+
+
+extern "C" __global__ void causal_softmax_warp_f32(float* scores, int rows, int len) {
+    int lane = threadIdx.x & 31;
+    int warp = threadIdx.x >> 5;
+    int row = blockIdx.x * 4 + warp;
+    if (row >= rows) return;
+    int qpos = row % len;
+    float* base = scores + (long long)row * len;
+    float maxv = -1e30f;
+    for (int j = lane; j <= qpos; j += 32) {
+        if (base[j] > maxv) maxv = base[j];
+    }
+    maxv = warp_max_f32(maxv);
+    maxv = __shfl_sync(0xffffffffu, maxv, 0);
+    float sum = 0.0f;
+    for (int j = lane; j <= qpos; j += 32) {
+        sum += expf(base[j] - maxv);
+    }
+    sum = warp_sum_f32(sum);
+    sum = __shfl_sync(0xffffffffu, sum, 0);
+    float inv = 1.0f / sum;
+    for (int j = lane; j <= qpos; j += 32) {
+        base[j] = expf(base[j] - maxv) * inv;
+    }
+    for (int j = qpos + 1 + lane; j < len; j += 32) {
+        base[j] = 0.0f;
+    }
+}
+
+
+extern "C" __global__ void gather_last_rows_f32(
+    const float* x, float* out, int batch, int rows, int dim
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * dim;
+    if (i < total) {
+        int b = i / dim;
+        int d = i % dim;
+        out[i] = x[((b + 1) * rows - 1) * dim + d];
+    }
+}
+
+extern "C" __global__ void split_heads_decode_f32(
+    const float* q, float* qh, int batch, int heads, int head_dim
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * heads * head_dim;
+    if (i < total) {
+        int d = i % head_dim;
+        int t = i / head_dim;
+        int head = t % heads;
+        int b = t / heads;
+        qh[i] = q[(b * heads + head) * head_dim + d];
+    }
+}
+
+extern "C" __global__ void merge_heads_decode_f32(
+    const float* attn, float* out, int batch, int heads, int head_dim
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * heads * head_dim;
+    if (i < total) {
+        int d = i % head_dim;
+        int t = i / head_dim;
+        int head = t % heads;
+        int b = t / heads;
+        out[(b * heads + head) * head_dim + d] = attn[i];
+    }
+}
+
+extern "C" __global__ void decode_softmax_f32(
+    float* scores, const int* positions, int batch, int heads, int max_seq
+) {
+    __shared__ float shared[256];
+    int row = blockIdx.x;
+    int tid = threadIdx.x;
+    int b = row / heads;
+    int n = positions[b] + 1;
+    if (n > max_seq) n = max_seq;
+    float* base = scores + (long long)row * max_seq;
+    float maxv = -1e30f;
+    for (int j = tid; j < n; j += blockDim.x) {
+        if (base[j] > maxv) maxv = base[j];
+    }
+    maxv = block_reduce_max(maxv, shared);
+    float sum = 0.0f;
+    for (int j = tid; j < n; j += blockDim.x) {
+        sum += expf(base[j] - maxv);
+    }
+    sum = block_reduce_sum(sum, shared);
+    float inv = 1.0f / sum;
+    for (int j = tid; j < n; j += blockDim.x) {
+        base[j] = expf(base[j] - maxv) * inv;
+    }
+    for (int j = n + tid; j < max_seq; j += blockDim.x) {
+        base[j] = 0.0f;
+    }
+}
+
+__device__ __forceinline__ float kv_h2f(unsigned short h) {
+    float f;
+    asm("{ cvt.f32.f16 %0, %1; }" : "=f"(f) : "h"(h));
+    return f;
+}
+__device__ __forceinline__ unsigned short kv_f2h(float f) {
+    unsigned short h;
+    asm("{ cvt.rn.f16.f32 %0, %1; }" : "=h"(h) : "f"(f));
+    return h;
+}
+__device__ __forceinline__ float kv_b2f(unsigned short b) {
+    return __uint_as_float(((unsigned int)b) << 16);
+}
+__device__ __forceinline__ unsigned short kv_f2b(float f) {
+    return (unsigned short)(__float_as_uint(f) >> 16);
+}
+
+
+extern "C" __global__ void split_heads_prefill_f32(
+    const float* q, float* qh, int batch, int prefill_len, int heads, int head_dim
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * prefill_len * heads * head_dim;
+    if (i < total) {
+        int d = i % head_dim;
+        int t = i / head_dim;
+        int head = t % heads;
+        int t2 = t / heads;
+        int pos = t2 % prefill_len;
+        int b = t2 / prefill_len;
+        int src = ((b * prefill_len + pos) * heads + head) * head_dim + d;
+        int dst = ((b * heads + head) * prefill_len + pos) * head_dim + d;
+        qh[dst] = q[src];
+    }
+}
+
+extern "C" __global__ void merge_heads_prefill_f32(
+    const float* attn, float* out, int batch, int prefill_len, int heads, int head_dim
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * prefill_len * heads * head_dim;
+    if (i < total) {
+        int d = i % head_dim;
+        int t = i / head_dim;
+        int head = t % heads;
+        int t2 = t / heads;
+        int pos = t2 % prefill_len;
+        int b = t2 / prefill_len;
+        int src = ((b * heads + head) * prefill_len + pos) * head_dim + d;
+        int dst = ((b * prefill_len + pos) * heads + head) * head_dim + d;
+        out[dst] = attn[src];
+    }
+}
+
+
+
+
+
+
+extern "C" __global__ void attention_batch_decode_wide_f32(
+    const float* q, const float* k_cache, const float* v_cache,
+    const int* positions, float* out,
+    int batch, int heads, int max_seq, int head_dim, float scale
+) {
+    int lane = threadIdx.x & 31;
+    int warp = threadIdx.x >> 5;
+    int idx = blockIdx.x * 4 + warp;
+    int total = batch * heads;
+    if (idx >= total) return;
+    int head = idx % heads;
+    int b = idx / heads;
+    int n = positions[b] + 1;
+    if (n > max_seq) n = max_seq;
+    int q_base = (b * heads + head) * head_dim;
+    int cache_base = (b * heads + head) * max_seq * head_dim;
+    float acc[8];
+    #pragma unroll
+    for (int i = 0; i < 8; i++) acc[i] = 0.0f;
+    float m = -1e30f;
+    float l = 0.0f;
+    for (int p = 0; p < n; p++) {
+        float dot = 0.0f;
+        #pragma unroll
+        for (int i = 0; i < 8; i++) {
+            int d = lane + i * 32;
+            if (d < head_dim) dot += q[q_base + d] * k_cache[cache_base + p * head_dim + d];
+        }
+        dot = warp_sum_f32(dot);
+        dot = __shfl_sync(0xffffffffu, dot, 0) * scale;
+        float mnew = fmaxf(m, dot);
+        float alpha = expf(m - mnew);
+        float weight = expf(dot - mnew);
+        l = l * alpha + weight;
+        #pragma unroll
+        for (int i = 0; i < 8; i++) {
+            int d = lane + i * 32;
+            if (d < head_dim) {
+                acc[i] = acc[i] * alpha + weight * v_cache[cache_base + p * head_dim + d];
+            }
+        }
+        m = mnew;
+    }
+    float inv = 1.0f / l;
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        int d = lane + i * 32;
+        if (d < head_dim) out[q_base + d] = acc[i] * inv;
+    }
+}
+
+extern "C" __global__ void attention_batch_decode_wide_f16_f32(
+    const float* q, const unsigned short* k_cache, const unsigned short* v_cache,
+    const int* positions, float* out,
+    int batch, int heads, int max_seq, int head_dim, float scale
+) {
+    int lane = threadIdx.x & 31;
+    int warp = threadIdx.x >> 5;
+    int idx = blockIdx.x * 4 + warp;
+    int total = batch * heads;
+    if (idx >= total) return;
+    int head = idx % heads;
+    int b = idx / heads;
+    int n = positions[b] + 1;
+    if (n > max_seq) n = max_seq;
+    int q_base = (b * heads + head) * head_dim;
+    int cache_base = (b * heads + head) * max_seq * head_dim;
+    float acc[8];
+    #pragma unroll
+    for (int i = 0; i < 8; i++) acc[i] = 0.0f;
+    float m = -1e30f;
+    float l = 0.0f;
+    for (int p = 0; p < n; p++) {
+        float dot = 0.0f;
+        #pragma unroll
+        for (int i = 0; i < 8; i++) {
+            int d = lane + i * 32;
+            if (d < head_dim) dot += q[q_base + d] * kv_h2f(k_cache[cache_base + p * head_dim + d]);
+        }
+        dot = warp_sum_f32(dot);
+        dot = __shfl_sync(0xffffffffu, dot, 0) * scale;
+        float mnew = fmaxf(m, dot);
+        float alpha = expf(m - mnew);
+        float weight = expf(dot - mnew);
+        l = l * alpha + weight;
+        #pragma unroll
+        for (int i = 0; i < 8; i++) {
+            int d = lane + i * 32;
+            if (d < head_dim) {
+                acc[i] = acc[i] * alpha + weight * kv_h2f(v_cache[cache_base + p * head_dim + d]);
+            }
+        }
+        m = mnew;
+    }
+    float inv = 1.0f / l;
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        int d = lane + i * 32;
+        if (d < head_dim) out[q_base + d] = acc[i] * inv;
+    }
+}
+
+extern "C" __global__ void attention_batch_decode_wide_bf16_f32(
+    const float* q, const unsigned short* k_cache, const unsigned short* v_cache,
+    const int* positions, float* out,
+    int batch, int heads, int max_seq, int head_dim, float scale
+) {
+    int lane = threadIdx.x & 31;
+    int warp = threadIdx.x >> 5;
+    int idx = blockIdx.x * 4 + warp;
+    int total = batch * heads;
+    if (idx >= total) return;
+    int head = idx % heads;
+    int b = idx / heads;
+    int n = positions[b] + 1;
+    if (n > max_seq) n = max_seq;
+    int q_base = (b * heads + head) * head_dim;
+    int cache_base = (b * heads + head) * max_seq * head_dim;
+    float acc[8];
+    #pragma unroll
+    for (int i = 0; i < 8; i++) acc[i] = 0.0f;
+    float m = -1e30f;
+    float l = 0.0f;
+    for (int p = 0; p < n; p++) {
+        float dot = 0.0f;
+        #pragma unroll
+        for (int i = 0; i < 8; i++) {
+            int d = lane + i * 32;
+            if (d < head_dim) dot += q[q_base + d] * kv_b2f(k_cache[cache_base + p * head_dim + d]);
+        }
+        dot = warp_sum_f32(dot);
+        dot = __shfl_sync(0xffffffffu, dot, 0) * scale;
+        float mnew = fmaxf(m, dot);
+        float alpha = expf(m - mnew);
+        float weight = expf(dot - mnew);
+        l = l * alpha + weight;
+        #pragma unroll
+        for (int i = 0; i < 8; i++) {
+            int d = lane + i * 32;
+            if (d < head_dim) {
+                acc[i] = acc[i] * alpha + weight * kv_b2f(v_cache[cache_base + p * head_dim + d]);
+            }
+        }
+        m = mnew;
+    }
+    float inv = 1.0f / l;
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        int d = lane + i * 32;
+        if (d < head_dim) out[q_base + d] = acc[i] * inv;
+    }
+}
+
+
 extern "C" __global__ void add_f32(const float* a, const float* b, float* out, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) out[i] = a[i] + b[i];
@@ -76,31 +428,35 @@ extern "C" __global__ void adam_update_f32(
         np[i] = p[i] - lr * mhat / (sqrtf(vhat) + eps);
     }
 }
-__device__ float block_reduce_sum(float value, float* shared) {
+
+
+
+
+extern "C" __global__ void causal_softmax_f32(float* scores, int rows, int len) {
+    __shared__ float shared[256];
+    int row = blockIdx.x;
     int tid = threadIdx.x;
-    shared[tid] = value;
-    __syncthreads();
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) shared[tid] += shared[tid + stride];
-        __syncthreads();
+    int qpos = row % len;
+    float* base = scores + (long long)row * len;
+    float maxv = -1e30f;
+    for (int j = tid; j <= qpos; j += blockDim.x) {
+        if (base[j] > maxv) maxv = base[j];
     }
-    float result = shared[0];
-    __syncthreads();
-    return result;
+    maxv = block_reduce_max(maxv, shared);
+    float sum = 0.0f;
+    for (int j = tid; j <= qpos; j += blockDim.x) {
+        sum += expf(base[j] - maxv);
+    }
+    sum = block_reduce_sum(sum, shared);
+    float inv = 1.0f / sum;
+    for (int j = tid; j <= qpos; j += blockDim.x) {
+        base[j] = expf(base[j] - maxv) * inv;
+    }
+    for (int j = qpos + 1 + tid; j < len; j += blockDim.x) {
+        base[j] = 0.0f;
+    }
 }
 
-__device__ float block_reduce_max(float value, float* shared) {
-    int tid = threadIdx.x;
-    shared[tid] = value;
-    __syncthreads();
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) shared[tid] = fmaxf(shared[tid], shared[tid + stride]);
-        __syncthreads();
-    }
-    float result = shared[0];
-    __syncthreads();
-    return result;
-}
 
 extern "C" __global__ void sum_all_f32(const float* a, float* out, int n) {
     float sum = 0.0f;
@@ -607,6 +963,203 @@ extern "C" __global__ void paged_attention_batch_wide_f32(
     for (int d = tid; d < head_dim; d += blockDim.x) out[q_base + d] = s_out[d];
 }
 
+
+extern "C" __global__ void kv_prefill_f16_f32(
+    const float* k, const float* v, unsigned short* k_cache, unsigned short* v_cache,
+    int batch, int prefill_len, int heads, int head_dim, int max_seq
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * prefill_len * heads * head_dim;
+    if (i < total) {
+        int d = i % head_dim;
+        int t = i / head_dim;
+        int head = t % heads;
+        int t2 = t / heads;
+        int pos = t2 % prefill_len;
+        int b = t2 / prefill_len;
+        int src = ((b * prefill_len + pos) * heads + head) * head_dim + d;
+        int dst = ((b * heads + head) * max_seq + pos) * head_dim + d;
+        k_cache[dst] = kv_f2h(k[src]);
+        v_cache[dst] = kv_f2h(v[src]);
+    }
+}
+
+extern "C" __global__ void kv_prefill_bf16_f32(
+    const float* k, const float* v, unsigned short* k_cache, unsigned short* v_cache,
+    int batch, int prefill_len, int heads, int head_dim, int max_seq
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * prefill_len * heads * head_dim;
+    if (i < total) {
+        int d = i % head_dim;
+        int t = i / head_dim;
+        int head = t % heads;
+        int t2 = t / heads;
+        int pos = t2 % prefill_len;
+        int b = t2 / prefill_len;
+        int src = ((b * prefill_len + pos) * heads + head) * head_dim + d;
+        int dst = ((b * heads + head) * max_seq + pos) * head_dim + d;
+        k_cache[dst] = kv_f2b(k[src]);
+        v_cache[dst] = kv_f2b(v[src]);
+    }
+}
+
+extern "C" __global__ void kv_append_batch_f16_f32(
+    const float* k, const float* v, unsigned short* k_cache, unsigned short* v_cache,
+    const int* positions, int batch, int heads, int head_dim, int max_seq
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * heads * head_dim;
+    if (i < total) {
+        int d = i % head_dim;
+        int t = i / head_dim;
+        int head = t % heads;
+        int b = t / heads;
+        int pos = positions[b];
+        if (pos < max_seq) {
+            int src = (b * heads + head) * head_dim + d;
+            int dst = ((b * heads + head) * max_seq + pos) * head_dim + d;
+            k_cache[dst] = kv_f2h(k[src]);
+            v_cache[dst] = kv_f2h(v[src]);
+        }
+    }
+}
+
+extern "C" __global__ void kv_append_batch_bf16_f32(
+    const float* k, const float* v, unsigned short* k_cache, unsigned short* v_cache,
+    const int* positions, int batch, int heads, int head_dim, int max_seq
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * heads * head_dim;
+    if (i < total) {
+        int d = i % head_dim;
+        int t = i / head_dim;
+        int head = t % heads;
+        int b = t / heads;
+        int pos = positions[b];
+        if (pos < max_seq) {
+            int src = (b * heads + head) * head_dim + d;
+            int dst = ((b * heads + head) * max_seq + pos) * head_dim + d;
+            k_cache[dst] = kv_f2b(k[src]);
+            v_cache[dst] = kv_f2b(v[src]);
+        }
+    }
+}
+
+extern "C" __global__ void attention_batch_decode_f16_f32(
+    const float* q, const unsigned short* k_cache, const unsigned short* v_cache,
+    const int* positions, float* out,
+    int batch, int heads, int max_seq, int head_dim, float scale
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * heads;
+    if (idx >= total) return;
+    int head = idx % heads;
+    int b = idx / heads;
+    int n = positions[b] + 1;
+    if (n > max_seq) n = max_seq;
+    int q_base = (b * heads + head) * head_dim;
+    int cache_base = (b * heads + head) * max_seq * head_dim;
+    float maxv = -1e30f;
+    for (int p = 0; p < n; p++) {
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; d++) dot += q[q_base + d] * kv_h2f(k_cache[cache_base + p * head_dim + d]);
+        dot *= scale;
+        if (dot > maxv) maxv = dot;
+    }
+    float sum = 0.0f;
+    for (int p = 0; p < n; p++) {
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; d++) dot += q[q_base + d] * kv_h2f(k_cache[cache_base + p * head_dim + d]);
+        sum += expf(dot * scale - maxv);
+    }
+    float inv = 1.0f / sum;
+    for (int d = 0; d < head_dim; d++) out[q_base + d] = 0.0f;
+    for (int p = 0; p < n; p++) {
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; d++) dot += q[q_base + d] * kv_h2f(k_cache[cache_base + p * head_dim + d]);
+        float prob = expf(dot * scale - maxv) * inv;
+        for (int d = 0; d < head_dim; d++) out[q_base + d] += prob * kv_h2f(v_cache[cache_base + p * head_dim + d]);
+    }
+}
+
+extern "C" __global__ void attention_batch_decode_bf16_f32(
+    const float* q, const unsigned short* k_cache, const unsigned short* v_cache,
+    const int* positions, float* out,
+    int batch, int heads, int max_seq, int head_dim, float scale
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * heads;
+    if (idx >= total) return;
+    int head = idx % heads;
+    int b = idx / heads;
+    int n = positions[b] + 1;
+    if (n > max_seq) n = max_seq;
+    int q_base = (b * heads + head) * head_dim;
+    int cache_base = (b * heads + head) * max_seq * head_dim;
+    float maxv = -1e30f;
+    for (int p = 0; p < n; p++) {
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; d++) dot += q[q_base + d] * kv_b2f(k_cache[cache_base + p * head_dim + d]);
+        dot *= scale;
+        if (dot > maxv) maxv = dot;
+    }
+    float sum = 0.0f;
+    for (int p = 0; p < n; p++) {
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; d++) dot += q[q_base + d] * kv_b2f(k_cache[cache_base + p * head_dim + d]);
+        sum += expf(dot * scale - maxv);
+    }
+    float inv = 1.0f / sum;
+    for (int d = 0; d < head_dim; d++) out[q_base + d] = 0.0f;
+    for (int p = 0; p < n; p++) {
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; d++) dot += q[q_base + d] * kv_b2f(k_cache[cache_base + p * head_dim + d]);
+        float prob = expf(dot * scale - maxv) * inv;
+        for (int d = 0; d < head_dim; d++) out[q_base + d] += prob * kv_b2f(v_cache[cache_base + p * head_dim + d]);
+    }
+}
+
+extern "C" __global__ void kv_cache_to_f32_f16(
+    const unsigned short* k_cache, const unsigned short* v_cache, float* k, float* v,
+    int batch, int heads, int prefill_len, int max_seq, int head_dim
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * heads * prefill_len * head_dim;
+    if (i < total) {
+        int d = i % head_dim;
+        int t = i / head_dim;
+        int pos = t % prefill_len;
+        int t2 = t / prefill_len;
+        int head = t2 % heads;
+        int b = t2 / heads;
+        int src = ((b * heads + head) * max_seq + pos) * head_dim + d;
+        int dst = ((b * heads + head) * prefill_len + pos) * head_dim + d;
+        k[dst] = kv_h2f(k_cache[src]);
+        v[dst] = kv_h2f(v_cache[src]);
+    }
+}
+
+extern "C" __global__ void kv_cache_to_f32_bf16(
+    const unsigned short* k_cache, const unsigned short* v_cache, float* k, float* v,
+    int batch, int heads, int prefill_len, int max_seq, int head_dim
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * heads * prefill_len * head_dim;
+    if (i < total) {
+        int d = i % head_dim;
+        int t = i / head_dim;
+        int pos = t % prefill_len;
+        int t2 = t / prefill_len;
+        int head = t2 % heads;
+        int b = t2 / heads;
+        int src = ((b * heads + head) * max_seq + pos) * head_dim + d;
+        int dst = ((b * heads + head) * prefill_len + pos) * head_dim + d;
+        k[dst] = kv_b2f(k_cache[src]);
+        v[dst] = kv_b2f(v_cache[src]);
+    }
+}
+
 extern "C" __global__ void f32_to_f16_f32(const float* a, unsigned short* out, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
@@ -831,26 +1384,28 @@ extern "C" __global__ void attention_prefill_f32(
 
 extern "C" __global__ void kv_append_batch_f32(
     const float* k, const float* v, float* k_cache, float* v_cache,
-    const int* position, int batch, int heads, int head_dim, int max_seq
+    const int* positions, int batch, int heads, int head_dim, int max_seq
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     int total = batch * heads * head_dim;
-    int pos = *position;
-    if (i < total && pos < max_seq) {
+    if (i < total) {
         int d = i % head_dim;
         int t = i / head_dim;
         int head = t % heads;
         int b = t / heads;
-        int src = (b * heads + head) * head_dim + d;
-        int dst = ((b * heads + head) * max_seq + pos) * head_dim + d;
-        k_cache[dst] = k[src];
-        v_cache[dst] = v[src];
+        int pos = positions[b];
+        if (pos < max_seq) {
+            int src = (b * heads + head) * head_dim + d;
+            int dst = ((b * heads + head) * max_seq + pos) * head_dim + d;
+            k_cache[dst] = k[src];
+            v_cache[dst] = v[src];
+        }
     }
 }
 
 extern "C" __global__ void attention_batch_decode_f32(
     const float* q, const float* k_cache, const float* v_cache,
-    const int* position, float* out,
+    const int* positions, float* out,
     int batch, int heads, int max_seq, int head_dim, float scale
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -858,7 +1413,7 @@ extern "C" __global__ void attention_batch_decode_f32(
     if (idx >= total) return;
     int head = idx % heads;
     int b = idx / heads;
-    int n = *position + 1;
+    int n = positions[b] + 1;
     if (n > max_seq) n = max_seq;
     int q_base = (b * heads + head) * head_dim;
     int cache_base = (b * heads + head) * max_seq * head_dim;
@@ -887,6 +1442,16 @@ extern "C" __global__ void attention_batch_decode_f32(
 
 extern "C" __global__ void set_i32_value(int* dst, int value) {
     if (blockIdx.x == 0 && threadIdx.x == 0) *dst = value;
+}
+
+extern "C" __global__ void fill_i32_value(int* dst, int value, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = value;
+}
+
+extern "C" __global__ void bump_positions_i32(int* positions, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) positions[i] += 1;
 }
 
 "#;
@@ -922,6 +1487,26 @@ pub(crate) struct Kernels {
     pub kv_append_batch: CudaFunction,
     pub attention_batch_decode: CudaFunction,
     pub set_i32_value: CudaFunction,
+    pub kv_prefill_f16: CudaFunction,
+    pub kv_prefill_bf16: CudaFunction,
+    pub kv_append_batch_f16: CudaFunction,
+    pub kv_append_batch_bf16: CudaFunction,
+    pub attention_batch_decode_f16: CudaFunction,
+    pub attention_batch_decode_bf16: CudaFunction,
+    pub kv_cache_to_f32_f16: CudaFunction,
+    pub kv_cache_to_f32_bf16: CudaFunction,
+    pub split_heads_prefill: CudaFunction,
+    pub merge_heads_prefill: CudaFunction,
+    pub causal_softmax_warp: CudaFunction,
+    pub gather_last_rows: CudaFunction,
+    pub attention_batch_decode_wide: CudaFunction,
+    pub attention_batch_decode_wide_f16: CudaFunction,
+    pub attention_batch_decode_wide_bf16: CudaFunction,
+    pub split_heads_decode: CudaFunction,
+    pub merge_heads_decode: CudaFunction,
+    pub decode_softmax: CudaFunction,
+    pub fill_i32_value: CudaFunction,
+    pub bump_positions: CudaFunction,
     pub scale: CudaFunction,
     pub fill: CudaFunction,
     pub transpose2d: CudaFunction,
@@ -990,6 +1575,26 @@ impl Kernels {
             kv_append_batch: load("kv_append_batch_f32")?,
             attention_batch_decode: load("attention_batch_decode_f32")?,
             set_i32_value: load("set_i32_value")?,
+            kv_prefill_f16: load("kv_prefill_f16_f32")?,
+            kv_prefill_bf16: load("kv_prefill_bf16_f32")?,
+            kv_append_batch_f16: load("kv_append_batch_f16_f32")?,
+            kv_append_batch_bf16: load("kv_append_batch_bf16_f32")?,
+            attention_batch_decode_f16: load("attention_batch_decode_f16_f32")?,
+            attention_batch_decode_bf16: load("attention_batch_decode_bf16_f32")?,
+            kv_cache_to_f32_f16: load("kv_cache_to_f32_f16")?,
+            kv_cache_to_f32_bf16: load("kv_cache_to_f32_bf16")?,
+            split_heads_prefill: load("split_heads_prefill_f32")?,
+            merge_heads_prefill: load("merge_heads_prefill_f32")?,
+            causal_softmax_warp: load("causal_softmax_warp_f32")?,
+            gather_last_rows: load("gather_last_rows_f32")?,
+            attention_batch_decode_wide: load("attention_batch_decode_wide_f32")?,
+            attention_batch_decode_wide_f16: load("attention_batch_decode_wide_f16_f32")?,
+            attention_batch_decode_wide_bf16: load("attention_batch_decode_wide_bf16_f32")?,
+            split_heads_decode: load("split_heads_decode_f32")?,
+            merge_heads_decode: load("merge_heads_decode_f32")?,
+            decode_softmax: load("decode_softmax_f32")?,
+            fill_i32_value: load("fill_i32_value")?,
+            bump_positions: load("bump_positions_i32")?,
             scale: load("scale_f32")?,
             fill: load("fill_f32")?,
             transpose2d: load("transpose2d_f32")?,

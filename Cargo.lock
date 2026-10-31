@@ -674,7 +674,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "modern-chainer"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytemuck",
  "criterion",
@@ -693,7 +693,7 @@ dependencies = [
 
 [[package]]
 name = "modern-chainer-autograd"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytemuck",
  "modern-chainer-core",
@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "modern-chainer-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytemuck",
  "thiserror 2.0.21",
@@ -711,7 +711,7 @@ dependencies = [
 
 [[package]]
 name = "modern-chainer-cpu"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytemuck",
  "gemm",
@@ -721,7 +721,7 @@ dependencies = [
 
 [[package]]
 name = "modern-chainer-cuda"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytemuck",
  "cudarc",
@@ -738,14 +738,14 @@ dependencies = [
 
 [[package]]
 name = "modern-chainer-data"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "modern-chainer-core",
 ]
 
 [[package]]
 name = "modern-chainer-llm"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "modern-chainer-core",
  "modern-chainer-cpu",
@@ -754,7 +754,7 @@ dependencies = [
 
 [[package]]
 name = "modern-chainer-nn"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "modern-chainer-autograd",
  "modern-chainer-core",
@@ -763,7 +763,7 @@ dependencies = [
 
 [[package]]
 name = "modern-chainer-optim"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "modern-chainer-autograd",
  "modern-chainer-core",
@@ -773,7 +773,7 @@ dependencies = [
 
 [[package]]
 name = "modern-chainer-python"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "modern-chainer",
  "modern-chainer-autograd",
@@ -786,7 +786,7 @@ dependencies = [
 
 [[package]]
 name = "modern-chainer-run"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "modern-chainer-autograd",
  "modern-chainer-core",
@@ -795,7 +795,7 @@ dependencies = [
 
 [[package]]
 name = "modern-chainer-serial"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "modern-chainer-core",
  "modern-chainer-cpu",
@@ -804,7 +804,7 @@ dependencies = [
 
 [[package]]
 name = "modern-chainer-vulkan"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytemuck",
  "modern-chainer-autograd",

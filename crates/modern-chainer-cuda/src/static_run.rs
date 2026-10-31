@@ -1,6 +1,7 @@
 use cudarc::cublas::sys::cublasOperation_t;
-use cudarc::cublas::{Gemm, GemmConfig};
-use cudarc::driver::{CudaSlice, LaunchConfig, PushKernelArg};
+use cudarc::cublas::{Gemm, GemmConfig, StridedBatchedConfig};
+use cudarc::driver::{CudaFunction, CudaSlice, LaunchConfig, PushKernelArg};
+use half::f16;
 
 use std::collections::HashMap;
 
@@ -110,6 +111,14 @@ impl CudaStaticContext {
             .stream
             .memcpy_htod(values, dst)
             .map_err(|error| Error::Backend(format!("htod: {error}")))
+    }
+
+    pub fn read_i32_vec(&self, slice: &CudaSlice<i32>) -> Result<Vec<i32>> {
+        self.backend
+            .runtime
+            .stream
+            .clone_dtoh(slice)
+            .map_err(|error| Error::Backend(format!("dtoh: {error}")))
     }
 
     pub fn read_i32(&self, slice: &CudaSlice<i32>) -> Result<i32> {
@@ -691,6 +700,547 @@ impl CudaStaticContext {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn kv_prefill_typed(
+        &self,
+        k: &Tensor<CudaBackend>,
+        v: &Tensor<CudaBackend>,
+        k_cache: &mut Tensor<CudaBackend>,
+        v_cache: &mut Tensor<CudaBackend>,
+        batch: usize,
+        prefill_len: usize,
+        heads: usize,
+        head_dim: usize,
+        max_seq: usize,
+        dtype: DType,
+    ) -> Result<()> {
+        if dtype == DType::F32 {
+            return self.kv_prefill(
+                k,
+                v,
+                k_cache,
+                v_cache,
+                batch,
+                prefill_len,
+                heads,
+                head_dim,
+                max_seq,
+            );
+        }
+        let total = batch * prefill_len * heads * head_dim;
+        let batch_i = i32::try_from(batch).map_err(|_| Error::invalid("tensor too large"))?;
+        let len_i = i32::try_from(prefill_len).map_err(|_| Error::invalid("tensor too large"))?;
+        let heads_i = i32::try_from(heads).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let seq_i = i32::try_from(max_seq).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let k_slice = k.storage().f32()?;
+        let v_slice = v.storage().f32()?;
+        let launch = |k_cache: &CudaSlice<f16>,
+                      v_cache: &CudaSlice<f16>,
+                      kernel: &CudaFunction,
+                      name: &str|
+         -> Result<()> {
+            let mut builder = runtime.stream.launch_builder(kernel);
+            builder
+                .arg(k_slice)
+                .arg(v_slice)
+                .arg(k_cache)
+                .arg(v_cache)
+                .arg(&batch_i)
+                .arg(&len_i)
+                .arg(&heads_i)
+                .arg(&dim_i)
+                .arg(&seq_i);
+            unsafe {
+                builder
+                    .launch(LaunchConfig::for_num_elems(total as u32))
+                    .map_err(|error| Error::Backend(format!("static {name}: {error}")))?;
+            }
+            Ok(())
+        };
+        match dtype {
+            DType::F16 => {
+                let k_cache = storage_mut(k_cache)?.f16()?;
+                let v_cache = storage_mut(v_cache)?.f16()?;
+                launch(
+                    k_cache,
+                    v_cache,
+                    &runtime.kernels.kv_prefill_f16,
+                    "kv prefill f16",
+                )
+            }
+            DType::BF16 => {
+                let k_cache = storage_mut(k_cache)?.bf16()?;
+                let v_cache = storage_mut(v_cache)?.bf16()?;
+                let mut builder = runtime
+                    .stream
+                    .launch_builder(&runtime.kernels.kv_prefill_bf16);
+                builder
+                    .arg(k_slice)
+                    .arg(v_slice)
+                    .arg(k_cache)
+                    .arg(v_cache)
+                    .arg(&batch_i)
+                    .arg(&len_i)
+                    .arg(&heads_i)
+                    .arg(&dim_i)
+                    .arg(&seq_i);
+                unsafe {
+                    builder
+                        .launch(LaunchConfig::for_num_elems(total as u32))
+                        .map_err(|error| {
+                            Error::Backend(format!("static kv prefill bf16: {error}"))
+                        })?;
+                }
+                Ok(())
+            }
+            _ => Err(Error::invalid("unsupported KV dtype")),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn kv_append_batch_typed(
+        &self,
+        k: &Tensor<CudaBackend>,
+        v: &Tensor<CudaBackend>,
+        k_cache: &mut Tensor<CudaBackend>,
+        v_cache: &mut Tensor<CudaBackend>,
+        positions: &CudaSlice<i32>,
+        batch: usize,
+        heads: usize,
+        head_dim: usize,
+        max_seq: usize,
+        dtype: DType,
+    ) -> Result<()> {
+        if dtype == DType::F32 {
+            return self.kv_append_batch(
+                k, v, k_cache, v_cache, positions, batch, heads, head_dim, max_seq,
+            );
+        }
+        let total = batch * heads * head_dim;
+        let batch_i = i32::try_from(batch).map_err(|_| Error::invalid("tensor too large"))?;
+        let heads_i = i32::try_from(heads).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let seq_i = i32::try_from(max_seq).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let k_slice = k.storage().f32()?;
+        let v_slice = v.storage().f32()?;
+        let kernel = match dtype {
+            DType::F16 => &runtime.kernels.kv_append_batch_f16,
+            DType::BF16 => &runtime.kernels.kv_append_batch_bf16,
+            _ => return Err(Error::invalid("unsupported KV dtype")),
+        };
+        match dtype {
+            DType::F16 => {
+                let k_cache = storage_mut(k_cache)?.f16()?;
+                let v_cache = storage_mut(v_cache)?.f16()?;
+                let mut builder = runtime.stream.launch_builder(kernel);
+                builder
+                    .arg(k_slice)
+                    .arg(v_slice)
+                    .arg(k_cache)
+                    .arg(v_cache)
+                    .arg(positions)
+                    .arg(&batch_i)
+                    .arg(&heads_i)
+                    .arg(&dim_i)
+                    .arg(&seq_i);
+                unsafe {
+                    builder
+                        .launch(LaunchConfig::for_num_elems(total as u32))
+                        .map_err(|error| {
+                            Error::Backend(format!("static kv append f16: {error}"))
+                        })?;
+                }
+            }
+            DType::BF16 => {
+                let k_cache = storage_mut(k_cache)?.bf16()?;
+                let v_cache = storage_mut(v_cache)?.bf16()?;
+                let mut builder = runtime.stream.launch_builder(kernel);
+                builder
+                    .arg(k_slice)
+                    .arg(v_slice)
+                    .arg(k_cache)
+                    .arg(v_cache)
+                    .arg(positions)
+                    .arg(&batch_i)
+                    .arg(&heads_i)
+                    .arg(&dim_i)
+                    .arg(&seq_i);
+                unsafe {
+                    builder
+                        .launch(LaunchConfig::for_num_elems(total as u32))
+                        .map_err(|error| {
+                            Error::Backend(format!("static kv append bf16: {error}"))
+                        })?;
+                }
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn attention_batch_decode_typed(
+        &self,
+        q: &Tensor<CudaBackend>,
+        k_cache: &Tensor<CudaBackend>,
+        v_cache: &Tensor<CudaBackend>,
+        positions: &CudaSlice<i32>,
+        out: &mut Tensor<CudaBackend>,
+        batch: usize,
+        heads: usize,
+        max_seq: usize,
+        head_dim: usize,
+        scale: f32,
+        dtype: DType,
+    ) -> Result<()> {
+        if dtype == DType::F32 {
+            return self.attention_batch_decode(
+                q, k_cache, v_cache, positions, out, batch, heads, max_seq, head_dim, scale,
+            );
+        }
+        let total = batch * heads;
+        let batch_i = i32::try_from(batch).map_err(|_| Error::invalid("tensor too large"))?;
+        let heads_i = i32::try_from(heads).map_err(|_| Error::invalid("tensor too large"))?;
+        let seq_i = i32::try_from(max_seq).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let q_slice = q.storage().f32()?;
+        let out_slice = storage_mut(out)?.f32_mut()?;
+        let wide = head_dim <= 256;
+        let kernel = match (dtype, wide) {
+            (DType::F16, true) => &runtime.kernels.attention_batch_decode_wide_f16,
+            (DType::BF16, true) => &runtime.kernels.attention_batch_decode_wide_bf16,
+            (DType::F16, false) => &runtime.kernels.attention_batch_decode_f16,
+            (DType::BF16, false) => &runtime.kernels.attention_batch_decode_bf16,
+            _ => return Err(Error::invalid("unsupported KV dtype")),
+        };
+        match dtype {
+            DType::F16 => {
+                let k_slice = k_cache.storage().f16()?;
+                let v_slice = v_cache.storage().f16()?;
+                let mut builder = runtime.stream.launch_builder(kernel);
+                builder
+                    .arg(q_slice)
+                    .arg(k_slice)
+                    .arg(v_slice)
+                    .arg(positions)
+                    .arg(out_slice)
+                    .arg(&batch_i)
+                    .arg(&heads_i)
+                    .arg(&seq_i)
+                    .arg(&dim_i)
+                    .arg(&scale);
+                unsafe {
+                    builder
+                        .launch(LaunchConfig::for_num_elems(total as u32))
+                        .map_err(|error| {
+                            Error::Backend(format!("static attention decode f16: {error}"))
+                        })?;
+                }
+            }
+            DType::BF16 => {
+                let k_slice = k_cache.storage().bf16()?;
+                let v_slice = v_cache.storage().bf16()?;
+                let mut builder = runtime.stream.launch_builder(kernel);
+                builder
+                    .arg(q_slice)
+                    .arg(k_slice)
+                    .arg(v_slice)
+                    .arg(positions)
+                    .arg(out_slice)
+                    .arg(&batch_i)
+                    .arg(&heads_i)
+                    .arg(&seq_i)
+                    .arg(&dim_i)
+                    .arg(&scale);
+                unsafe {
+                    builder
+                        .launch(LaunchConfig::for_num_elems(total as u32))
+                        .map_err(|error| {
+                            Error::Backend(format!("static attention decode bf16: {error}"))
+                        })?;
+                }
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn kv_cache_to_f32_typed(
+        &self,
+        k_cache: &Tensor<CudaBackend>,
+        v_cache: &Tensor<CudaBackend>,
+        k: &mut Tensor<CudaBackend>,
+        v: &mut Tensor<CudaBackend>,
+        batch: usize,
+        heads: usize,
+        prefill_len: usize,
+        max_seq: usize,
+        head_dim: usize,
+        dtype: DType,
+    ) -> Result<()> {
+        let total = batch * heads * prefill_len * head_dim;
+        let batch_i = i32::try_from(batch).map_err(|_| Error::invalid("tensor too large"))?;
+        let heads_i = i32::try_from(heads).map_err(|_| Error::invalid("tensor too large"))?;
+        let len_i = i32::try_from(prefill_len).map_err(|_| Error::invalid("tensor too large"))?;
+        let seq_i = i32::try_from(max_seq).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let k_out = storage_mut(k)?.f32_mut()?;
+        let v_out = storage_mut(v)?.f32_mut()?;
+        let kernel = match dtype {
+            DType::F16 => &runtime.kernels.kv_cache_to_f32_f16,
+            DType::BF16 => &runtime.kernels.kv_cache_to_f32_bf16,
+            _ => return Err(Error::invalid("KV cache is already f32")),
+        };
+        match dtype {
+            DType::F16 => {
+                let k_cache = k_cache.storage().f16()?;
+                let v_cache = v_cache.storage().f16()?;
+                let mut builder = runtime.stream.launch_builder(kernel);
+                builder
+                    .arg(k_cache)
+                    .arg(v_cache)
+                    .arg(k_out)
+                    .arg(v_out)
+                    .arg(&batch_i)
+                    .arg(&heads_i)
+                    .arg(&len_i)
+                    .arg(&seq_i)
+                    .arg(&dim_i);
+                unsafe {
+                    builder
+                        .launch(LaunchConfig::for_num_elems(total as u32))
+                        .map_err(|error| {
+                            Error::Backend(format!("static kv upcast f16: {error}"))
+                        })?;
+                }
+            }
+            DType::BF16 => {
+                let k_cache = k_cache.storage().bf16()?;
+                let v_cache = v_cache.storage().bf16()?;
+                let mut builder = runtime.stream.launch_builder(kernel);
+                builder
+                    .arg(k_cache)
+                    .arg(v_cache)
+                    .arg(k_out)
+                    .arg(v_out)
+                    .arg(&batch_i)
+                    .arg(&heads_i)
+                    .arg(&len_i)
+                    .arg(&seq_i)
+                    .arg(&dim_i);
+                unsafe {
+                    builder
+                        .launch(LaunchConfig::for_num_elems(total as u32))
+                        .map_err(|error| {
+                            Error::Backend(format!("static kv upcast bf16: {error}"))
+                        })?;
+                }
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+
+    pub fn split_heads_prefill(
+        &self,
+        q: &Tensor<CudaBackend>,
+        qh: &mut Tensor<CudaBackend>,
+        batch: usize,
+        prefill_len: usize,
+        heads: usize,
+        head_dim: usize,
+    ) -> Result<()> {
+        let total = batch * prefill_len * heads * head_dim;
+        let batch_i = i32::try_from(batch).map_err(|_| Error::invalid("tensor too large"))?;
+        let len_i = i32::try_from(prefill_len).map_err(|_| Error::invalid("tensor too large"))?;
+        let heads_i = i32::try_from(heads).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let q_slice = q.storage().f32()?;
+        let qh_slice = storage_mut(qh)?.f32_mut()?;
+        let mut builder = runtime
+            .stream
+            .launch_builder(&runtime.kernels.split_heads_prefill);
+        builder
+            .arg(q_slice)
+            .arg(qh_slice)
+            .arg(&batch_i)
+            .arg(&len_i)
+            .arg(&heads_i)
+            .arg(&dim_i);
+        unsafe {
+            builder
+                .launch(LaunchConfig::for_num_elems(total as u32))
+                .map_err(|error| Error::Backend(format!("static split heads prefill: {error}")))?;
+        }
+        Ok(())
+    }
+
+    pub fn merge_heads_prefill(
+        &self,
+        attn: &Tensor<CudaBackend>,
+        out: &mut Tensor<CudaBackend>,
+        batch: usize,
+        prefill_len: usize,
+        heads: usize,
+        head_dim: usize,
+    ) -> Result<()> {
+        let total = batch * prefill_len * heads * head_dim;
+        let batch_i = i32::try_from(batch).map_err(|_| Error::invalid("tensor too large"))?;
+        let len_i = i32::try_from(prefill_len).map_err(|_| Error::invalid("tensor too large"))?;
+        let heads_i = i32::try_from(heads).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let attn_slice = attn.storage().f32()?;
+        let out_slice = storage_mut(out)?.f32_mut()?;
+        let mut builder = runtime
+            .stream
+            .launch_builder(&runtime.kernels.merge_heads_prefill);
+        builder
+            .arg(attn_slice)
+            .arg(out_slice)
+            .arg(&batch_i)
+            .arg(&len_i)
+            .arg(&heads_i)
+            .arg(&dim_i);
+        unsafe {
+            builder
+                .launch(LaunchConfig::for_num_elems(total as u32))
+                .map_err(|error| Error::Backend(format!("static merge heads prefill: {error}")))?;
+        }
+        Ok(())
+    }
+
+    pub fn causal_softmax(
+        &self,
+        scores: &mut Tensor<CudaBackend>,
+        rows: usize,
+        len: usize,
+    ) -> Result<()> {
+        let rows_i = i32::try_from(rows).map_err(|_| Error::invalid("tensor too large"))?;
+        let len_i = i32::try_from(len).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let scores = storage_mut(scores)?.f32_mut()?;
+        let mut builder = runtime
+            .stream
+            .launch_builder(&runtime.kernels.causal_softmax_warp);
+        builder.arg(scores).arg(&rows_i).arg(&len_i);
+        unsafe {
+            builder
+                .launch(LaunchConfig {
+                    grid_dim: ((rows as u32).div_ceil(4), 1, 1),
+                    block_dim: (128, 1, 1),
+                    shared_mem_bytes: 0,
+                })
+                .map_err(|error| Error::Backend(format!("static causal softmax: {error}")))?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn prefill_scores(
+        &self,
+        qh: &Tensor<CudaBackend>,
+        k_cache: &Tensor<CudaBackend>,
+        scores: &mut Tensor<CudaBackend>,
+        batch_heads: usize,
+        prefill_len: usize,
+        k_stride: usize,
+        head_dim: usize,
+        scale: f32,
+    ) -> Result<()> {
+        let qh = qh.storage().f32()?;
+        let k_cache = k_cache.storage().f32()?;
+        let scores = storage_mut(scores)?.f32_mut()?;
+        let len_i = i32::try_from(prefill_len).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let bh_i = i32::try_from(batch_heads).map_err(|_| Error::invalid("tensor too large"))?;
+        let q_stride = (prefill_len * head_dim) as i64;
+        let k_stride = i64::try_from(k_stride).map_err(|_| Error::invalid("tensor too large"))?;
+        let c_stride = (prefill_len * prefill_len) as i64;
+        unsafe {
+            self.backend.runtime.blas.gemm_strided_batched(
+                StridedBatchedConfig {
+                    gemm: GemmConfig {
+                        transa: cublasOperation_t::CUBLAS_OP_T,
+                        transb: cublasOperation_t::CUBLAS_OP_N,
+                        m: len_i,
+                        n: len_i,
+                        k: dim_i,
+                        alpha: scale,
+                        lda: dim_i,
+                        ldb: dim_i,
+                        ldc: len_i,
+                        beta: 0.0,
+                    },
+                    batch_size: bh_i,
+                    stride_a: k_stride,
+                    stride_b: q_stride,
+                    stride_c: c_stride,
+                },
+                k_cache,
+                qh,
+                scores,
+            )
+        }
+        .map_err(|error| Error::Backend(format!("static prefill scores: {error}")))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn prefill_out(
+        &self,
+        scores: &Tensor<CudaBackend>,
+        v_cache: &Tensor<CudaBackend>,
+        attn: &mut Tensor<CudaBackend>,
+        batch_heads: usize,
+        prefill_len: usize,
+        v_stride: usize,
+        head_dim: usize,
+    ) -> Result<()> {
+        let scores = scores.storage().f32()?;
+        let v_cache = v_cache.storage().f32()?;
+        let attn = storage_mut(attn)?.f32_mut()?;
+        let len_i = i32::try_from(prefill_len).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let bh_i = i32::try_from(batch_heads).map_err(|_| Error::invalid("tensor too large"))?;
+        let b_stride = (prefill_len * prefill_len) as i64;
+        let v_stride = i64::try_from(v_stride).map_err(|_| Error::invalid("tensor too large"))?;
+        let c_stride = (prefill_len * head_dim) as i64;
+        unsafe {
+            self.backend.runtime.blas.gemm_strided_batched(
+                StridedBatchedConfig {
+                    gemm: GemmConfig {
+                        transa: cublasOperation_t::CUBLAS_OP_N,
+                        transb: cublasOperation_t::CUBLAS_OP_N,
+                        m: dim_i,
+                        n: len_i,
+                        k: len_i,
+                        alpha: 1.0,
+                        lda: dim_i,
+                        ldb: len_i,
+                        ldc: dim_i,
+                        beta: 0.0,
+                    },
+                    batch_size: bh_i,
+                    stride_a: v_stride,
+                    stride_b: b_stride,
+                    stride_c: c_stride,
+                },
+                v_cache,
+                scores,
+                attn,
+            )
+        }
+        .map_err(|error| Error::Backend(format!("static prefill out: {error}")))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn attention_prefill(
         &self,
         q: &Tensor<CudaBackend>,
@@ -805,9 +1355,13 @@ impl CudaStaticContext {
         let k_slice = k_cache.storage().f32()?;
         let v_slice = v_cache.storage().f32()?;
         let out_slice = storage_mut(out)?.f32_mut()?;
-        let mut builder = runtime
-            .stream
-            .launch_builder(&runtime.kernels.attention_batch_decode);
+        let wide = head_dim <= 256;
+        let kernel = if wide {
+            &runtime.kernels.attention_batch_decode_wide
+        } else {
+            &runtime.kernels.attention_batch_decode
+        };
+        let mut builder = runtime.stream.launch_builder(kernel);
         builder
             .arg(q_slice)
             .arg(k_slice)
@@ -820,11 +1374,247 @@ impl CudaStaticContext {
             .arg(&dim_i)
             .arg(&scale);
         unsafe {
+            let config = if wide {
+                LaunchConfig {
+                    grid_dim: ((total as u32).div_ceil(4), 1, 1),
+                    block_dim: (128, 1, 1),
+                    shared_mem_bytes: 0,
+                }
+            } else {
+                LaunchConfig::for_num_elems(total as u32)
+            };
             builder
-                .launch(LaunchConfig::for_num_elems(total as u32))
+                .launch(config)
                 .map_err(|error| Error::Backend(format!("static attention batch: {error}")))?;
         }
         Ok(())
+    }
+
+    pub fn gather_last_rows(
+        &self,
+        x: &Tensor<CudaBackend>,
+        out: &mut Tensor<CudaBackend>,
+        batch: usize,
+        rows: usize,
+        dim: usize,
+    ) -> Result<()> {
+        let total = batch * dim;
+        let batch_i = i32::try_from(batch).map_err(|_| Error::invalid("tensor too large"))?;
+        let rows_i = i32::try_from(rows).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let x_slice = x.storage().f32()?;
+        let out_slice = storage_mut(out)?.f32_mut()?;
+        let mut builder = runtime
+            .stream
+            .launch_builder(&runtime.kernels.gather_last_rows);
+        builder
+            .arg(x_slice)
+            .arg(out_slice)
+            .arg(&batch_i)
+            .arg(&rows_i)
+            .arg(&dim_i);
+        unsafe {
+            builder
+                .launch(LaunchConfig::for_num_elems(total as u32))
+                .map_err(|error| Error::Backend(format!("static gather last rows: {error}")))?;
+        }
+        Ok(())
+    }
+
+    pub fn split_heads_decode(
+        &self,
+        q: &Tensor<CudaBackend>,
+        qh: &mut Tensor<CudaBackend>,
+        batch: usize,
+        heads: usize,
+        head_dim: usize,
+    ) -> Result<()> {
+        let total = batch * heads * head_dim;
+        let batch_i = i32::try_from(batch).map_err(|_| Error::invalid("tensor too large"))?;
+        let heads_i = i32::try_from(heads).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let q_slice = q.storage().f32()?;
+        let qh_slice = storage_mut(qh)?.f32_mut()?;
+        let mut builder = runtime
+            .stream
+            .launch_builder(&runtime.kernels.split_heads_decode);
+        builder
+            .arg(q_slice)
+            .arg(qh_slice)
+            .arg(&batch_i)
+            .arg(&heads_i)
+            .arg(&dim_i);
+        unsafe {
+            builder
+                .launch(LaunchConfig::for_num_elems(total as u32))
+                .map_err(|error| Error::Backend(format!("static split heads decode: {error}")))?;
+        }
+        Ok(())
+    }
+
+    pub fn merge_heads_decode(
+        &self,
+        attn: &Tensor<CudaBackend>,
+        out: &mut Tensor<CudaBackend>,
+        batch: usize,
+        heads: usize,
+        head_dim: usize,
+    ) -> Result<()> {
+        let total = batch * heads * head_dim;
+        let batch_i = i32::try_from(batch).map_err(|_| Error::invalid("tensor too large"))?;
+        let heads_i = i32::try_from(heads).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let attn_slice = attn.storage().f32()?;
+        let out_slice = storage_mut(out)?.f32_mut()?;
+        let mut builder = runtime
+            .stream
+            .launch_builder(&runtime.kernels.merge_heads_decode);
+        builder
+            .arg(attn_slice)
+            .arg(out_slice)
+            .arg(&batch_i)
+            .arg(&heads_i)
+            .arg(&dim_i);
+        unsafe {
+            builder
+                .launch(LaunchConfig::for_num_elems(total as u32))
+                .map_err(|error| Error::Backend(format!("static merge heads decode: {error}")))?;
+        }
+        Ok(())
+    }
+
+    pub fn decode_softmax(
+        &self,
+        scores: &mut Tensor<CudaBackend>,
+        positions: &CudaSlice<i32>,
+        batch: usize,
+        heads: usize,
+        max_seq: usize,
+    ) -> Result<()> {
+        let batch_i = i32::try_from(batch).map_err(|_| Error::invalid("tensor too large"))?;
+        let heads_i = i32::try_from(heads).map_err(|_| Error::invalid("tensor too large"))?;
+        let seq_i = i32::try_from(max_seq).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let scores = storage_mut(scores)?.f32_mut()?;
+        let mut builder = runtime
+            .stream
+            .launch_builder(&runtime.kernels.decode_softmax);
+        builder
+            .arg(scores)
+            .arg(positions)
+            .arg(&batch_i)
+            .arg(&heads_i)
+            .arg(&seq_i);
+        unsafe {
+            builder
+                .launch(LaunchConfig {
+                    grid_dim: ((batch * heads) as u32, 1, 1),
+                    block_dim: (256, 1, 1),
+                    shared_mem_bytes: 0,
+                })
+                .map_err(|error| Error::Backend(format!("static decode softmax: {error}")))?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn decode_scores(
+        &self,
+        qh: &Tensor<CudaBackend>,
+        k_cache: &Tensor<CudaBackend>,
+        scores: &mut Tensor<CudaBackend>,
+        batch_heads: usize,
+        max_seq: usize,
+        k_stride: usize,
+        head_dim: usize,
+        scale: f32,
+    ) -> Result<()> {
+        let qh = qh.storage().f32()?;
+        let k_cache = k_cache.storage().f32()?;
+        let scores = storage_mut(scores)?.f32_mut()?;
+        let seq_i = i32::try_from(max_seq).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let bh_i = i32::try_from(batch_heads).map_err(|_| Error::invalid("tensor too large"))?;
+        let k_stride = i64::try_from(k_stride).map_err(|_| Error::invalid("tensor too large"))?;
+        let q_stride = head_dim as i64;
+        let c_stride = max_seq as i64;
+        unsafe {
+            self.backend.runtime.blas.gemm_strided_batched(
+                StridedBatchedConfig {
+                    gemm: GemmConfig {
+                        transa: cublasOperation_t::CUBLAS_OP_T,
+                        transb: cublasOperation_t::CUBLAS_OP_N,
+                        m: seq_i,
+                        n: 1,
+                        k: dim_i,
+                        alpha: scale,
+                        lda: dim_i,
+                        ldb: dim_i,
+                        ldc: seq_i,
+                        beta: 0.0,
+                    },
+                    batch_size: bh_i,
+                    stride_a: k_stride,
+                    stride_b: q_stride,
+                    stride_c: c_stride,
+                },
+                k_cache,
+                qh,
+                scores,
+            )
+        }
+        .map_err(|error| Error::Backend(format!("static decode scores: {error}")))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn decode_out(
+        &self,
+        scores: &Tensor<CudaBackend>,
+        v_cache: &Tensor<CudaBackend>,
+        attn: &mut Tensor<CudaBackend>,
+        batch_heads: usize,
+        max_seq: usize,
+        v_stride: usize,
+        head_dim: usize,
+    ) -> Result<()> {
+        let scores = scores.storage().f32()?;
+        let v_cache = v_cache.storage().f32()?;
+        let attn = storage_mut(attn)?.f32_mut()?;
+        let seq_i = i32::try_from(max_seq).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let bh_i = i32::try_from(batch_heads).map_err(|_| Error::invalid("tensor too large"))?;
+        let v_stride = i64::try_from(v_stride).map_err(|_| Error::invalid("tensor too large"))?;
+        let s_stride = max_seq as i64;
+        let c_stride = head_dim as i64;
+        unsafe {
+            self.backend.runtime.blas.gemm_strided_batched(
+                StridedBatchedConfig {
+                    gemm: GemmConfig {
+                        transa: cublasOperation_t::CUBLAS_OP_N,
+                        transb: cublasOperation_t::CUBLAS_OP_N,
+                        m: dim_i,
+                        n: 1,
+                        k: seq_i,
+                        alpha: 1.0,
+                        lda: dim_i,
+                        ldb: seq_i,
+                        ldc: dim_i,
+                        beta: 0.0,
+                    },
+                    batch_size: bh_i,
+                    stride_a: v_stride,
+                    stride_b: s_stride,
+                    stride_c: c_stride,
+                },
+                v_cache,
+                scores,
+                attn,
+            )
+        }
+        .map_err(|error| Error::Backend(format!("static decode out: {error}")))
     }
 
     pub fn set_position(&self, position: &mut CudaSlice<i32>, value: i32) -> Result<()> {
@@ -841,6 +1631,41 @@ impl CudaStaticContext {
                     shared_mem_bytes: 0,
                 })
                 .map_err(|error| Error::Backend(format!("static set position: {error}")))?;
+        }
+        Ok(())
+    }
+
+    pub fn fill_positions(
+        &self,
+        positions: &mut CudaSlice<i32>,
+        value: i32,
+        len: usize,
+    ) -> Result<()> {
+        let len_i = i32::try_from(len).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let mut builder = runtime
+            .stream
+            .launch_builder(&runtime.kernels.fill_i32_value);
+        builder.arg(positions).arg(&value).arg(&len_i);
+        unsafe {
+            builder
+                .launch(LaunchConfig::for_num_elems(len as u32))
+                .map_err(|error| Error::Backend(format!("static fill positions: {error}")))?;
+        }
+        Ok(())
+    }
+
+    pub fn bump_positions(&self, positions: &mut CudaSlice<i32>, len: usize) -> Result<()> {
+        let len_i = i32::try_from(len).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let mut builder = runtime
+            .stream
+            .launch_builder(&runtime.kernels.bump_positions);
+        builder.arg(positions).arg(&len_i);
+        unsafe {
+            builder
+                .launch(LaunchConfig::for_num_elems(len as u32))
+                .map_err(|error| Error::Backend(format!("static bump positions: {error}")))?;
         }
         Ok(())
     }
@@ -1355,10 +2180,52 @@ struct BatchTensors {
     hidden: Tensor<CudaBackend>,
     update: Tensor<CudaBackend>,
     logits: Tensor<CudaBackend>,
+    qh: Option<Tensor<CudaBackend>>,
+    attn_h: Option<Tensor<CudaBackend>>,
+    scores: Option<Tensor<CudaBackend>>,
+    k_work: Option<Tensor<CudaBackend>>,
+    v_work: Option<Tensor<CudaBackend>>,
+    last_x: Option<Tensor<CudaBackend>>,
+    last_norm: Option<Tensor<CudaBackend>>,
 }
 
 impl BatchTensors {
-    fn allocate(builder: &StaticBuilder, rows: usize, config: &DecoderConfig) -> Result<Self> {
+    fn allocate(
+        builder: &StaticBuilder,
+        rows: usize,
+        config: &DecoderConfig,
+        prefill: Option<(usize, usize, bool)>,
+    ) -> Result<Self> {
+        let (qh, attn_h, scores, k_work, v_work) = if let Some((batch, prefill_len, lowp)) = prefill
+        {
+            let batch_heads = batch * config.n_heads;
+            let width = config.head_dim();
+            let qh = builder.zeros([batch_heads * prefill_len * width], DType::F32)?;
+            let attn_h = builder.zeros([batch_heads * prefill_len * width], DType::F32)?;
+            let scores = builder.zeros([batch_heads * prefill_len * prefill_len], DType::F32)?;
+            let k_work = if lowp {
+                Some(builder.zeros([batch_heads * prefill_len * width], DType::F32)?)
+            } else {
+                None
+            };
+            let v_work = if lowp {
+                Some(builder.zeros([batch_heads * prefill_len * width], DType::F32)?)
+            } else {
+                None
+            };
+            (Some(qh), Some(attn_h), Some(scores), k_work, v_work)
+        } else {
+            (None, None, None, None, None)
+        };
+        let (last_x, last_norm, logits_rows) = if let Some((batch, _, _)) = prefill {
+            (
+                Some(builder.zeros([batch, config.d_model], DType::F32)?),
+                Some(builder.zeros([batch, config.d_model], DType::F32)?),
+                batch,
+            )
+        } else {
+            (None, None, rows)
+        };
         Ok(Self {
             x: builder.zeros([rows, config.d_model], DType::F32)?,
             norm: builder.zeros([rows, config.d_model], DType::F32)?,
@@ -1368,8 +2235,73 @@ impl BatchTensors {
             attn: builder.zeros([rows, config.d_model], DType::F32)?,
             hidden: builder.zeros([rows, config.d_ff], DType::F32)?,
             update: builder.zeros([rows, config.d_model], DType::F32)?,
-            logits: builder.zeros([rows, config.vocab], DType::F32)?,
+            logits: builder.zeros([logits_rows, config.vocab], DType::F32)?,
+            qh,
+            attn_h,
+            scores,
+            k_work,
+            v_work,
+            last_x,
+            last_norm,
         })
+    }
+}
+
+struct DecodeWorkspace {
+    qh: Tensor<CudaBackend>,
+    attn_h: Tensor<CudaBackend>,
+    scores: Tensor<CudaBackend>,
+    k_work: Option<Tensor<CudaBackend>>,
+    v_work: Option<Tensor<CudaBackend>>,
+}
+
+impl DecodeWorkspace {
+    fn allocate(
+        builder: &StaticBuilder,
+        batch: usize,
+        max_seq: usize,
+        config: &DecoderConfig,
+        lowp: bool,
+    ) -> Result<Self> {
+        let heads = config.n_heads;
+        let head_dim = config.head_dim();
+        let batch_heads = batch * heads;
+        let k_work = if lowp {
+            Some(builder.zeros([batch_heads * max_seq * head_dim], DType::F32)?)
+        } else {
+            None
+        };
+        let v_work = if lowp {
+            Some(builder.zeros([batch_heads * max_seq * head_dim], DType::F32)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            qh: builder.zeros([batch_heads * head_dim], DType::F32)?,
+            attn_h: builder.zeros([batch_heads * head_dim], DType::F32)?,
+            scores: builder.zeros([batch_heads * max_seq], DType::F32)?,
+            k_work,
+            v_work,
+        })
+    }
+}
+
+/// Persistent KV cache element type. Weights and activations stay f32.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KvDType {
+    #[default]
+    F32,
+    F16,
+    Bf16,
+}
+
+impl KvDType {
+    pub fn dtype(self) -> DType {
+        match self {
+            Self::F32 => DType::F32,
+            Self::F16 => DType::F16,
+            Self::Bf16 => DType::BF16,
+        }
     }
 }
 
@@ -1378,30 +2310,41 @@ struct BatchedStaticDecoderBuffers {
     kv: Vec<(Tensor<CudaBackend>, Tensor<CudaBackend>)>,
     prefill_tokens: CudaSlice<i32>,
     decode_tokens: CudaSlice<i32>,
-    position: CudaSlice<i32>,
+    positions: CudaSlice<i32>,
     prefill: BatchTensors,
     decode: BatchTensors,
+    decode_ws: DecodeWorkspace,
 }
 
 /// Fixed-shape batched prefill + decode with a shared KV cache.
 ///
 /// The prefill graph processes `batch * prefill_len` tokens with causal
 /// attention in one replay. The decode graph processes one token per batch
-/// element at the shared position and advances it. Both graphs are captured
+/// element at its own position and advances it. Both graphs are captured
 /// once and replay without allocation.
 pub struct BatchedStaticDecoder {
     config: DecoderConfig,
     batch: usize,
     prefill_len: usize,
+    kv_dtype: KvDType,
     ctx: CudaStaticContext,
     buffers: BatchedStaticDecoderBuffers,
     prefill_graph: CudaGraphRunner,
     decode_graph: CudaGraphRunner,
-    host_position: usize,
+    host_positions: Vec<usize>,
 }
 
 impl BatchedStaticDecoder {
     pub fn new(decoder: Decoder<CudaBackend>, batch: usize, prefill_len: usize) -> Result<Self> {
+        Self::new_with_kv_dtype(decoder, batch, prefill_len, KvDType::F32)
+    }
+
+    pub fn new_with_kv_dtype(
+        decoder: Decoder<CudaBackend>,
+        batch: usize,
+        prefill_len: usize,
+        kv_dtype: KvDType,
+    ) -> Result<Self> {
         let config = decoder.config().clone();
         if batch == 0 || prefill_len == 0 {
             return Err(Error::invalid("batch and prefill_len must be positive"));
@@ -1409,27 +2352,28 @@ impl BatchedStaticDecoder {
         if prefill_len > config.max_seq {
             return Err(Error::invalid("prefill_len exceeds max_seq"));
         }
-        let backend = decoder
-            .parameters()
+        let parameters = decoder.parameters();
+        let backend = parameters
             .first()
             .map(|(_, tensor)| tensor.backend().clone())
             .ok_or_else(|| Error::invalid("decoder has no parameters"))?;
         let builder = StaticBuilder::new(backend.clone());
         let mut weights = HashMap::new();
-        for (name, tensor) in decoder.parameters() {
-            weights.insert(name, builder.from_tensor(&tensor)?);
+        for (name, tensor) in &parameters {
+            weights.insert(name.clone(), builder.from_tensor(tensor)?);
         }
         let head_dim = config.head_dim();
+        let lowp = kv_dtype != KvDType::F32;
         let mut kv = Vec::with_capacity(config.n_layers);
         for _ in 0..config.n_layers {
             kv.push((
                 builder.zeros(
                     [batch, config.n_heads, config.max_seq, head_dim],
-                    DType::F32,
+                    kv_dtype.dtype(),
                 )?,
                 builder.zeros(
                     [batch, config.n_heads, config.max_seq, head_dim],
-                    DType::F32,
+                    kv_dtype.dtype(),
                 )?,
             ));
         }
@@ -1438,25 +2382,33 @@ impl BatchedStaticDecoder {
             kv,
             prefill_tokens: builder.i32_zeros(batch * prefill_len)?,
             decode_tokens: builder.i32_zeros(batch)?,
-            position: builder.i32_scalar()?,
-            prefill: BatchTensors::allocate(&builder, batch * prefill_len, &config)?,
-            decode: BatchTensors::allocate(&builder, batch, &config)?,
+            positions: builder.i32_zeros(batch)?,
+            prefill: BatchTensors::allocate(
+                &builder,
+                batch * prefill_len,
+                &config,
+                Some((batch, prefill_len, lowp)),
+            )?,
+            decode: BatchTensors::allocate(&builder, batch, &config, None)?,
+            decode_ws: DecodeWorkspace::allocate(&builder, batch, config.max_seq, &config, lowp)?,
         };
         let ctx = CudaStaticContext::new(backend.clone());
         let mut buffers = buffers;
-        let prefill_graph = backend
-            .capture(|| enqueue_batched_prefill(&config, batch, prefill_len, &ctx, &mut buffers))?;
-        let decode_graph =
-            backend.capture(|| enqueue_batched_decode(&config, batch, &ctx, &mut buffers))?;
+        let prefill_graph = backend.capture(|| {
+            enqueue_batched_prefill(&config, batch, prefill_len, kv_dtype, &ctx, &mut buffers)
+        })?;
+        let decode_graph = backend
+            .capture(|| enqueue_batched_decode(&config, batch, kv_dtype, &ctx, &mut buffers))?;
         Ok(Self {
             config,
             batch,
             prefill_len,
+            kv_dtype,
             ctx,
             buffers,
             prefill_graph,
             decode_graph,
-            host_position: 0,
+            host_positions: vec![0; batch],
         })
     }
 
@@ -1468,13 +2420,58 @@ impl BatchedStaticDecoder {
         self.prefill_len
     }
 
+    pub fn kv_dtype(&self) -> KvDType {
+        self.kv_dtype
+    }
+
+    pub fn kv_bytes(&self) -> usize {
+        let elements = self.batch
+            * self.config.n_heads
+            * self.config.max_seq
+            * self.config.head_dim()
+            * 2
+            * self.config.n_layers;
+        elements * self.kv_dtype.dtype().size_in_bytes()
+    }
+
     pub fn config(&self) -> &DecoderConfig {
         &self.config
     }
 
+    pub fn positions(&self) -> Result<Vec<usize>> {
+        self.ctx
+            .read_i32_vec(&self.buffers.positions)?
+            .into_iter()
+            .map(|position| {
+                usize::try_from(position).map_err(|_| Error::invalid("negative static position"))
+            })
+            .collect()
+    }
+
     pub fn position(&self) -> Result<usize> {
-        let position = self.ctx.read_i32(&self.buffers.position)?;
-        usize::try_from(position).map_err(|_| Error::invalid("negative static position"))
+        self.positions()?
+            .first()
+            .copied()
+            .ok_or_else(|| Error::invalid("empty static position"))
+    }
+
+    pub fn set_positions(&mut self, positions: &[usize]) -> Result<()> {
+        if positions.len() != self.batch {
+            return Err(Error::invalid("position count mismatch"));
+        }
+        let values: Vec<i32> = positions
+            .iter()
+            .map(|&position| {
+                if position > self.config.max_seq {
+                    return Err(Error::invalid("position exceeds max_seq"));
+                }
+                i32::try_from(position).map_err(|_| Error::invalid("position too large"))
+            })
+            .collect::<Result<_>>()?;
+        self.ctx
+            .write_i32_slice(&mut self.buffers.positions, &values)?;
+        self.host_positions = positions.to_vec();
+        Ok(())
     }
 
     /// Run one fixed-length prefill for every batch element and return the
@@ -1492,7 +2489,7 @@ impl BatchedStaticDecoder {
         self.ctx
             .write_i32_slice(&mut self.buffers.prefill_tokens, &tokens)?;
         self.prefill_graph.replay()?;
-        self.host_position = self.prefill_len;
+        self.host_positions.fill(self.prefill_len);
         self.last_prefill_logits()
     }
 
@@ -1501,7 +2498,11 @@ impl BatchedStaticDecoder {
         if tokens.len() != self.batch {
             return Err(Error::invalid("decode token count mismatch"));
         }
-        if self.host_position >= self.config.max_seq {
+        if self
+            .host_positions
+            .iter()
+            .any(|&position| position >= self.config.max_seq)
+        {
             return Err(Error::invalid("static decode position exceeds max_seq"));
         }
         let tokens: Vec<i32> = tokens
@@ -1513,7 +2514,9 @@ impl BatchedStaticDecoder {
         self.ctx
             .write_i32_slice(&mut self.buffers.decode_tokens, &tokens)?;
         self.decode_graph.replay()?;
-        self.host_position += 1;
+        for position in &mut self.host_positions {
+            *position += 1;
+        }
         self.decode_logits()
     }
 
@@ -1521,10 +2524,7 @@ impl BatchedStaticDecoder {
         let logits = self.ctx.read_f32_vec(&self.buffers.prefill.logits)?;
         let vocab = self.config.vocab;
         Ok((0..self.batch)
-            .map(|b| {
-                let row = (b + 1) * self.prefill_len - 1;
-                logits[row * vocab..(row + 1) * vocab].to_vec()
-            })
+            .map(|b| logits[b * vocab..(b + 1) * vocab].to_vec())
             .collect())
     }
 
@@ -1554,6 +2554,7 @@ fn enqueue_batched_prefill(
     config: &DecoderConfig,
     batch: usize,
     prefill_len: usize,
+    kv_dtype: KvDType,
     ctx: &CudaStaticContext,
     buffers: &mut BatchedStaticDecoderBuffers,
 ) -> Result<()> {
@@ -1561,19 +2562,39 @@ fn enqueue_batched_prefill(
     let head_dim = config.head_dim();
     let scale = 1.0 / (head_dim as f32).sqrt();
     let rows = batch * prefill_len;
+    let batch_heads = batch * config.n_heads;
+    let lowp = kv_dtype != KvDType::F32;
     let BatchedStaticDecoderBuffers {
         weights,
         kv,
         prefill_tokens,
-        position,
+        positions,
         prefill,
         ..
     } = buffers;
+    let BatchTensors {
+        x,
+        norm,
+        q,
+        k,
+        v,
+        attn,
+        hidden,
+        update,
+        logits,
+        qh,
+        attn_h,
+        scores,
+        k_work,
+        v_work,
+        last_x,
+        last_norm,
+    } = prefill;
 
     ctx.embedding_batch(
         prefill_tokens,
         weight(weights, "tok_emb")?,
-        &mut prefill.x,
+        x,
         rows,
         d_model,
     )?;
@@ -1581,35 +2602,35 @@ fn enqueue_batched_prefill(
         let prefix = format!("layers.{layer}");
         let name = |suffix: &str| format!("{prefix}.{suffix}");
         ctx.layer_norm_batch(
-            &prefill.x,
+            x,
             weight(weights, &name("ln1_g"))?,
             weight(weights, &name("ln1_b"))?,
-            &mut prefill.norm,
+            norm,
             rows,
             d_model,
             config.eps as f32,
         )?;
         ctx.linear_into(
-            &prefill.norm,
+            norm,
             weight(weights, &name("wq"))?,
             Some(weight(weights, &name("bq"))?),
-            &mut prefill.q,
+            q,
         )?;
         ctx.linear_into(
-            &prefill.norm,
+            norm,
             weight(weights, &name("wk"))?,
             Some(weight(weights, &name("bk"))?),
-            &mut prefill.k,
+            k,
         )?;
         ctx.linear_into(
-            &prefill.norm,
+            norm,
             weight(weights, &name("wv"))?,
             Some(weight(weights, &name("bv"))?),
-            &mut prefill.v,
+            v,
         )?;
-        ctx.kv_prefill(
-            &prefill.k,
-            &prefill.v,
+        ctx.kv_prefill_typed(
+            k,
+            v,
             k_cache,
             v_cache,
             batch,
@@ -1617,73 +2638,130 @@ fn enqueue_batched_prefill(
             config.n_heads,
             head_dim,
             config.max_seq,
+            kv_dtype.dtype(),
         )?;
-        ctx.attention_prefill(
-            &prefill.q,
-            k_cache,
-            v_cache,
-            &mut prefill.attn,
-            batch,
+
+        let (k_used, v_used, kv_stride) = if lowp {
+            let k_work = k_work
+                .as_mut()
+                .ok_or_else(|| Error::invalid("missing low-precision K workspace"))?;
+            let v_work = v_work
+                .as_mut()
+                .ok_or_else(|| Error::invalid("missing low-precision V workspace"))?;
+            ctx.kv_cache_to_f32_typed(
+                k_cache,
+                v_cache,
+                k_work,
+                v_work,
+                batch,
+                config.n_heads,
+                prefill_len,
+                config.max_seq,
+                head_dim,
+                kv_dtype.dtype(),
+            )?;
+            (
+                k_work as &Tensor<CudaBackend>,
+                v_work as &Tensor<CudaBackend>,
+                prefill_len * head_dim,
+            )
+        } else {
+            (
+                k_cache as &Tensor<CudaBackend>,
+                v_cache as &Tensor<CudaBackend>,
+                config.max_seq * head_dim,
+            )
+        };
+
+        let qh = qh
+            .as_mut()
+            .ok_or_else(|| Error::invalid("missing prefill Q workspace"))?;
+        let attn_h = attn_h
+            .as_mut()
+            .ok_or_else(|| Error::invalid("missing prefill attention workspace"))?;
+        let scores = scores
+            .as_mut()
+            .ok_or_else(|| Error::invalid("missing prefill score workspace"))?;
+        ctx.split_heads_prefill(q, qh, batch, prefill_len, config.n_heads, head_dim)?;
+        ctx.prefill_scores(
+            qh,
+            k_used,
+            scores,
+            batch_heads,
             prefill_len,
-            config.n_heads,
-            config.max_seq,
+            kv_stride,
             head_dim,
             scale,
         )?;
+        ctx.causal_softmax(scores, batch_heads * prefill_len, prefill_len)?;
+        ctx.prefill_out(
+            scores,
+            v_used,
+            attn_h,
+            batch_heads,
+            prefill_len,
+            kv_stride,
+            head_dim,
+        )?;
+        ctx.merge_heads_prefill(attn_h, attn, batch, prefill_len, config.n_heads, head_dim)?;
+
         ctx.linear_into(
-            &prefill.attn,
+            attn,
             weight(weights, &name("wo"))?,
             Some(weight(weights, &name("bo"))?),
-            &mut prefill.update,
+            update,
         )?;
-        ctx.residual_inplace(&mut prefill.x, &prefill.update, rows * d_model)?;
+        ctx.residual_inplace(x, update, rows * d_model)?;
 
         ctx.layer_norm_batch(
-            &prefill.x,
+            x,
             weight(weights, &name("ln2_g"))?,
             weight(weights, &name("ln2_b"))?,
-            &mut prefill.norm,
+            norm,
             rows,
             d_model,
             config.eps as f32,
         )?;
         ctx.linear_into(
-            &prefill.norm,
+            norm,
             weight(weights, &name("w1"))?,
             Some(weight(weights, &name("b1"))?),
-            &mut prefill.hidden,
+            hidden,
         )?;
-        ctx.gelu_inplace(&mut prefill.hidden, rows * config.d_ff)?;
+        ctx.gelu_inplace(hidden, rows * config.d_ff)?;
         ctx.linear_into(
-            &prefill.hidden,
+            hidden,
             weight(weights, &name("w2"))?,
             Some(weight(weights, &name("b2"))?),
-            &mut prefill.update,
+            update,
         )?;
-        ctx.residual_inplace(&mut prefill.x, &prefill.update, rows * d_model)?;
+        ctx.residual_inplace(x, update, rows * d_model)?;
     }
+    let last_x = last_x
+        .as_mut()
+        .ok_or_else(|| Error::invalid("missing last-token workspace"))?;
+    let last_norm = last_norm
+        .as_mut()
+        .ok_or_else(|| Error::invalid("missing last-token norm workspace"))?;
+    ctx.gather_last_rows(x, last_x, batch, prefill_len, d_model)?;
     ctx.layer_norm_batch(
-        &prefill.x,
+        last_x,
         weight(weights, "ln_f_g")?,
         weight(weights, "ln_f_b")?,
-        &mut prefill.norm,
-        rows,
+        last_norm,
+        batch,
         d_model,
         config.eps as f32,
     )?;
-    ctx.linear_into(
-        &prefill.norm,
-        weight(weights, "lm_head")?,
-        None,
-        &mut prefill.logits,
-    )?;
-    ctx.set_position(position, prefill_len as i32)?;
+    ctx.linear_into(last_norm, weight(weights, "lm_head")?, None, logits)?;
+    ctx.fill_positions(positions, prefill_len as i32, batch)?;
     Ok(())
 }
 
 fn enqueue_batched_decode(
     config: &DecoderConfig,
     batch: usize,
+    kv_dtype: KvDType,
     ctx: &CudaStaticContext,
     buffers: &mut BatchedStaticDecoderBuffers,
 ) -> Result<()> {
@@ -1694,8 +2772,9 @@ fn enqueue_batched_decode(
         weights,
         kv,
         decode_tokens,
-        position,
+        positions,
         decode,
+        decode_ws,
         ..
     } = buffers;
 
@@ -1736,28 +2815,91 @@ fn enqueue_batched_decode(
             Some(weight(weights, &name("bv"))?),
             &mut decode.v,
         )?;
-        ctx.kv_append_batch(
+        ctx.kv_append_batch_typed(
             &decode.k,
             &decode.v,
             k_cache,
             v_cache,
-            position,
+            positions,
             batch,
             config.n_heads,
             head_dim,
             config.max_seq,
+            kv_dtype.dtype(),
         )?;
-        ctx.attention_batch_decode(
+        let lowp = kv_dtype != KvDType::F32;
+        let (k_used, v_used, kv_stride) = if lowp {
+            let k_work = decode_ws
+                .k_work
+                .as_mut()
+                .ok_or_else(|| Error::invalid("missing decode K workspace"))?;
+            let v_work = decode_ws
+                .v_work
+                .as_mut()
+                .ok_or_else(|| Error::invalid("missing decode V workspace"))?;
+            ctx.kv_cache_to_f32_typed(
+                k_cache,
+                v_cache,
+                k_work,
+                v_work,
+                batch,
+                config.n_heads,
+                config.max_seq,
+                config.max_seq,
+                head_dim,
+                kv_dtype.dtype(),
+            )?;
+            (
+                k_work as &Tensor<CudaBackend>,
+                v_work as &Tensor<CudaBackend>,
+                config.max_seq * head_dim,
+            )
+        } else {
+            (
+                k_cache as &Tensor<CudaBackend>,
+                v_cache as &Tensor<CudaBackend>,
+                config.max_seq * head_dim,
+            )
+        };
+        ctx.split_heads_decode(
             &decode.q,
-            k_cache,
-            v_cache,
-            position,
+            &mut decode_ws.qh,
+            batch,
+            config.n_heads,
+            head_dim,
+        )?;
+        ctx.decode_scores(
+            &decode_ws.qh,
+            k_used,
+            &mut decode_ws.scores,
+            batch * config.n_heads,
+            config.max_seq,
+            kv_stride,
+            head_dim,
+            scale,
+        )?;
+        ctx.decode_softmax(
+            &mut decode_ws.scores,
+            positions,
+            batch,
+            config.n_heads,
+            config.max_seq,
+        )?;
+        ctx.decode_out(
+            &decode_ws.scores,
+            v_used,
+            &mut decode_ws.attn_h,
+            batch * config.n_heads,
+            config.max_seq,
+            kv_stride,
+            head_dim,
+        )?;
+        ctx.merge_heads_decode(
+            &decode_ws.attn_h,
             &mut decode.attn,
             batch,
             config.n_heads,
-            config.max_seq,
             head_dim,
-            scale,
         )?;
         ctx.linear_into(
             &decode.attn,
@@ -1806,6 +2948,6 @@ fn enqueue_batched_decode(
         None,
         &mut decode.logits,
     )?;
-    ctx.bump_step(position)?;
+    ctx.bump_positions(positions, batch)?;
     Ok(())
 }
