@@ -801,3 +801,62 @@ fn cuda_autocast_decoder_and_amp_training() {
     eprintln!("cuda amp loss: {first} -> {last}, scale {}", scaler.scale());
     assert!(last < first);
 }
+
+#[test]
+#[serial]
+fn cuda_graph_linear_trainer_replays_training_steps() {
+    use modern_chainer_cuda::{GraphLinearTrainer, GraphTrainerConfig};
+
+    if !is_available() {
+        eprintln!("skipping: CUDA is not available");
+        return;
+    }
+    let backend = CudaBackend::new(0).unwrap();
+    let config = GraphTrainerConfig {
+        batch: 32,
+        in_features: 16,
+        out_features: 4,
+        lr: 0.05,
+        beta1: 0.9,
+        beta2: 0.999,
+        eps: 1e-8,
+    };
+    let mut trainer = GraphLinearTrainer::new(backend, config, 7).unwrap();
+    let mut x = Vec::with_capacity(32 * 16);
+    let mut t = Vec::with_capacity(32 * 4);
+    for row in 0..32 {
+        let mut features = Vec::with_capacity(16);
+        for col in 0..16 {
+            features.push(((row * 16 + col) as f32 * 0.01).sin());
+        }
+        for out in 0..4 {
+            let target: f32 = features
+                .iter()
+                .enumerate()
+                .map(|(i, value)| value * ((i + out) as f32 * 0.03).cos())
+                .sum();
+            t.push(target);
+        }
+        x.extend_from_slice(&features);
+    }
+    trainer.set_input(&x).unwrap();
+    trainer.set_target(&t).unwrap();
+    trainer.capture().unwrap();
+    trainer.replay().unwrap();
+    trainer.synchronize().unwrap();
+    let first = trainer.loss().unwrap();
+    for _ in 0..200 {
+        trainer.replay().unwrap();
+    }
+    trainer.synchronize().unwrap();
+    let last = trainer.loss().unwrap();
+    assert_eq!(trainer.step_count().unwrap(), 201);
+    eprintln!("graph trainer loss: {first} -> {last}");
+    assert!(
+        last < first * 0.1,
+        "loss did not decrease: {first} -> {last}"
+    );
+    let (w, b) = trainer.weights().unwrap();
+    assert_eq!(w.len(), 4 * 16);
+    assert_eq!(b.len(), 4);
+}

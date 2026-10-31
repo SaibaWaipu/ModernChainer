@@ -17,7 +17,7 @@ mod ops;
 
 #[cfg(feature = "cuda")]
 pub use backend::{ComputeType, CudaBackend, CudaStorage};
-pub use graph::{CudaGraphRunner, GraphAdam, GraphMatmul};
+pub use graph::{CudaGraphRunner, GraphAdam, GraphLinearTrainer, GraphMatmul, GraphTrainerConfig};
 #[cfg(feature = "cuda")]
 pub use ops::CudaOps;
 

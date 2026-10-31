@@ -640,6 +640,57 @@ extern "C" __global__ void bf16_to_f32_f32(const unsigned short* a, float* out, 
     }
 }
 
+extern "C" __global__ void mse_forward_f32(
+    const float* y, const float* t, float* diff, float* loss, int n
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float d = y[i] - t[i];
+        diff[i] = d;
+        atomicAdd(loss, d * d / n);
+    }
+}
+
+extern "C" __global__ void grad_y_f32(const float* diff, float* grad_y, int n, float scale) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) grad_y[i] = 2.0f * diff[i] * scale;
+}
+
+extern "C" __global__ void grad_b_f32(
+    const float* grad_y, float* grad_b, int batch, int out
+) {
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j < out) {
+        float sum = 0.0f;
+        for (int i = 0; i < batch; i++) sum += grad_y[i * out + j];
+        grad_b[j] = sum;
+    }
+}
+
+extern "C" __global__ void bump_step_f32(int* step) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) (*step) += 1;
+}
+
+extern "C" __global__ void adam_step_f32(
+    float* p, const float* g, float* m, float* v,
+    int n, float lr, float b1, float b2, float eps, const int* step
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        int t = *step;
+        float bc1 = 1.0f - powf(b1, (float)t);
+        float bc2 = 1.0f - powf(b2, (float)t);
+        float gi = g[i];
+        float nm = b1 * m[i] + (1.0f - b1) * gi;
+        float nv = b2 * v[i] + (1.0f - b2) * gi * gi;
+        float mhat = nm / bc1;
+        float vhat = nv / bc2;
+        m[i] = nm;
+        v[i] = nv;
+        p[i] = p[i] - lr * mhat / (sqrtf(vhat) + eps);
+    }
+}
+
 "#;
 
 pub(crate) struct Kernels {
@@ -657,6 +708,11 @@ pub(crate) struct Kernels {
     pub f32_to_bf16: CudaFunction,
     pub bf16_to_f32: CudaFunction,
     pub bias_add: CudaFunction,
+    pub mse_forward: CudaFunction,
+    pub grad_y: CudaFunction,
+    pub grad_b: CudaFunction,
+    pub bump_step: CudaFunction,
+    pub adam_step: CudaFunction,
     pub scale: CudaFunction,
     pub fill: CudaFunction,
     pub transpose2d: CudaFunction,
@@ -709,6 +765,11 @@ impl Kernels {
             f32_to_bf16: load("f32_to_bf16_f32")?,
             bf16_to_f32: load("bf16_to_f32_f32")?,
             bias_add: load("bias_add_f32")?,
+            mse_forward: load("mse_forward_f32")?,
+            grad_y: load("grad_y_f32")?,
+            grad_b: load("grad_b_f32")?,
+            bump_step: load("bump_step_f32")?,
+            adam_step: load("adam_step_f32")?,
             scale: load("scale_f32")?,
             fill: load("fill_f32")?,
             transpose2d: load("transpose2d_f32")?,

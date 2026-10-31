@@ -1,6 +1,6 @@
 use cudarc::cublas::sys::cublasOperation_t;
 use cudarc::cublas::{Gemm, GemmConfig};
-use cudarc::driver::{CudaGraph, LaunchConfig, PushKernelArg, sys};
+use cudarc::driver::{CudaGraph, CudaSlice, LaunchConfig, PushKernelArg, sys};
 
 use modern_chainer_core::{AdamConfig, Backend, DType, Error, Result, Shape, Tensor};
 
@@ -244,5 +244,360 @@ impl GraphAdam {
 
     pub fn v(&self) -> &Tensor<CudaBackend> {
         &self.v
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct GraphTrainerConfig {
+    pub batch: usize,
+    pub in_features: usize,
+    pub out_features: usize,
+    pub lr: f64,
+    pub beta1: f64,
+    pub beta2: f64,
+    pub eps: f64,
+}
+
+/// A capture-replayable Linear + MSE + Adam training step.
+///
+/// All parameters, activations, gradients and optimizer state live in fixed
+/// device buffers.  The step counter is device-resident and incremented inside
+/// the graph, so replay performs a complete Adam step without host arguments.
+pub struct GraphLinearTrainer {
+    backend: CudaBackend,
+    config: GraphTrainerConfig,
+    w: CudaSlice<f32>,
+    b: CudaSlice<f32>,
+    x: CudaSlice<f32>,
+    t: CudaSlice<f32>,
+    y: CudaSlice<f32>,
+    diff: CudaSlice<f32>,
+    loss: CudaSlice<f32>,
+    grad_y: CudaSlice<f32>,
+    grad_w: CudaSlice<f32>,
+    grad_b: CudaSlice<f32>,
+    m_w: CudaSlice<f32>,
+    v_w: CudaSlice<f32>,
+    m_b: CudaSlice<f32>,
+    v_b: CudaSlice<f32>,
+    step: CudaSlice<i32>,
+    graph: Option<CudaGraphRunner>,
+}
+
+impl GraphLinearTrainer {
+    pub fn new(backend: CudaBackend, config: GraphTrainerConfig, seed: u64) -> Result<Self> {
+        if config.batch == 0
+            || config.in_features == 0
+            || config.out_features == 0
+            || config.lr <= 0.0
+        {
+            return Err(Error::invalid("invalid graph trainer config"));
+        }
+        let stream = backend.runtime.stream.clone();
+        let alloc = |len: usize| {
+            stream
+                .alloc_zeros::<f32>(len)
+                .map_err(|error| Error::Backend(format!("cuda alloc: {error}")))
+        };
+        let mut w = alloc(config.out_features * config.in_features)?;
+        let weight = modern_chainer_core::Rng::seed_from_u64(seed).normal_vec(
+            config.out_features * config.in_features,
+            0.0,
+            (2.0 / config.in_features as f64).sqrt(),
+        );
+        stream
+            .memcpy_htod(&weight, &mut w)
+            .map_err(|error| Error::Backend(format!("htod: {error}")))?;
+        let step = stream
+            .alloc_zeros::<i32>(1)
+            .map_err(|error| Error::Backend(format!("cuda alloc: {error}")))?;
+        Ok(Self {
+            w,
+            b: alloc(config.out_features)?,
+            x: alloc(config.batch * config.in_features)?,
+            t: alloc(config.batch * config.out_features)?,
+            y: alloc(config.batch * config.out_features)?,
+            diff: alloc(config.batch * config.out_features)?,
+            loss: alloc(1)?,
+            grad_y: alloc(config.batch * config.out_features)?,
+            grad_w: alloc(config.out_features * config.in_features)?,
+            grad_b: alloc(config.out_features)?,
+            m_w: alloc(config.out_features * config.in_features)?,
+            v_w: alloc(config.out_features * config.in_features)?,
+            m_b: alloc(config.out_features)?,
+            v_b: alloc(config.out_features)?,
+            step,
+            backend,
+            config,
+            graph: None,
+        })
+    }
+
+    pub fn set_input(&mut self, values: &[f32]) -> Result<()> {
+        if values.len() != self.config.batch * self.config.in_features {
+            return Err(Error::invalid("graph trainer input size mismatch"));
+        }
+        self.backend
+            .runtime
+            .stream
+            .memcpy_htod(values, &mut self.x)
+            .map_err(|error| Error::Backend(format!("htod: {error}")))
+    }
+
+    pub fn set_target(&mut self, values: &[f32]) -> Result<()> {
+        if values.len() != self.config.batch * self.config.out_features {
+            return Err(Error::invalid("graph trainer target size mismatch"));
+        }
+        self.backend
+            .runtime
+            .stream
+            .memcpy_htod(values, &mut self.t)
+            .map_err(|error| Error::Backend(format!("htod: {error}")))
+    }
+
+    pub fn capture(&mut self) -> Result<()> {
+        let backend = self.backend.clone();
+        let graph = {
+            let this = &mut *self;
+            backend.capture(|| this.enqueue_step())?
+        };
+        self.graph = Some(graph);
+        Ok(())
+    }
+
+    pub fn replay(&self) -> Result<()> {
+        self.graph
+            .as_ref()
+            .ok_or_else(|| Error::invalid("graph trainer is not captured"))?
+            .replay()
+    }
+
+    pub fn synchronize(&self) -> Result<()> {
+        self.backend.synchronize()
+    }
+
+    pub fn loss(&self) -> Result<f32> {
+        let host = self
+            .backend
+            .runtime
+            .stream
+            .clone_dtoh(&self.loss)
+            .map_err(|error| Error::Backend(format!("dtoh: {error}")))?;
+        Ok(host[0])
+    }
+
+    pub fn weights(&self) -> Result<(Vec<f32>, Vec<f32>)> {
+        let w = self
+            .backend
+            .runtime
+            .stream
+            .clone_dtoh(&self.w)
+            .map_err(|error| Error::Backend(format!("dtoh: {error}")))?;
+        let b = self
+            .backend
+            .runtime
+            .stream
+            .clone_dtoh(&self.b)
+            .map_err(|error| Error::Backend(format!("dtoh: {error}")))?;
+        Ok((w, b))
+    }
+
+    pub fn step_count(&self) -> Result<i32> {
+        let host = self
+            .backend
+            .runtime
+            .stream
+            .clone_dtoh(&self.step)
+            .map_err(|error| Error::Backend(format!("dtoh: {error}")))?;
+        Ok(host[0])
+    }
+
+    fn enqueue_step(&mut self) -> Result<()> {
+        let runtime = std::sync::Arc::clone(&self.backend.runtime);
+        let n = self.config.batch * self.config.out_features;
+        let n_i = i32::try_from(n).map_err(|_| Error::invalid("tensor too large"))?;
+        let rows =
+            i32::try_from(self.config.batch).map_err(|_| Error::invalid("tensor too large"))?;
+        let cols = i32::try_from(self.config.out_features)
+            .map_err(|_| Error::invalid("tensor too large"))?;
+        let n_blocks = u32::try_from(n).map_err(|_| Error::invalid("tensor too large"))?;
+
+        // loss = 0
+        let zero = 0.0f32;
+        let one = 1i32;
+        {
+            let mut builder = runtime.stream.launch_builder(&runtime.kernels.fill);
+            builder.arg(&mut self.loss).arg(&zero).arg(&one);
+            unsafe {
+                builder
+                    .launch(LaunchConfig::for_num_elems(1))
+                    .map_err(|error| Error::Backend(format!("graph fill: {error}")))?;
+            }
+        }
+
+        // y = x @ w^T
+        unsafe {
+            runtime.blas.gemm(
+                GemmConfig {
+                    transa: cublasOperation_t::CUBLAS_OP_T,
+                    transb: cublasOperation_t::CUBLAS_OP_N,
+                    m: cols,
+                    n: rows,
+                    k: self.config.in_features as i32,
+                    alpha: 1.0,
+                    lda: self.config.in_features as i32,
+                    ldb: self.config.in_features as i32,
+                    beta: 0.0,
+                    ldc: cols,
+                },
+                &self.w,
+                &self.x,
+                &mut self.y,
+            )
+        }
+        .map_err(|error| Error::Backend(format!("graph cublas forward: {error}")))?;
+
+        // y += b
+        {
+            let mut builder = runtime.stream.launch_builder(&runtime.kernels.bias_add);
+            builder.arg(&mut self.y).arg(&self.b).arg(&rows).arg(&cols);
+            unsafe {
+                builder
+                    .launch(LaunchConfig::for_num_elems(n_blocks))
+                    .map_err(|error| Error::Backend(format!("graph bias: {error}")))?;
+            }
+        }
+
+        // diff, loss
+        {
+            let mut builder = runtime.stream.launch_builder(&runtime.kernels.mse_forward);
+            builder
+                .arg(&self.y)
+                .arg(&self.t)
+                .arg(&mut self.diff)
+                .arg(&mut self.loss)
+                .arg(&n_i);
+            unsafe {
+                builder
+                    .launch(LaunchConfig::for_num_elems(n_blocks))
+                    .map_err(|error| Error::Backend(format!("graph mse: {error}")))?;
+            }
+        }
+
+        // grad_y = 2 * diff / n
+        {
+            let scale = 2.0f32 / n as f32;
+            let mut builder = runtime.stream.launch_builder(&runtime.kernels.grad_y);
+            builder
+                .arg(&self.diff)
+                .arg(&mut self.grad_y)
+                .arg(&n_i)
+                .arg(&scale);
+            unsafe {
+                builder
+                    .launch(LaunchConfig::for_num_elems(n_blocks))
+                    .map_err(|error| Error::Backend(format!("graph grad_y: {error}")))?;
+            }
+        }
+
+        // grad_w = grad_y^T @ x (row-major: C = A^T * B)
+        unsafe {
+            runtime.blas.gemm(
+                GemmConfig {
+                    transa: cublasOperation_t::CUBLAS_OP_N,
+                    transb: cublasOperation_t::CUBLAS_OP_T,
+                    m: self.config.in_features as i32,
+                    n: cols,
+                    k: rows,
+                    alpha: 1.0,
+                    lda: self.config.in_features as i32,
+                    ldb: cols,
+                    beta: 0.0,
+                    ldc: self.config.in_features as i32,
+                },
+                &self.x,
+                &self.grad_y,
+                &mut self.grad_w,
+            )
+        }
+        .map_err(|error| Error::Backend(format!("graph cublas grad_w: {error}")))?;
+
+        // grad_b = sum rows
+        {
+            let mut builder = runtime.stream.launch_builder(&runtime.kernels.grad_b);
+            builder
+                .arg(&self.grad_y)
+                .arg(&mut self.grad_b)
+                .arg(&rows)
+                .arg(&cols);
+            unsafe {
+                builder
+                    .launch(LaunchConfig::for_num_elems(cols as u32))
+                    .map_err(|error| Error::Backend(format!("graph grad_b: {error}")))?;
+            }
+        }
+
+        // step += 1
+        {
+            let mut builder = runtime.stream.launch_builder(&runtime.kernels.bump_step);
+            builder.arg(&mut self.step);
+            unsafe {
+                builder
+                    .launch(LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    })
+                    .map_err(|error| Error::Backend(format!("graph step: {error}")))?;
+            }
+        }
+
+        let lr = self.config.lr as f32;
+        let b1 = self.config.beta1 as f32;
+        let b2 = self.config.beta2 as f32;
+        let eps = self.config.eps as f32;
+        let params = self.config.out_features * self.config.in_features;
+        let params_i = i32::try_from(params).map_err(|_| Error::invalid("tensor too large"))?;
+        {
+            let mut builder = runtime.stream.launch_builder(&runtime.kernels.adam_step);
+            builder
+                .arg(&mut self.w)
+                .arg(&self.grad_w)
+                .arg(&mut self.m_w)
+                .arg(&mut self.v_w)
+                .arg(&params_i)
+                .arg(&lr)
+                .arg(&b1)
+                .arg(&b2)
+                .arg(&eps)
+                .arg(&self.step);
+            unsafe {
+                builder
+                    .launch(LaunchConfig::for_num_elems(
+                        u32::try_from(params).map_err(|_| Error::invalid("tensor too large"))?,
+                    ))
+                    .map_err(|error| Error::Backend(format!("graph adam w: {error}")))?;
+            }
+        }
+        {
+            let mut builder = runtime.stream.launch_builder(&runtime.kernels.adam_step);
+            builder
+                .arg(&mut self.b)
+                .arg(&self.grad_b)
+                .arg(&mut self.m_b)
+                .arg(&mut self.v_b)
+                .arg(&cols)
+                .arg(&lr)
+                .arg(&b1)
+                .arg(&b2)
+                .arg(&eps)
+                .arg(&self.step);
+            unsafe {
+                builder
+                    .launch(LaunchConfig::for_num_elems(cols as u32))
+                    .map_err(|error| Error::Backend(format!("graph adam b: {error}")))?;
+            }
+        }
+        Ok(())
     }
 }

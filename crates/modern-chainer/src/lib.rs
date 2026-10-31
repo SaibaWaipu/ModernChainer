@@ -25,7 +25,8 @@ pub use modern_chainer_core::{
 };
 pub use modern_chainer_cpu::{CpuBackend, CpuOps, CpuStorage};
 pub use modern_chainer_cuda::{
-    ComputeType, CudaBackend, CudaGraphRunner, CudaOps, CudaStorage, GraphAdam, GraphMatmul,
+    ComputeType, CudaBackend, CudaGraphRunner, CudaOps, CudaStorage, GraphAdam, GraphLinearTrainer,
+    GraphMatmul, GraphTrainerConfig,
 };
 pub use modern_chainer_llm::{
     BatchOutput, BatchPlan, BlockAllocator, ContinuousBatcher, Decoder, DecoderConfig,
@@ -87,11 +88,13 @@ pub mod prelude {
     pub use crate::F as functional;
     pub use crate::L;
     pub use crate::{
-        Activation, Adam, AdamConfig, Backend, BatchPlan, BlockAllocator, ContinuousBatcher,
-        CpuBackend, CudaBackend, DType, Decoder, DecoderConfig, Device, Error, Linear, Module,
+        Activation, Adam, AdamConfig, AutocastGuard, Backend, BatchPlan, BlockAllocator,
+        ComputeType, ContinuousBatcher, CpuBackend, CudaBackend, DType, Decoder, DecoderConfig,
+        Device, Error, GradScaler, GraphLinearTrainer, GraphTrainerConfig, Linear, Module,
         MomentumSGD, Ops, Optimizer, PagedBatchRunner, Parameter, RequestId, Result, Run, RunMode,
         SGD, Sampler, Shape, StateId, StateKey, StateSpec, StateStore, Step, Tensor, Variable,
-        ZeroGrad, generate, no_grad, speculative_generate, zero_grad,
+        ZeroGrad, autocast, autocast_dtype, generate, is_autocast_enabled, no_grad,
+        speculative_generate, zero_grad,
     };
 }
 
