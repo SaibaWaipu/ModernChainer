@@ -50,12 +50,13 @@ Remaining: block-level in-place COW, wider kernels, CUDA.
 - CPU-parity tests for decoder logits, LLM kernels and paged batched decode;
   CUDA Adam training loop and `cuda_bench` on RTX 2070 SUPER.
 
-## v0.6 — CUDA kernels and throughput
+## v0.6 — CUDA throughput (in progress)
 
-- Native reduction / softmax CE / layer_norm / embedding kernels.
-- Dense and paged attention CUDA kernels; vectorised batched decode.
-- cuBLASLt fused GEMM+bias+activation and CUDA Graph capture.
-- Benchmarks: TTFT, inter-token latency, tokens/s, block utilisation.
+- Done: native reductions / softmax CE / layer_norm / embedding,
+  dense and paged attention, cuBLASLt fused linear, CUDA Graph matmul/Adam,
+  PyTorch CUDA comparison.
+- Next: fused GEMM+bias+activation for the decoder MLP, fp16/bf16,
+  wider paged-attention kernels, run-level graph capture, TTFT/tokens/s.
 
 ## v0.7 — Training-By-Run
 

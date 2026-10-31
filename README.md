@@ -37,7 +37,7 @@ class MLP(chainer.Chain):
 | Batched decode | 動作: `PagedBatchRunner` + batched paged attention |
 | Continuous batching | 動作: `RequestTable` / `BatchPlan`（論理バッチ） |
 | Speculative decoding | 動作: greedy の fork/verify/commit 参照実装 |
-| CUDA バックエンド | 動作: NVRTC + cuBLAS。elementwise / matmul / linear / Adam / LLM attention / paged attention までネイティブ |
+| CUDA バックエンド | 動作: NVRTC + cuBLAS / cuBLASLt 融合、CUDA Graph、LLM / paged attention までネイティブ |
 | Python バインディング | コアサブセット: `Tensor`、`Variable`、`F.*`、`L.Linear`、`SGD`/`Adam`、`Chain` |
 | シリアライズ | ネイティブ `.mcn`、Chainer `.npz` は計画中 |
 | Trainer / Updater / Extensions | 計画中 |
@@ -205,17 +205,24 @@ let tokens = speculative_generate(&mut target, &mut draft, prompt, 8, 3)?;
 
 Adam は勝利、matmul / elementwise はほぼ互角、Linear backward が課題です。目標だった幾何平均 1.2× は未達ですが、ベンチマークハーネスをリポジトリに含めているので改善を測定できます。Paged / batched decode は CPU 参照実装のため、まだ PyTorch との比較対象外です。
 
-CUDA（RTX 2070 SUPER）対 CPU（Ryzen 5 5600G）の参考値:
+CUDA（RTX 2070 SUPER）対 PyTorch 2.11.0+cu128（同じ GPU）。`torch/ours` は大きいほど Modern Chainer が高速です。
 
-| 処理 | CPU | CUDA | 倍率 |
+| 処理 | Modern Chainer | PyTorch | torch/ours |
 |---|---:|---:|---:|
-| matmul 512³ | 0.508 ms | 0.052 ms | 9.7× |
-| linear 128×784×256 | 0.171 ms | 0.027 ms | 6.4× |
-| Adam 1M params | 1.292 ms | 0.115 ms | 11.2× |
+| matmul eager 512³ | 0.048 ms | 0.046 ms | 0.95× |
+| matmul graph 512³ | 0.043 ms | 0.045 ms | 1.04× |
+| linear 128×784×256 | 0.023 ms | 0.038 ms | 1.62× |
+| Adam eager 1M | 0.146 ms | 0.214 ms | 1.46× |
+| Adam graph 1M | 0.078 ms | 0.231 ms | 2.97× |
 
 ```bash
 cargo run --release --example cuda_bench
+# PyTorch 比較（CUDA 版 PyTorch の venv を使用）
+CUDA_VISIBLE_DEVICES=<RTX 2070S の UUID> \
+  /tmp/opencode/torch-venv/bin/python scripts/bench_cuda_vs_pytorch.py
 ```
+
+cuBLASLt は bias を GEMM エピローグで融合し、CUDA Graph は固定 shape の matmul / Adam 更新を再再生します。PyTorch 側の Adam Graph は `capturable=True` で測定しています。
 
 - [`scripts/bench_vs_pytorch.py`](scripts/bench_vs_pytorch.py)
 - [`docs/benchmarks.md`](docs/benchmarks.md)（英語）
@@ -249,7 +256,8 @@ Vulkan テストは利用可能なアダプタ（NVIDIA / AMD / Intel / Mesa lav
 ## 主な制約
 
 - CUDA のネイティブ実装は elementwise / reduction / matmul / linear / Adam / softmax CE / embedding / layer_norm / attention / paged attention まで。汎用 `sum_to`（bias 以外）のみ CPU フォールバックです。
-- CUDA の性能値は PyTorch CUDA との比較ではなく、本プロジェクトの CPU 実装との比較です。
+- CUDA Graph は preallocated バッファ前提です（`graph_matmul` / `graph_adam`）。任意の `Run` をそのままキャプチャすることはまだできません。
+- CUDA の reduction / attention / paged attention はネイティブですが、fp16/bf16 は未対応です。
 - Python の CUDA テンソル API、`Run` / `PagedBatchRunner` / `Trainer` は未公開（Rust ファースト）。
 - Paged COW はテンソル単位。ブロック単位の in-place COW と CUDA paged-attention カーネルは今後。
 - リリースはまだ行っていません。

@@ -207,6 +207,9 @@ sampling.
   paged-attention kernels at runtime for the device's compute capability.
 - cuBLAS handles `matmul`, fused `linear`, and `linear_backward`.
 - Native paged KV: `paged_append`, `paged_attention`, `paged_attention_batch`.
+- cuBLASLt fuses bias into the linear GEMM epilogue.
+- CUDA Graph capture/replay for preallocated matmul (`graph_matmul`) and Adam
+  (`graph_adam`).
 - Only generic `sum_to` (non-bias) falls back to CPU.
 - Verified against CPU for elementwise, matmul, linear, softmax CE, LLM
   kernels, dense decoder logits, paged attention and paged batched decode; a
@@ -264,6 +267,9 @@ subclassing; custom ops must currently be written in Rust.
 - Native attention, paged append/attention/batch, reductions, softmax CE,
   embedding, layer_norm, split/merge heads, concat and last-row.
 - Only generic `sum_to` (non-bias) falls back to CPU.
+- cuBLASLt fused bias for `linear`; CUDA Graph for fixed-shape matmul/Adam.
+- CUDA Graph capture requires preallocated buffers and a non-default stream;
+  arbitrary `Run` capture is deferred.
 - Tested on RTX 2070 SUPER (sm_75) and compiled for the detected compute
   capability; GTX 1080 (sm_61) is supported by the same mechanism.
 - `LD_LIBRARY_PATH` must expose `libnvrtc` / `libcublas` when using pip CUDA
@@ -283,9 +289,18 @@ Acceptance gates proposed in the design phase:
 | geometric mean (CPU/CUDA) | 1.2×, no item below 0.9× |
 
 Current CPU result on the checked-in micro-suite is a ~0.87–0.91× geometric mean
-(Adam wins, Linear backward loses). CUDA core ops are verified against CPU but
-CUDA/transformer/ResNet throughput is not yet benchmarked. See
-`docs/benchmarks.md` for the full table and caveats.
+(Adam wins, Linear backward loses). On the RTX 2070 SUPER against PyTorch
+2.11.0+cu128:
+
+| Workload | Modern Chainer | PyTorch | torch/ours |
+|---|---:|---:|---:|
+| matmul eager 512³ | 0.048 ms | 0.046 ms | 0.95× |
+| matmul graph 512³ | 0.043 ms | 0.045 ms | 1.04× |
+| linear 128×784×256 | 0.023 ms | 0.038 ms | 1.62× |
+| Adam eager 1M | 0.146 ms | 0.214 ms | 1.46× |
+| Adam graph 1M | 0.078 ms | 0.231 ms | 2.97× |
+
+See `docs/benchmarks.md` for methodology and caveats.
 
 ## 8. Repository layout
 
@@ -334,7 +349,7 @@ docs/                      architecture, backends, API, benchmarks, roadmap
 - Generation determinism and sampler range checks.
 - CUDA parity: elementwise, matmul, linear, softmax CE, reduction, LLM kernels,
   dense decoder logits, paged attention, paged batched decode and an Adam
-  training loop against CPU.
+  training loop against CPU. Graph replay is checked against eager matmul/Adam.
 - `cargo fmt`, `cargo clippy -D warnings`, `cargo test` in CI.
 
 ## 10. Risks and mitigations

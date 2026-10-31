@@ -93,19 +93,33 @@ equivalence and speculative equality. `PagedBatchRunner` performs a real batched
 decode step over paged KV, but the CPU reference is not performance-tuned: block
 appends copy storage and the attention kernel is scalar. TTFT, inter-token
 latency, tokens/s and block utilisation benchmarks arrive with the CUDA kernels.
-### CUDA reference (not PyTorch CUDA)
+### CUDA vs PyTorch CUDA
 
-`cargo run --release --example cuda_bench`, RTX 2070 SUPER versus this project's
-CPU backend on the Ryzen 5 5600G:
+RTX 2070 SUPER, PyTorch 2.11.0+cu128, 20 iterations after 3 warmups (Adam:
+10/2). `torch/ours` above 1 favors Modern Chainer.
 
-| Workload | CPU | CUDA | Speedup |
+| Workload | Modern Chainer | PyTorch | torch/ours |
 |---|---:|---:|---:|
-| matmul 512³ | 0.508 ms | 0.052 ms | 9.7× |
-| linear 128×784×256 | 0.171 ms | 0.027 ms | 6.4× |
-| Adam 1M params | 1.292 ms | 0.115 ms | 11.2× |
+| matmul eager 512³ | 0.048 ms | 0.046 ms | 0.95× |
+| matmul graph 512³ | 0.043 ms | 0.045 ms | 1.04× |
+| linear 128×784×256 | 0.023 ms | 0.038 ms | 1.62× |
+| Adam eager 1M | 0.146 ms | 0.214 ms | 1.46× |
+| Adam graph 1M | 0.078 ms | 0.231 ms | 2.97× |
 
-These compare against our own CPU backend, not PyTorch CUDA. PyTorch-CUDA and
-TTFT/tokens/s benchmarks remain future work.
+Method:
+
+- Modern Chainer: `cargo run --release --example cuda_bench`; direct `Ops`
+  calls with a non-default stream and explicit synchronization.
+- PyTorch: `scripts/bench_cuda_vs_pytorch.py`; `torch.matmul`,
+  `F.linear`, `torch.optim.Adam(capturable=True)`, and `torch.cuda.CUDAGraph`.
+- Our linear uses the cuBLASLt bias epilogue. Our Adam graph replays the fused
+  single-kernel update into preallocated buffers.
+- CUDA 12.8 wheels; the GTX 1080 (sm_61) is not supported by this PyTorch
+  build, so both sides run on the RTX 2070 SUPER (sm_75).
+
+Matmul is near parity; linear and Adam show the benefit of fused epilogues and
+fewer launches. Graph replay helps both, but our Adam graph has one kernel
+versus PyTorch's optimizer step machinery.
 
 ## Reproducing the Vulkan numbers
 

@@ -111,7 +111,7 @@ and dynamic library loading, so a build does not require the CUDA toolkit or
 | bias add | row-bias kernel |
 | transpose2d | NVRTC kernel |
 | matmul | cuBLAS sgemm (row-major via the standard swap) |
-| linear | cuBLAS + bias kernel |
+| linear | cuBLASLt fused bias epilogue (cuBLAS without bias) |
 | linear_backward | cuBLAS + transpose |
 | adam_update | fused NVRTC kernel |
 | sum_all / 2-D bias sum_to | NVRTC reductions |
@@ -121,12 +121,25 @@ and dynamic library loading, so a build does not require the CUDA toolkit or
 | dense attention | NVRTC per-query kernel |
 | paged append / attention / batched attention | NVRTC block-table kernels |
 | to_scalar | device-to-host readback |
+| graph matmul / graph Adam | CUDA Graph capture/replay over preallocated buffers |
 
 ### CPU fallbacks
 
 Only generic `sum_to` (shapes other than a 2-D tensor reduced to its trailing
 1-D bias) copies to the CPU backend. Everything on the training and decoder
 paths — including dense and paged attention — is native.
+
+### CUDA Graph
+
+`CudaBackend::capture` begins stream capture on the backend's non-default
+stream, runs a closure that only enqueues work, and returns a
+`CudaGraphRunner`.  `graph_matmul` and `graph_adam` preallocate their outputs
+and capture a cuBLAS GEMM / fused Adam kernel respectively.
+
+CUDA Graph requires preallocated buffers: allocation and synchronization inside
+the closure are not capturable.  Event tracking is disabled on the backend
+context because the backend uses a single stream; this also keeps capture clean.
+Arbitrary `Run`-level graph capture is future work.
 
 ### Running
 
@@ -137,15 +150,18 @@ export LD_LIBRARY_PATH="$PWD/python/.venv/lib/python3.13/site-packages/nvidia/cu
 cargo test -p modern-chainer-cuda
 cargo run --release --example cuda_matmul
 cargo run --release --example cuda_bench
+# PyTorch CUDA comparison
+CUDA_VISIBLE_DEVICES=<uuid> /tmp/opencode/torch-venv/bin/python scripts/bench_cuda_vs_pytorch.py
 ```
 
 Tests skip when no CUDA driver/runtime is available.
 
 ### Next
 
-- cuBLASLt fused GEMM+bias+activation and CUDA Graph capture.
+- Fused GEMM+bias+activation for the decoder MLP and fp16/bf16.
 - Wider/fused paged-attention and flash-decode kernels.
-- CUDA throughput benchmarks against PyTorch CUDA, TTFT/tokens/s.
+- Run-level CUDA Graph capture with a memory pool.
+- TTFT/tokens/s and larger transformer benchmarks.
 
 ## Adding a backend
 

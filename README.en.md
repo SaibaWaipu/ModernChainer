@@ -44,7 +44,7 @@ class MLP(chainer.Chain):
 | Batched decode | Working: `PagedBatchRunner` + batched paged attention |
 | Continuous batching | Working: `RequestTable` / `BatchPlan` (logical batching) |
 | Speculative decoding | Working: greedy fork/verify/commit reference |
-| CUDA backend | Working: NVRTC + cuBLAS; elementwise, matmul, linear, Adam, LLM attention and paged attention are native |
+| CUDA backend | Working: NVRTC + cuBLAS/cuBLASLt fusion, CUDA Graph, native LLM/paged attention |
 | Python bindings | Core subset: `Tensor`, `Variable`, `F.*`, `L.Linear`, `SGD`/`Adam`, `Chain` |
 | Serialization | Native `.mcn`; Chainer `.npz` reader planned |
 | Trainer / Updater / Extensions | Planned |
@@ -231,19 +231,27 @@ better. These are micro-benchmarks, not a claim about every workload.
 
 Adam wins, matmul/elementwise are close, and Linear backward is the weak spot.
 The original 1.2× geometric-mean target is not met, but the benchmark harness is
-checked in so improvements are measurable. Paged/batched decode is a CPU
-reference and not yet part of the PyTorch comparison. CUDA (RTX 2070 SUPER)
-versus this project's CPU backend (Ryzen 5 5600G):
+checked in so improvements are measurable. CUDA (RTX 2070 SUPER) versus PyTorch 2.11.0+cu128 on the same GPU.
+`torch/ours` above 1 means Modern Chainer is faster.
 
-| Workload | CPU | CUDA | Speedup |
+| Workload | Modern Chainer | PyTorch | torch/ours |
 |---|---:|---:|---:|
-| matmul 512³ | 0.508 ms | 0.052 ms | 9.7× |
-| linear 128×784×256 | 0.171 ms | 0.027 ms | 6.4× |
-| Adam 1M params | 1.292 ms | 0.115 ms | 11.2× |
+| matmul eager 512³ | 0.048 ms | 0.046 ms | 0.95× |
+| matmul graph 512³ | 0.043 ms | 0.045 ms | 1.04× |
+| linear 128×784×256 | 0.023 ms | 0.038 ms | 1.62× |
+| Adam eager 1M | 0.146 ms | 0.214 ms | 1.46× |
+| Adam graph 1M | 0.078 ms | 0.231 ms | 2.97× |
 
 ```bash
 cargo run --release --example cuda_bench
+# PyTorch comparison (CUDA-enabled torch venv)
+CUDA_VISIBLE_DEVICES=<RTX 2070S UUID> \
+  /tmp/opencode/torch-venv/bin/python scripts/bench_cuda_vs_pytorch.py
 ```
+
+cuBLASLt fuses bias into the GEMM epilogue; CUDA Graph replays fixed-shape
+matmul/Adam updates. The PyTorch Adam graph is measured with
+`capturable=True`.
 
 - [`scripts/bench_vs_pytorch.py`](scripts/bench_vs_pytorch.py)
 - [`docs/benchmarks.md`](docs/benchmarks.md)
@@ -280,7 +288,9 @@ lavapipe) and skip cleanly when no Vulkan loader is present.
 - CUDA native coverage is elementwise, reductions, matmul, linear, Adam,
   softmax cross entropy, embedding, layer_norm, attention and paged attention.
   Only generic `sum_to` (non-bias) falls back to CPU.
-- CUDA numbers compare against this project's CPU backend, not PyTorch CUDA.
+- CUDA Graph requires preallocated buffers (`graph_matmul` / `graph_adam`);
+  arbitrary `Run` capture is not implemented yet.
+- CUDA covers fp32 only; fp16/bf16 are not implemented.
 - Python does not expose CUDA tensors, `Run`, `PagedBatchRunner` or `Trainer`
   yet (Rust-first).
 - Paged COW is tensor-granularity; block-level in-place COW and CUDA
