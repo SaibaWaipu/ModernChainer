@@ -1,5 +1,7 @@
 # Modern Chainer
 
+**日本語** | [English](README.en.md)
+
 Define-by-Run と State-by-Run を備えた、Rust コアの深層学習フレームワーク。
 [Chainer](https://github.com/chainer/chainer) の思想を現代に復興させるプロジェクトです。
 
