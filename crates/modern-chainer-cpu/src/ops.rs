@@ -66,6 +66,10 @@ impl Ops<CpuBackend> for CpuOps {
         kernels::silu(x)
     }
 
+    fn gelu(&self, x: &Tensor<CpuBackend>) -> Result<Tensor<CpuBackend>> {
+        kernels::gelu(x)
+    }
+
     fn split_heads(
         &self,
         x: &Tensor<CpuBackend>,

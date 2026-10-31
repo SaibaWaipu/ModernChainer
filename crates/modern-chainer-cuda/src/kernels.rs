@@ -440,6 +440,173 @@ extern "C" __global__ void sum_to_bias_f32(const float* a, float* out, int rows,
     }
 }
 
+extern "C" __global__ void gelu_f32(const float* a, float* out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float x = a[i];
+        out[i] = 0.5f * x * (1.0f + tanhf(0.7978845608f * (x + 0.044715f * x * x * x)));
+    }
+}
+
+extern "C" __global__ void paged_attention_wide_f32(
+    const float* q, const float* k_blocks, const float* v_blocks,
+    const long long* table, float* out,
+    int heads, int q_seq, int seq_len, int head_dim, int block_size, int num_blocks,
+    float scale, int causal
+) {
+    extern __shared__ float shared[];
+    int tid = threadIdx.x;
+    float* s_max = shared;
+    float* s_sum = s_max + blockDim.x;
+    float* s_out = s_sum + blockDim.x;
+
+    int query = blockIdx.x;
+    int h = query / q_seq;
+    int i = query % q_seq;
+    int offset = seq_len - q_seq;
+    int q_base = (h * q_seq + i) * head_dim;
+
+    for (int d = tid; d < head_dim; d += blockDim.x) s_out[d] = 0.0f;
+    __syncthreads();
+
+    float local_max = -1e30f;
+    for (int p = tid; p < seq_len; p += blockDim.x) {
+        if (causal && p > offset + i) continue;
+        int logical = p / block_size;
+        int physical = (int)table[logical];
+        if (physical < 0 || physical >= num_blocks) continue;
+        int within = p % block_size;
+        int base = ((physical * block_size + within) * heads + h) * head_dim;
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; d++) dot += q[q_base + d] * k_blocks[base + d];
+        local_max = fmaxf(local_max, dot * scale);
+    }
+    s_max[tid] = local_max;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) s_max[tid] = fmaxf(s_max[tid], s_max[tid + stride]);
+        __syncthreads();
+    }
+    float maxv = s_max[0];
+
+    float local_sum = 0.0f;
+    for (int p = tid; p < seq_len; p += blockDim.x) {
+        if (causal && p > offset + i) continue;
+        int logical = p / block_size;
+        int physical = (int)table[logical];
+        if (physical < 0 || physical >= num_blocks) continue;
+        int within = p % block_size;
+        int base = ((physical * block_size + within) * heads + h) * head_dim;
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; d++) dot += q[q_base + d] * k_blocks[base + d];
+        local_sum += expf(dot * scale - maxv);
+    }
+    s_sum[tid] = local_sum;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) s_sum[tid] += s_sum[tid + stride];
+        __syncthreads();
+    }
+    float inv = 1.0f / s_sum[0];
+
+    for (int p = tid; p < seq_len; p += blockDim.x) {
+        if (causal && p > offset + i) continue;
+        int logical = p / block_size;
+        int physical = (int)table[logical];
+        if (physical < 0 || physical >= num_blocks) continue;
+        int within = p % block_size;
+        int base = ((physical * block_size + within) * heads + h) * head_dim;
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; d++) dot += q[q_base + d] * k_blocks[base + d];
+        float prob = expf(dot * scale - maxv) * inv;
+        for (int d = 0; d < head_dim; d++) atomicAdd(&s_out[d], prob * v_blocks[base + d]);
+    }
+    __syncthreads();
+    for (int d = tid; d < head_dim; d += blockDim.x) out[q_base + d] = s_out[d];
+}
+
+extern "C" __global__ void paged_attention_batch_wide_f32(
+    const float* q, const float* k_blocks, const float* v_blocks,
+    const long long* block_tables, const long long* seq_lens, float* out,
+    int batch, int heads, int q_seq, int head_dim, int block_size,
+    int num_blocks, int max_blocks, float scale, int causal
+) {
+    extern __shared__ float shared[];
+    int tid = threadIdx.x;
+    float* s_max = shared;
+    float* s_sum = s_max + blockDim.x;
+    float* s_out = s_sum + blockDim.x;
+
+    int item = blockIdx.x;
+    int b = item / (heads * q_seq);
+    int rem = item % (heads * q_seq);
+    int h = rem / q_seq;
+    int i = rem % q_seq;
+    int seq_len = (int)seq_lens[b];
+    if (seq_len <= 0 || q_seq > seq_len) return;
+    int offset = seq_len - q_seq;
+    int q_base = ((b * heads + h) * q_seq + i) * head_dim;
+    const long long* table = block_tables + b * max_blocks;
+
+    for (int d = tid; d < head_dim; d += blockDim.x) s_out[d] = 0.0f;
+    __syncthreads();
+
+    float local_max = -1e30f;
+    for (int p = tid; p < seq_len; p += blockDim.x) {
+        if (causal && p > offset + i) continue;
+        int logical = p / block_size;
+        int physical = (int)table[logical];
+        if (physical < 0 || physical >= num_blocks) continue;
+        int within = p % block_size;
+        int base = ((physical * block_size + within) * heads + h) * head_dim;
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; d++) dot += q[q_base + d] * k_blocks[base + d];
+        local_max = fmaxf(local_max, dot * scale);
+    }
+    s_max[tid] = local_max;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) s_max[tid] = fmaxf(s_max[tid], s_max[tid + stride]);
+        __syncthreads();
+    }
+    float maxv = s_max[0];
+
+    float local_sum = 0.0f;
+    for (int p = tid; p < seq_len; p += blockDim.x) {
+        if (causal && p > offset + i) continue;
+        int logical = p / block_size;
+        int physical = (int)table[logical];
+        if (physical < 0 || physical >= num_blocks) continue;
+        int within = p % block_size;
+        int base = ((physical * block_size + within) * heads + h) * head_dim;
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; d++) dot += q[q_base + d] * k_blocks[base + d];
+        local_sum += expf(dot * scale - maxv);
+    }
+    s_sum[tid] = local_sum;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) s_sum[tid] += s_sum[tid + stride];
+        __syncthreads();
+    }
+    float inv = 1.0f / s_sum[0];
+
+    for (int p = tid; p < seq_len; p += blockDim.x) {
+        if (causal && p > offset + i) continue;
+        int logical = p / block_size;
+        int physical = (int)table[logical];
+        if (physical < 0 || physical >= num_blocks) continue;
+        int within = p % block_size;
+        int base = ((physical * block_size + within) * heads + h) * head_dim;
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; d++) dot += q[q_base + d] * k_blocks[base + d];
+        float prob = expf(dot * scale - maxv) * inv;
+        for (int d = 0; d < head_dim; d++) atomicAdd(&s_out[d], prob * v_blocks[base + d]);
+    }
+    __syncthreads();
+    for (int d = tid; d < head_dim; d += blockDim.x) out[q_base + d] = s_out[d];
+}
+
 "#;
 
 pub(crate) struct Kernels {
@@ -451,6 +618,7 @@ pub(crate) struct Kernels {
     pub relu: CudaFunction,
     pub relu_backward: CudaFunction,
     pub silu: CudaFunction,
+    pub gelu: CudaFunction,
     pub scale: CudaFunction,
     pub fill: CudaFunction,
     pub transpose2d: CudaFunction,
@@ -465,8 +633,8 @@ pub(crate) struct Kernels {
     pub concat_seq: CudaFunction,
     pub last_row: CudaFunction,
     pub attention: CudaFunction,
-    pub paged_attention: CudaFunction,
-    pub paged_attention_batch: CudaFunction,
+    pub paged_attention_wide: CudaFunction,
+    pub paged_attention_batch_wide: CudaFunction,
     pub paged_append: CudaFunction,
     pub softmax_ce: CudaFunction,
     pub softmax_ce_backward: CudaFunction,
@@ -497,6 +665,7 @@ impl Kernels {
             relu: load("relu_f32")?,
             relu_backward: load("relu_backward_f32")?,
             silu: load("silu_f32")?,
+            gelu: load("gelu_f32")?,
             scale: load("scale_f32")?,
             fill: load("fill_f32")?,
             transpose2d: load("transpose2d_f32")?,
@@ -511,8 +680,8 @@ impl Kernels {
             concat_seq: load("concat_seq_f32")?,
             last_row: load("last_row_f32")?,
             attention: load("attention_f32")?,
-            paged_attention: load("paged_attention_f32")?,
-            paged_attention_batch: load("paged_attention_batch_f32")?,
+            paged_attention_wide: load("paged_attention_wide_f32")?,
+            paged_attention_batch_wide: load("paged_attention_batch_wide_f32")?,
             paged_append: load("paged_append_f32")?,
             softmax_ce: load("softmax_ce_f32")?,
             softmax_ce_backward: load("softmax_ce_backward_f32")?,

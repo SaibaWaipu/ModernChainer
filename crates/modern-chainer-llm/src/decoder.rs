@@ -1,4 +1,4 @@
-use modern_chainer_core::{Backend, DType, Error, Ops, Result, Rng, Shape, Tensor};
+use modern_chainer_core::{Activation, Backend, DType, Error, Ops, Result, Rng, Shape, Tensor};
 use modern_chainer_run::{Run, RunContext, ScalarValue, StateBuilder, Step};
 
 use crate::kv::{KvCacheHandles, declare_kv_cache};
@@ -229,8 +229,8 @@ impl<B: Backend> Decoder<B> {
             x = ops.add(&x, &attn)?;
 
             let norm = ops.layer_norm(&x, &layer.ln2_g, &layer.ln2_b, config.eps)?;
-            let hidden = ops.linear(&norm, &layer.w1, Some(&layer.b1))?;
-            let hidden = ops.silu(&hidden)?;
+            let hidden =
+                ops.linear_activation(&norm, &layer.w1, Some(&layer.b1), Activation::Gelu)?;
             let hidden = ops.linear(&hidden, &layer.w2, Some(&layer.b2))?;
             x = ops.add(&x, &hidden)?;
 
@@ -406,8 +406,8 @@ impl<B: Backend> Decoder<B> {
             x = ops.add(&x, &attn)?;
 
             let norm = ops.layer_norm(&x, &layer.ln2_g, &layer.ln2_b, config.eps)?;
-            let hidden = ops.linear(&norm, &layer.w1, Some(&layer.b1))?;
-            let hidden = ops.silu(&hidden)?;
+            let hidden =
+                ops.linear_activation(&norm, &layer.w1, Some(&layer.b1), Activation::Gelu)?;
             let hidden = ops.linear(&hidden, &layer.w2, Some(&layer.b2))?;
             x = ops.add(&x, &hidden)?;
         }

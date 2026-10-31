@@ -1380,3 +1380,10 @@ pub(crate) fn paged_attention_batch(
     let out: Vec<f32> = outputs.into_iter().flatten().collect();
     make_f32(q, out, Shape::new([batch, heads, q_seq, head_dim]))
 }
+
+pub(crate) fn gelu(x: &Tensor<CpuBackend>) -> Result<Tensor<CpuBackend>> {
+    unary_map(x, |v| {
+        let v3 = v * v * v;
+        0.5 * v * (1.0 + ((2.0f32 / std::f32::consts::PI).sqrt() * (v + 0.044715 * v3)).tanh())
+    })
+}

@@ -4,6 +4,7 @@
 //! (`Tensor`, `Shape`, `DType`, `Device`, `Backend`, `Ops`) that CPU, CUDA and
 //! Vulkan backends implement.
 
+pub mod activation;
 pub mod device;
 pub mod dtype;
 pub mod error;
@@ -13,6 +14,7 @@ pub mod shape;
 pub mod storage;
 pub mod tensor;
 
+pub use activation::Activation;
 pub use device::Device;
 pub use dtype::DType;
 pub use error::{Error, Result};

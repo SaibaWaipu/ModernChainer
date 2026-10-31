@@ -2,9 +2,11 @@ use std::sync::Arc;
 
 use cudarc::cublas::sys::cublasOperation_t;
 use cudarc::cublas::{Gemm, GemmConfig};
-use cudarc::cublaslt::{Matmul as BlasLtMatmul, MatmulConfig as BlasLtConfig};
+use cudarc::cublaslt::{
+    Activation as LtActivation, Matmul as BlasLtMatmul, MatmulConfig as BlasLtConfig,
+};
 use cudarc::driver::{CudaFunction, CudaSlice, LaunchConfig, PushKernelArg};
-use modern_chainer_core::{Backend, DType, Error, Ops, Result, Shape, Tensor};
+use modern_chainer_core::{Activation, Backend, DType, Error, Ops, Result, Shape, Tensor};
 use modern_chainer_cpu::CpuBackend;
 
 use crate::backend::{CudaBackend, CudaRuntime, CudaStorage};
@@ -185,6 +187,78 @@ impl CudaOps {
     }
 }
 
+impl CudaOps {
+    fn linear_impl(
+        &self,
+        x: &Tensor<CudaBackend>,
+        weight: &Tensor<CudaBackend>,
+        bias: Option<&Tensor<CudaBackend>>,
+        activation: Option<LtActivation>,
+    ) -> Result<Tensor<CudaBackend>> {
+        if x.rank() != 2 || weight.rank() != 2 {
+            return Err(Error::invalid("cuda linear expects 2-D input and weight"));
+        }
+        let (batch, in_features) = (x.shape().dims()[0], x.shape().dims()[1]);
+        let (out_features, k2) = (weight.shape().dims()[0], weight.shape().dims()[1]);
+        if in_features != k2 {
+            return Err(Error::shape_mismatch(
+                "cuda linear inner dimension",
+                x.shape().clone(),
+                weight.shape().clone(),
+            ));
+        }
+        let x_slice = self.f32(x)?;
+        let weight_slice = self.f32(weight)?;
+        let (backend, mut storage) = self.out_f32(&Shape::new([batch, out_features]))?;
+        {
+            let out = storage.f32_mut()?;
+            if bias.is_some() || activation.is_some() {
+                let bias_slice = bias.map(|bias| self.f32(bias)).transpose()?;
+                let act = activation.as_ref();
+                let config = BlasLtConfig {
+                    transa: true,
+                    transb: false,
+                    transc: false,
+                    m: out_features as u64,
+                    n: batch as u64,
+                    k: in_features as u64,
+                    alpha: 1.0,
+                    lda: in_features as i64,
+                    ldb: in_features as i64,
+                    beta: 0.0,
+                    ldc: out_features as i64,
+                    stride_a: None,
+                    stride_b: None,
+                    stride_c: None,
+                    stride_bias: None,
+                    batch_size: None,
+                };
+                unsafe {
+                    self.runtime
+                        .blaslt
+                        .matmul(config, weight_slice, x_slice, out, bias_slice, act)
+                }
+                .map_err(|error| cuda_error("cublaslt linear", error))?;
+            } else {
+                let config = GemmConfig {
+                    transa: cublasOperation_t::CUBLAS_OP_T,
+                    transb: cublasOperation_t::CUBLAS_OP_N,
+                    m: out_features as i32,
+                    n: batch as i32,
+                    k: in_features as i32,
+                    alpha: 1.0,
+                    lda: in_features as i32,
+                    ldb: in_features as i32,
+                    beta: 0.0,
+                    ldc: out_features as i32,
+                };
+                self.gemm(config, weight_slice, x_slice, out)?;
+            }
+        }
+        self.tensor_from_storage(backend, storage, &Shape::new([batch, out_features]))
+    }
+}
+
 impl Ops<CudaBackend> for CudaOps {
     fn add(&self, a: &Tensor<CudaBackend>, b: &Tensor<CudaBackend>) -> Result<Tensor<CudaBackend>> {
         if a.shape() == b.shape() {
@@ -250,6 +324,10 @@ impl Ops<CudaBackend> for CudaOps {
         self.unary(&self.runtime.kernels.silu, a)
     }
 
+    fn gelu(&self, a: &Tensor<CudaBackend>) -> Result<Tensor<CudaBackend>> {
+        self.unary(&self.runtime.kernels.gelu, a)
+    }
+
     fn matmul(
         &self,
         a: &Tensor<CudaBackend>,
@@ -295,74 +373,24 @@ impl Ops<CudaBackend> for CudaOps {
         weight: &Tensor<CudaBackend>,
         bias: Option<&Tensor<CudaBackend>>,
     ) -> Result<Tensor<CudaBackend>> {
-        if x.rank() != 2 || weight.rank() != 2 {
-            return Err(Error::invalid("cuda linear expects 2-D input and weight"));
-        }
-        let (batch, in_features) = (x.shape().dims()[0], x.shape().dims()[1]);
-        let (out_features, k2) = (weight.shape().dims()[0], weight.shape().dims()[1]);
-        if in_features != k2 {
-            return Err(Error::shape_mismatch(
-                "cuda linear inner dimension",
-                x.shape().clone(),
-                weight.shape().clone(),
-            ));
-        }
-        let x_slice = self.f32(x)?;
-        let weight_slice = self.f32(weight)?;
-        let (backend, mut storage) = self.out_f32(&Shape::new([batch, out_features]))?;
-        {
-            let out = storage.f32_mut()?;
-            match bias {
-                Some(bias) => {
-                    let bias_slice = self.f32(bias)?;
-                    let config = BlasLtConfig {
-                        transa: true,
-                        transb: false,
-                        transc: false,
-                        m: out_features as u64,
-                        n: batch as u64,
-                        k: in_features as u64,
-                        alpha: 1.0,
-                        lda: in_features as i64,
-                        ldb: in_features as i64,
-                        beta: 0.0,
-                        ldc: out_features as i64,
-                        stride_a: None,
-                        stride_b: None,
-                        stride_c: None,
-                        stride_bias: None,
-                        batch_size: None,
-                    };
-                    unsafe {
-                        self.runtime.blaslt.matmul(
-                            config,
-                            weight_slice,
-                            x_slice,
-                            out,
-                            Some(bias_slice),
-                            None,
-                        )
-                    }
-                    .map_err(|error| cuda_error("cublaslt linear", error))?;
-                }
-                None => {
-                    let config = GemmConfig {
-                        transa: cublasOperation_t::CUBLAS_OP_T,
-                        transb: cublasOperation_t::CUBLAS_OP_N,
-                        m: out_features as i32,
-                        n: batch as i32,
-                        k: in_features as i32,
-                        alpha: 1.0,
-                        lda: in_features as i32,
-                        ldb: in_features as i32,
-                        beta: 0.0,
-                        ldc: out_features as i32,
-                    };
-                    self.gemm(config, weight_slice, x_slice, out)?;
-                }
+        self.linear_impl(x, weight, bias, None)
+    }
+
+    fn linear_activation(
+        &self,
+        x: &Tensor<CudaBackend>,
+        weight: &Tensor<CudaBackend>,
+        bias: Option<&Tensor<CudaBackend>>,
+        activation: Activation,
+    ) -> Result<Tensor<CudaBackend>> {
+        match activation {
+            Activation::Relu => self.linear_impl(x, weight, bias, Some(LtActivation::Relu)),
+            Activation::Gelu => self.linear_impl(x, weight, bias, Some(LtActivation::Gelu)),
+            Activation::Silu => {
+                let y = self.linear(x, weight, bias)?;
+                self.silu(&y)
             }
         }
-        self.tensor_from_storage(backend, storage, &Shape::new([batch, out_features]))
     }
 
     fn linear_backward(
@@ -1037,7 +1065,7 @@ impl Ops<CudaBackend> for CudaOps {
             let mut builder = self
                 .runtime
                 .stream
-                .launch_builder(&self.runtime.kernels.paged_attention);
+                .launch_builder(&self.runtime.kernels.paged_attention_wide);
             builder
                 .arg(q_slice)
                 .arg(k_slice)
@@ -1052,16 +1080,22 @@ impl Ops<CudaBackend> for CudaOps {
                 .arg(&blocks_i)
                 .arg(&scale)
                 .arg(&causal);
+            let shared = u32::try_from((2 * 128 + head_dim) * 4)
+                .map_err(|_| Error::invalid("shared memory too large"))?;
+            let config = LaunchConfig {
+                grid_dim: (total as u32, 1, 1),
+                block_dim: (128, 1, 1),
+                shared_mem_bytes: shared,
+            };
             unsafe {
                 builder
-                    .launch(LaunchConfig::for_num_elems(total as u32))
+                    .launch(config)
                     .map_err(|error| cuda_error("launch", error))?;
             }
         }
         self.tensor_from_storage(backend, storage, q.shape())
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     fn paged_append(
         &self,
@@ -1217,7 +1251,7 @@ impl Ops<CudaBackend> for CudaOps {
             let mut builder = self
                 .runtime
                 .stream
-                .launch_builder(&self.runtime.kernels.paged_attention_batch);
+                .launch_builder(&self.runtime.kernels.paged_attention_batch_wide);
             builder
                 .arg(q_slice)
                 .arg(k_slice)
@@ -1234,9 +1268,16 @@ impl Ops<CudaBackend> for CudaOps {
                 .arg(&max_i)
                 .arg(&scale)
                 .arg(&causal);
+            let shared = u32::try_from((2 * 128 + head_dim) * 4)
+                .map_err(|_| Error::invalid("shared memory too large"))?;
+            let config = LaunchConfig {
+                grid_dim: (total as u32, 1, 1),
+                block_dim: (128, 1, 1),
+                shared_mem_bytes: shared,
+            };
             unsafe {
                 builder
-                    .launch(LaunchConfig::for_num_elems(total as u32))
+                    .launch(config)
                     .map_err(|error| cuda_error("launch", error))?;
             }
         }

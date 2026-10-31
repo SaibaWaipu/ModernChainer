@@ -112,6 +112,29 @@ fn main() -> modern_chainer::Result<()> {
         "linear 128x784x256: cpu {linear_cpu:.3} ms  cuda {linear_cuda:.3} ms  x{:.2}",
         linear_cpu / linear_cuda
     );
+    let linear_gelu_cpu = bench_cpu(
+        || {
+            let y = cpu.ops().linear(&cx, &cw, Some(&cbias)).unwrap();
+            let _ = cpu.ops().gelu(&y).unwrap();
+        },
+        3,
+        20,
+    );
+    let linear_gelu_cuda = bench_cuda(
+        &gpu,
+        || {
+            let _ = gpu
+                .ops()
+                .linear_activation(&gx, &gw, Some(&gbias), Activation::Gelu)
+                .unwrap();
+        },
+        3,
+        20,
+    )?;
+    println!(
+        "linear+gelu:       cpu {linear_gelu_cpu:.3} ms  cuda {linear_gelu_cuda:.3} ms  x{:.2}",
+        linear_gelu_cpu / linear_gelu_cuda
+    );
 
     let params = 1 << 20;
     let p_data = vec![0.1f32; params];
@@ -167,12 +190,14 @@ fn main() -> modern_chainer::Result<()> {
         adam_cuda / adam_graph
     );
     println!(
-        "JSON {{\"matmul_cpu\":{cpu_matmul:.6},\"matmul_cuda\":{matmul_cuda:.6},\"matmul_graph\":{matmul_graph:.6},\"linear_cpu\":{linear_cpu:.6},\"linear_cuda\":{linear_cuda:.6},\"adam_cpu\":{adam_cpu:.6},\"adam_cuda\":{adam_cuda:.6},\"adam_graph\":{adam_graph:.6}}}",
+        "JSON {{\"matmul_cpu\":{cpu_matmul:.6},\"matmul_cuda\":{matmul_cuda:.6},\"matmul_graph\":{matmul_graph:.6},\"linear_cpu\":{linear_cpu:.6},\"linear_cuda\":{linear_cuda:.6},\"linear_gelu_cpu\":{linear_gelu_cpu:.6},\"linear_gelu_cuda\":{linear_gelu_cuda:.6},\"adam_cpu\":{adam_cpu:.6},\"adam_cuda\":{adam_cuda:.6},\"adam_graph\":{adam_graph:.6}}}",
         cpu_matmul = matmul_cpu,
         matmul_cuda = matmul_cuda,
         matmul_graph = matmul_graph,
         linear_cpu = linear_cpu,
         linear_cuda = linear_cuda,
+        linear_gelu_cpu = linear_gelu_cpu,
+        linear_gelu_cuda = linear_gelu_cuda,
         adam_cpu = adam_cpu,
         adam_cuda = adam_cuda,
         adam_graph = adam_graph,

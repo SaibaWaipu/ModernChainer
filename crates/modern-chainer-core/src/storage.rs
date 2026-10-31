@@ -1,3 +1,4 @@
+use crate::activation::Activation;
 use crate::device::Device;
 use crate::dtype::DType;
 use crate::error::{Error, Result};
@@ -83,6 +84,27 @@ pub trait Ops<B: Backend>: Send + Sync + 'static {
 
     fn silu(&self, _x: &Tensor<B>) -> Result<Tensor<B>> {
         Err(Error::unsupported("silu"))
+    }
+
+    fn gelu(&self, _x: &Tensor<B>) -> Result<Tensor<B>> {
+        Err(Error::unsupported("gelu"))
+    }
+
+    /// Fused `linear` + activation.  Backends may fuse the bias and activation
+    /// into the GEMM epilogue; the default composes primitives.
+    fn linear_activation(
+        &self,
+        x: &Tensor<B>,
+        weight: &Tensor<B>,
+        bias: Option<&Tensor<B>>,
+        activation: Activation,
+    ) -> Result<Tensor<B>> {
+        let y = self.linear(x, weight, bias)?;
+        match activation {
+            Activation::Relu => self.relu(&y),
+            Activation::Gelu => self.gelu(&y),
+            Activation::Silu => self.silu(&y),
+        }
     }
 
     /// `[seq, heads * head_dim] -> [heads, seq, head_dim]`.

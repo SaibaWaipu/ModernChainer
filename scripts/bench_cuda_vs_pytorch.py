@@ -96,6 +96,9 @@ def main():
     w = torch.randn(out_features, in_features, device="cuda")
     bias = torch.randn(out_features, device="cuda")
     linear = bench(lambda: torch.nn.functional.linear(x, w, bias))
+    linear_gelu = bench(
+        lambda: torch.nn.functional.gelu(torch.nn.functional.linear(x, w, bias))
+    )
 
     params = 1 << 20
     p = torch.randn(params, device="cuda", requires_grad=True)
@@ -128,6 +131,7 @@ def main():
         ("matmul eager 512^3", ours["matmul_cuda"], matmul_eager),
         ("matmul graph 512^3", ours["matmul_graph"], matmul_graph),
         ("linear eager 128x784x256", ours["linear_cuda"], linear),
+        ("linear+gelu 128x784x256", ours["linear_gelu_cuda"], linear_gelu),
         ("adam eager 1M", ours["adam_cuda"], adam_eager),
     ]
     if adam_graph is not None:

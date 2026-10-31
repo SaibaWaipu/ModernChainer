@@ -418,6 +418,18 @@ impl Ops<VulkanBackend> for VulkanOps {
         self.upload(&result)
     }
 
+    fn silu(&self, a: &Tensor<VulkanBackend>) -> Result<Tensor<VulkanBackend>> {
+        let cpu = self.to_cpu(a)?;
+        let result = CpuBackend::new().ops().silu(&cpu)?;
+        self.upload(&result)
+    }
+
+    fn gelu(&self, a: &Tensor<VulkanBackend>) -> Result<Tensor<VulkanBackend>> {
+        let cpu = self.to_cpu(a)?;
+        let result = CpuBackend::new().ops().gelu(&cpu)?;
+        self.upload(&result)
+    }
+
     fn scale(&self, a: &Tensor<VulkanBackend>, factor: f64) -> Result<Tensor<VulkanBackend>> {
         let out = self.empty(a.shape(), DType::F32)?;
         let params = self.uniform(&(factor as f32).to_ne_bytes());

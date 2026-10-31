@@ -117,3 +117,20 @@ fn paged_attention_matches_dense_prefill_and_decode() {
         assert!((a - b).abs() < 1e-5, "decode mismatch: {a} vs {b}");
     }
 }
+
+#[test]
+fn gelu_matches_formula() {
+    use modern_chainer_core::Backend;
+    let backend = CpuBackend::new();
+    let x = Tensor::from_f32(backend, &[-1.0, 0.0, 0.5, 2.0], [4]).unwrap();
+    let y = backend.ops().gelu(&x).unwrap();
+    let values = y.as_slice::<f32>().unwrap();
+    for (input, output) in [-1.0f32, 0.0, 0.5, 2.0].iter().zip(values) {
+        let expected = 0.5
+            * input
+            * (1.0
+                + ((2.0f32 / std::f32::consts::PI).sqrt() * (input + 0.044715 * input.powi(3)))
+                    .tanh());
+        assert!((output - expected).abs() < 1e-5);
+    }
+}
