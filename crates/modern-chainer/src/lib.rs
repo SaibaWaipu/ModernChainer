@@ -20,8 +20,15 @@ pub use modern_chainer_core::{
     Backend, DType, Device, Error, Ops, Result, Shape, Strides, Tensor, he_normal,
 };
 pub use modern_chainer_cpu::{CpuBackend, CpuOps, CpuStorage};
+pub use modern_chainer_llm::{
+    Decoder, DecoderConfig, DecoderHandles, Sampler, generate, sample_token,
+};
 pub use modern_chainer_nn::{Linear, Module, Parameter, Sequential};
 pub use modern_chainer_optim::{Adam, MomentumSGD, Optimizer, SGD, zero_grad};
+pub use modern_chainer_run::{
+    Run, RunContext, RunMode, ScalarValue, StateBuilder, StateId, StateKey, StateSpec, StateStore,
+    Step, Transaction,
+};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -50,6 +57,14 @@ pub mod serial {
     pub use modern_chainer_serial::*;
 }
 
+pub mod run {
+    pub use modern_chainer_run::*;
+}
+
+pub mod llm {
+    pub use modern_chainer_llm::*;
+}
+
 pub mod cuda {
     pub use modern_chainer_cuda::*;
 }
@@ -63,8 +78,10 @@ pub mod prelude {
     pub use crate::F as functional;
     pub use crate::L;
     pub use crate::{
-        Adam, Backend, CpuBackend, DType, Device, Error, Linear, Module, MomentumSGD, Ops,
-        Optimizer, Parameter, Result, SGD, Shape, Tensor, Variable, ZeroGrad, no_grad, zero_grad,
+        Adam, Backend, CpuBackend, DType, Decoder, DecoderConfig, Device, Error, Linear, Module,
+        MomentumSGD, Ops, Optimizer, Parameter, Result, Run, RunMode, SGD, Sampler, Shape, StateId,
+        StateKey, StateSpec, StateStore, Step, Tensor, Variable, ZeroGrad, generate, no_grad,
+        zero_grad,
     };
 }
 

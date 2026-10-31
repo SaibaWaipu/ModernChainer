@@ -18,6 +18,8 @@ modern-chainer-data.workspace = true
 modern-chainer-serial.workspace = true
 modern-chainer-cuda.workspace = true
 modern-chainer-vulkan.workspace = true
+modern-chainer-run.workspace = true
+modern-chainer-llm.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

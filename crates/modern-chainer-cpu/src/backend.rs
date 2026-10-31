@@ -28,11 +28,17 @@ impl Backend for CpuBackend {
     }
 
     fn alloc(&self, bytes: usize) -> Result<Self::Storage> {
-        Ok(CpuStorage::Bytes(vec![0; bytes]))
+        Ok(CpuStorage::Bytes {
+            words: vec![0u64; bytes.div_ceil(8)],
+            len: bytes,
+        })
     }
 
     fn alloc_zeroed(&self, bytes: usize) -> Result<Self::Storage> {
-        Ok(CpuStorage::Bytes(vec![0; bytes]))
+        Ok(CpuStorage::Bytes {
+            words: vec![0u64; bytes.div_ceil(8)],
+            len: bytes,
+        })
     }
 
     fn copy_from_host(&self, dst: &mut Self::Storage, src: &[u8]) -> Result<()> {
@@ -55,7 +61,11 @@ impl Backend for CpuBackend {
 /// Host storage.  `F32` keeps a vector allocated by kernels without an extra
 /// byte copy; `Bytes` is used for uploads and other dtypes.
 pub enum CpuStorage {
-    Bytes(Vec<u8>),
+    /// 8-byte aligned backing store for arbitrary bytes.
+    Bytes {
+        words: Vec<u64>,
+        len: usize,
+    },
     F32(Vec<f32>),
 }
 
@@ -66,14 +76,20 @@ impl CpuStorage {
 
     pub fn as_bytes(&self) -> &[u8] {
         match self {
-            CpuStorage::Bytes(bytes) => bytes,
+            CpuStorage::Bytes { words, len } => {
+                let bytes: &[u8] = bytemuck::cast_slice(words);
+                &bytes[..*len]
+            }
             CpuStorage::F32(values) => bytemuck::cast_slice(values),
         }
     }
 
     pub fn as_bytes_mut(&mut self) -> &mut [u8] {
         match self {
-            CpuStorage::Bytes(bytes) => bytes,
+            CpuStorage::Bytes { words, len } => {
+                let bytes: &mut [u8] = bytemuck::cast_slice_mut(words);
+                &mut bytes[..*len]
+            }
             CpuStorage::F32(values) => bytemuck::cast_slice_mut(values),
         }
     }
@@ -96,7 +112,7 @@ impl CpuStorage {
 impl Storage for CpuStorage {
     fn len_bytes(&self) -> usize {
         match self {
-            CpuStorage::Bytes(bytes) => bytes.len(),
+            CpuStorage::Bytes { len, .. } => *len,
             CpuStorage::F32(values) => std::mem::size_of_val(values.as_slice()),
         }
     }

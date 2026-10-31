@@ -40,6 +40,68 @@ impl Ops<CpuBackend> for CpuOps {
         kernels::matmul(a, b)
     }
 
+    fn embedding(
+        &self,
+        ids: &Tensor<CpuBackend>,
+        weight: &Tensor<CpuBackend>,
+    ) -> Result<Tensor<CpuBackend>> {
+        kernels::embedding(ids, weight)
+    }
+
+    fn layer_norm(
+        &self,
+        x: &Tensor<CpuBackend>,
+        gamma: &Tensor<CpuBackend>,
+        beta: &Tensor<CpuBackend>,
+        eps: f64,
+    ) -> Result<Tensor<CpuBackend>> {
+        kernels::layer_norm(x, gamma, beta, eps)
+    }
+
+    fn softmax_last_dim(&self, x: &Tensor<CpuBackend>) -> Result<Tensor<CpuBackend>> {
+        kernels::softmax_last_dim(x)
+    }
+
+    fn silu(&self, x: &Tensor<CpuBackend>) -> Result<Tensor<CpuBackend>> {
+        kernels::silu(x)
+    }
+
+    fn split_heads(
+        &self,
+        x: &Tensor<CpuBackend>,
+        heads: usize,
+        head_dim: usize,
+    ) -> Result<Tensor<CpuBackend>> {
+        kernels::split_heads(x, heads, head_dim)
+    }
+
+    fn merge_heads(&self, x: &Tensor<CpuBackend>, heads: usize) -> Result<Tensor<CpuBackend>> {
+        kernels::merge_heads(x, heads)
+    }
+
+    fn attention(
+        &self,
+        q: &Tensor<CpuBackend>,
+        k: &Tensor<CpuBackend>,
+        v: &Tensor<CpuBackend>,
+        scale: f64,
+        causal: bool,
+    ) -> Result<Tensor<CpuBackend>> {
+        kernels::attention(q, k, v, scale, causal)
+    }
+
+    fn concat_seq(
+        &self,
+        a: &Tensor<CpuBackend>,
+        b: &Tensor<CpuBackend>,
+    ) -> Result<Tensor<CpuBackend>> {
+        kernels::concat_seq(a, b)
+    }
+
+    fn last_row(&self, x: &Tensor<CpuBackend>) -> Result<Tensor<CpuBackend>> {
+        kernels::last_row(x)
+    }
+
     fn linear(
         &self,
         x: &Tensor<CpuBackend>,

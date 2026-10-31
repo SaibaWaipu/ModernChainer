@@ -726,3 +726,294 @@ pub(crate) fn adam_update(
         make_f32(param, new_v, v.shape().clone())?,
     ))
 }
+
+pub(crate) fn embedding(
+    ids: &Tensor<CpuBackend>,
+    weight: &Tensor<CpuBackend>,
+) -> Result<Tensor<CpuBackend>> {
+    if weight.rank() != 2 {
+        return Err(Error::invalid("embedding weight must be [vocab, dim]"));
+    }
+    if ids.rank() == 0 || ids.rank() > 2 {
+        return Err(Error::invalid(format!(
+            "embedding ids must be rank 1 or 2, got {}",
+            ids.shape()
+        )));
+    }
+    let vocab = weight.shape().dims()[0];
+    let dim = weight.shape().dims()[1];
+    let table = f32_slice(weight)?;
+    let indices: Vec<usize> = match ids.dtype() {
+        DType::I64 => ids.as_slice::<i64>()?.iter().map(|&x| x as usize).collect(),
+        DType::I32 => ids.as_slice::<i32>()?.iter().map(|&x| x as usize).collect(),
+        DType::U8 => ids.as_slice::<u8>()?.iter().map(|&x| x as usize).collect(),
+        other => return Err(Error::UnsupportedDType(other)),
+    };
+    let mut out = Vec::with_capacity(indices.len() * dim);
+    for index in indices {
+        if index >= vocab {
+            return Err(Error::invalid(format!(
+                "embedding index {index} out of range for vocab {vocab}"
+            )));
+        }
+        out.extend_from_slice(&table[index * dim..(index + 1) * dim]);
+    }
+    let mut out_dims = ids.shape().dims().to_vec();
+    out_dims.push(dim);
+    make_f32(weight, out, Shape::new(out_dims))
+}
+
+pub(crate) fn layer_norm(
+    x: &Tensor<CpuBackend>,
+    gamma: &Tensor<CpuBackend>,
+    beta: &Tensor<CpuBackend>,
+    eps: f64,
+) -> Result<Tensor<CpuBackend>> {
+    if x.rank() < 2 {
+        return Err(Error::invalid("layer_norm expects rank >= 2"));
+    }
+    let dim = *x.shape().dims().last().unwrap();
+    if dim == 0 {
+        return make_f32(x, Vec::new(), x.shape().clone());
+    }
+    if gamma.numel() != dim || beta.numel() != dim {
+        return Err(Error::invalid(format!(
+            "layer_norm gamma/beta must have {dim} elements"
+        )));
+    }
+    let xv = f32_slice(x)?;
+    let gv = f32_slice(gamma)?;
+    let bv = f32_slice(beta)?;
+    let rows = xv.len() / dim;
+    let mut out = vec![0f32; xv.len()];
+    for row in 0..rows {
+        let base = row * dim;
+        let slice = &xv[base..base + dim];
+        let mean = slice.iter().map(|&v| v as f64).sum::<f64>() / dim as f64;
+        let var = slice
+            .iter()
+            .map(|&v| {
+                let d = v as f64 - mean;
+                d * d
+            })
+            .sum::<f64>()
+            / dim as f64;
+        let inv = 1.0 / (var + eps).sqrt();
+        for i in 0..dim {
+            out[base + i] = (((slice[i] as f64 - mean) * inv) * gv[i] as f64 + bv[i] as f64) as f32;
+        }
+    }
+    make_f32(x, out, x.shape().clone())
+}
+
+pub(crate) fn softmax_last_dim(x: &Tensor<CpuBackend>) -> Result<Tensor<CpuBackend>> {
+    if x.rank() != 2 {
+        return Err(Error::invalid("softmax_last_dim expects a 2-D tensor"));
+    }
+    let rows = x.shape().dims()[0];
+    let cols = x.shape().dims()[1];
+    let xv = f32_slice(x)?;
+    let mut out = vec![0f32; xv.len()];
+    for row in 0..rows {
+        let base = row * cols;
+        let slice = &xv[base..base + cols];
+        let max = slice.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let mut sum = 0f64;
+        for &value in slice {
+            sum += ((value - max) as f64).exp();
+        }
+        let inv = 1.0 / sum;
+        for col in 0..cols {
+            out[base + col] = (((slice[col] - max) as f64) * inv) as f32;
+        }
+    }
+    make_f32(x, out, x.shape().clone())
+}
+
+pub(crate) fn silu(x: &Tensor<CpuBackend>) -> Result<Tensor<CpuBackend>> {
+    unary_map(x, |v| v / (1.0 + (-v).exp()))
+}
+
+pub(crate) fn split_heads(
+    x: &Tensor<CpuBackend>,
+    heads: usize,
+    head_dim: usize,
+) -> Result<Tensor<CpuBackend>> {
+    if x.rank() != 2 {
+        return Err(Error::invalid(
+            "split_heads expects [seq, heads * head_dim]",
+        ));
+    }
+    let seq = x.shape().dims()[0];
+    let width = x.shape().dims()[1];
+    if width != heads * head_dim {
+        return Err(Error::invalid(format!(
+            "split_heads expected width {heads}*{head_dim}, got {width}"
+        )));
+    }
+    let xv = f32_slice(x)?;
+    let mut out = vec![0f32; xv.len()];
+    for s in 0..seq {
+        for h in 0..heads {
+            for d in 0..head_dim {
+                out[h * seq * head_dim + s * head_dim + d] = xv[s * width + h * head_dim + d];
+            }
+        }
+    }
+    make_f32(x, out, Shape::new([heads, seq, head_dim]))
+}
+
+pub(crate) fn merge_heads(x: &Tensor<CpuBackend>, heads: usize) -> Result<Tensor<CpuBackend>> {
+    if x.rank() != 3 {
+        return Err(Error::invalid("merge_heads expects [heads, seq, head_dim]"));
+    }
+    let dims = x.shape().dims();
+    if dims[0] != heads {
+        return Err(Error::invalid(format!(
+            "merge_heads expected {heads} heads, got {}",
+            dims[0]
+        )));
+    }
+    let seq = dims[1];
+    let head_dim = dims[2];
+    let width = heads * head_dim;
+    let xv = f32_slice(x)?;
+    let mut out = vec![0f32; xv.len()];
+    for h in 0..heads {
+        for s in 0..seq {
+            for d in 0..head_dim {
+                out[s * width + h * head_dim + d] = xv[h * seq * head_dim + s * head_dim + d];
+            }
+        }
+    }
+    make_f32(x, out, Shape::new([seq, width]))
+}
+
+pub(crate) fn attention(
+    q: &Tensor<CpuBackend>,
+    k: &Tensor<CpuBackend>,
+    v: &Tensor<CpuBackend>,
+    scale: f64,
+    causal: bool,
+) -> Result<Tensor<CpuBackend>> {
+    if q.rank() != 3 || k.rank() != 3 || v.rank() != 3 {
+        return Err(Error::invalid(
+            "attention expects q/k/v of shape [heads, seq, head_dim]",
+        ));
+    }
+    let (heads, q_seq, head_dim) = (
+        q.shape().dims()[0],
+        q.shape().dims()[1],
+        q.shape().dims()[2],
+    );
+    if k.shape().dims()[0] != heads
+        || v.shape().dims()[0] != heads
+        || k.shape().dims()[2] != head_dim
+        || v.shape().dims()[2] != head_dim
+    {
+        return Err(Error::invalid("attention head dimensions do not match"));
+    }
+    let kv_seq = k.shape().dims()[1];
+    if v.shape().dims()[1] != kv_seq {
+        return Err(Error::invalid("attention k/v sequence lengths differ"));
+    }
+    let qv = f32_slice(q)?;
+    let kv = f32_slice(k)?;
+    let vv = f32_slice(v)?;
+    let mut out = vec![0f32; heads * q_seq * head_dim];
+    let offset = kv_seq.saturating_sub(q_seq);
+
+    for head in 0..heads {
+        let q_base = head * q_seq * head_dim;
+        let k_base = head * kv_seq * head_dim;
+        let v_base = head * kv_seq * head_dim;
+        for i in 0..q_seq {
+            let mut scores = vec![f32::NEG_INFINITY; kv_seq];
+            let mut max = f32::NEG_INFINITY;
+            for j in 0..kv_seq {
+                if causal && j > offset + i {
+                    continue;
+                }
+                let mut dot = 0f64;
+                for d in 0..head_dim {
+                    dot +=
+                        qv[q_base + i * head_dim + d] as f64 * kv[k_base + j * head_dim + d] as f64;
+                }
+                let score = (dot * scale) as f32;
+                scores[j] = score;
+                if score > max {
+                    max = score;
+                }
+            }
+            if max == f32::NEG_INFINITY {
+                continue;
+            }
+            let mut sum = 0f64;
+            for &score in &scores {
+                if score != f32::NEG_INFINITY {
+                    sum += ((score - max) as f64).exp();
+                }
+            }
+            let inv = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+            for j in 0..kv_seq {
+                if scores[j] == f32::NEG_INFINITY {
+                    continue;
+                }
+                let p = (((scores[j] - max) as f64) * inv) as f32;
+                for d in 0..head_dim {
+                    out[q_base + i * head_dim + d] += p * vv[v_base + j * head_dim + d];
+                }
+            }
+        }
+    }
+    make_f32(q, out, Shape::new([heads, q_seq, head_dim]))
+}
+
+pub(crate) fn concat_seq(
+    a: &Tensor<CpuBackend>,
+    b: &Tensor<CpuBackend>,
+) -> Result<Tensor<CpuBackend>> {
+    if a.rank() != 3 || b.rank() != 3 {
+        return Err(Error::invalid("concat_seq expects [heads, seq, head_dim]"));
+    }
+    let (heads, a_seq, head_dim) = (
+        a.shape().dims()[0],
+        a.shape().dims()[1],
+        a.shape().dims()[2],
+    );
+    let (b_heads, b_seq, b_dim) = (
+        b.shape().dims()[0],
+        b.shape().dims()[1],
+        b.shape().dims()[2],
+    );
+    if heads != b_heads || head_dim != b_dim {
+        return Err(Error::invalid("concat_seq head dimensions do not match"));
+    }
+    let av = f32_slice(a)?;
+    let bv = f32_slice(b)?;
+    let seq = a_seq + b_seq;
+    let mut out = vec![0f32; heads * seq * head_dim];
+    for h in 0..heads {
+        let dst = h * seq * head_dim;
+        let src_a = h * a_seq * head_dim;
+        let src_b = h * b_seq * head_dim;
+        out[dst..dst + a_seq * head_dim].copy_from_slice(&av[src_a..src_a + a_seq * head_dim]);
+        out[dst + a_seq * head_dim..dst + seq * head_dim]
+            .copy_from_slice(&bv[src_b..src_b + b_seq * head_dim]);
+    }
+    make_f32(a, out, Shape::new([heads, seq, head_dim]))
+}
+
+pub(crate) fn last_row(x: &Tensor<CpuBackend>) -> Result<Tensor<CpuBackend>> {
+    if x.rank() != 2 {
+        return Err(Error::invalid("last_row expects a 2-D tensor"));
+    }
+    let rows = x.shape().dims()[0];
+    let cols = x.shape().dims()[1];
+    if rows == 0 {
+        return Err(Error::invalid("last_row on an empty tensor"));
+    }
+    let xv = f32_slice(x)?;
+    let start = (rows - 1) * cols;
+    make_f32(x, xv[start..start + cols].to_vec(), Shape::new([cols]))
+}
