@@ -55,18 +55,21 @@ cached per context, and adapters can be selected by index with
 
 | Kernel | Notes |
 |---|---|
-| add / sub / mul / div | equal shapes; bias add for `[rows, cols] + [cols]` |
+| add / sub / mul / div | equal shapes, 4 elements/thread; bias add for `[rows, cols] + [cols]` |
 | sqrt, relu, relu backward, scale, fill | elementwise |
 | transpose2d | linear index remap |
-| matmul | 16×16 tiled, shared memory, 2-D dispatch beyond 65535 workgroups |
+| matmul | 32×32 tile, 2×2 register blocking, shared memory |
+| linear | transpose-free matmul against `[out, in]` weights |
+| adam_update | fused single kernel (`m`, `v`, bias correction and parameter update) |
+| sum_all | two-stage GPU reduction |
+| sum_to | native bias-column reduction; other patterns still CPU |
 
 ### Host fallbacks (correctness-first)
 
-`sum_all`, `sum_to`, `softmax_cross_entropy` and its backward currently copy to
-the CPU backend and upload the result. This keeps the full training path usable
-(matrix multiplication, bias, ReLU, transpose and optimizer arithmetic all stay
-on the GPU) while the native reduction kernels are developed. Expect PCIe
-traffic and CPU-side reduction time in those ops.
+`softmax_cross_entropy` and its backward, plus generic `sum_to` patterns other
+than bias, still copy to the CPU backend. `sum_all` and bias `sum_to` now run on
+the GPU. The fused Adam and native reductions removed the largest round trips,
+but softmax CE still incurs PCIe traffic.
 
 ### Dispatch and synchronization
 
@@ -91,9 +94,9 @@ layer = chainer.links.Linear(16, 8, device="vulkan:1")
 `chainer.synchronize("vulkan:1")` waits for queued work. Tensors on the same
 device share one backend context. The unified benchmark
 (`scripts/bench_vs_pytorch.py`) reports Vulkan against PyTorch CUDA; on this
-machine `vulkan:1` is the RTX 2070 SUPER. The current suite is about 0.09×
-PyTorch because matmul is a simple 16×16 tile and reductions still use the CPU
-fallback.
+machine `vulkan:1` is the RTX 2070 SUPER. The current suite is about 0.11×
+PyTorch. Fused Adam and native reductions helped, but the scalar 32×32 matmul
+and remaining softmax-CE fallback still dominate.
 
 ### Verification
 

@@ -195,13 +195,14 @@ Milliseconds, `ours / torch`; PyTorch 2.11.0+cu128, 5 warmups, median of 30
 |---|---:|---:|---:|---:|---:|
 | CPU | 0.49 / 0.43 | 2.19 / 8.00 | 0.58 / 0.32 | 3.56 / 4.94 | 1.22 / 1.53 (1.25×) |
 | CUDA | 0.074 / 0.070 | 0.185 / 0.142 | 0.207 / 0.198 | 0.457 / 0.526 | 0.190 / 0.179 (0.94×) |
-| Vulkan:1 | 1.00 / 0.071 | 0.543 / 0.142 | 3.48 / 0.207 | 11.0 / 0.573 | 2.14 / 0.186 (0.09×) |
+| Vulkan:1 | 0.87 / 0.071 | 0.56 / 0.142 | 3.92 / 0.216 | 4.60 / 0.572 | 1.72 / 0.188 (0.11×) |
 
 Python/CUDA is close to PyTorch for this suite; Adam is slightly ahead.
-Python/Vulkan is correct but the 16×16 tiled matmul and CPU-fallback reductions
-make it far slower. Pipeline caching removed repeated WGSL compilation but did
-not close the kernel gap. Native reductions and a faster matmul are the next
-Vulkan milestone.
+Python/Vulkan improved from 2.11 to 1.72 ms geomean: fused Adam (10.7 → 4.6 ms),
+native `sum_all` / bias `sum_to`, a 32×32 matmul with 2×2 register blocking, a
+transpose-free linear path, and vec4 elementwise kernels. It is still about
+0.11× PyTorch; matmul and the remaining softmax-CE / generic `sum_to` CPU
+fallbacks dominate.
 
 ## Reproducing the Vulkan numbers
 

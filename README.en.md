@@ -33,7 +33,7 @@ class MLP(chainer.Chain):
         return self.l2(F.relu(self.l1(x)))
 ```
 
-## Status (v0.12.0)
+## Status (v0.13.0)
 
 | Area | Status |
 |---|---|
@@ -368,11 +368,12 @@ RTX 2070 SUPER, PyTorch 2.11.0+cu128, `matmul 512³` / `add 4M` /
 |---|---:|---:|---:|---:|---:|
 | CPU | 0.49 / 0.43 | 2.19 / 8.00 | 0.58 / 0.32 | 3.56 / 4.94 | 1.22 / 1.53 (1.25×) |
 | CUDA | 0.074 / 0.070 | 0.185 / 0.142 | 0.207 / 0.198 | 0.457 / 0.526 | 0.190 / 0.179 (0.94×) |
-| Vulkan:1 | 1.00 / 0.071 | 0.543 / 0.142 | 3.48 / 0.207 | 11.0 / 0.573 | 2.14 / 0.186 (0.09×) |
+| Vulkan:1 | 0.87 / 0.071 | 0.56 / 0.142 | 3.92 / 0.216 | 4.60 / 0.572 | 1.72 / 0.188 (0.11×) |
 
-Python/CUDA is close to parity. Python/Vulkan is correct but still far slower;
-the tiled matmul and CPU-fallback reductions dominate. Native reductions and
-matmul optimization are next.
+Python/CUDA is close to parity. Python/Vulkan is correct but still far slower.
+The kernel pass cut Adam from 10.7 to 4.6 ms and the geomean from 2.11 to
+1.72 ms. Matmul and the remaining softmax-CE / generic `sum_to` CPU fallbacks
+dominate.
 
 ## Build and test
 

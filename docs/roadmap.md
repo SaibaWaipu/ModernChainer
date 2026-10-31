@@ -66,10 +66,11 @@ Remaining: block-level in-place COW, wider kernels, CUDA.
   prefill, native low-precision decode attention, fused flash-attention prefill,
   last-token-only LM head, and TTFT/tokens/s benchmarks against PyTorch eager.
 - Done: Python device execution for CPU/CUDA/Vulkan, Vulkan adapter selection,
-  pipeline cache, and a unified Python benchmark against PyTorch.
-- Next: Vulkan native reductions/softmax CE and a faster matmul, continuous
-  static batching/request admission, faster long-context low-precision decode,
-  larger flash-attention head dimensions, backend-agnostic Static Step trait,
+  pipeline cache, a unified Python benchmark against PyTorch, fused Adam,
+  native `sum_all` / bias `sum_to`, vectorized elementwise, and a 32×32 matmul.
+- Next: faster Vulkan matmul, native softmax CE and generic `sum_to`, Vulkan
+  buffer pool / command batching, continuous static batching/request admission,
+  faster long-context low-precision decode, backend-agnostic Static Step trait,
   full-model f16/bf16 dtype.
 
 ## v0.7 — Training-By-Run
