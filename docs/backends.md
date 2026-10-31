@@ -166,10 +166,18 @@ stream, runs a closure that only enqueues work, and returns a
 `CudaGraphRunner`.  `graph_matmul` and `graph_adam` preallocate their outputs
 and capture a cuBLAS GEMM / fused Adam kernel respectively.
 
+`GraphLinearTrainer` is the first **Run-level** graph path.  It owns fixed
+buffers for weights, bias, input, target, forward/intermediate tensors,
+gradients and Adam state, then captures forward (cuBLAS + bias), MSE, backward
+(cuBLAS + reduction) and in-place Adam.  The step counter is a device scalar
+advanced by a kernel inside the graph, so replay performs a complete training
+step without host arguments.
+
 CUDA Graph requires preallocated buffers: allocation and synchronization inside
 the closure are not capturable.  Event tracking is disabled on the backend
 context because the backend uses a single stream; this also keeps capture clean.
-Arbitrary `Run`-level graph capture is future work.
+A general `Run` / stateful decoder graph requires a static-step and in-place
+state API; that is the next milestone.
 
 ### Running
 
@@ -189,7 +197,7 @@ Tests skip when no CUDA driver/runtime is available.
 ### Next
 
 - Full-model f16/bf16 dtype (all ops) and master-weight optimizer state.
-- Run-level graph capture with an in-place state path.
+- Generalize Run-level graph capture (static-step trait + in-place decoder state).
 - Further paged-attention/flash-decode tuning and TTFT/tokens/s benchmarks.
 - Run-level CUDA Graph capture with a memory pool.
 - TTFT/tokens/s and larger transformer benchmarks.

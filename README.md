@@ -37,7 +37,8 @@ class MLP(chainer.Chain):
 | Batched decode | 動作: `PagedBatchRunner` + batched paged attention |
 | Continuous batching | 動作: `RequestTable` / `BatchPlan`（論理バッチ） |
 | Speculative decoding | 動作: greedy の fork/verify/commit 参照実装 |
-| CUDA バックエンド | 動作: NVRTC + cuBLAS / cuBLASLt、F32/TF32/F16/BF16 compute type、**AMP（autocast + GradScaler）**、メモリプール、CUDA Graph、wide paged attention |
+| CUDA バックエンド | 動作: NVRTC + cuBLAS / cuBLASLt、F32/TF32/F16/BF16 compute type、AMP、メモリプール、CUDA Graph、wide paged attention |
+| Run-level CUDA Graph | 動作: 固定バッファ + in-place Adam の `GraphLinearTrainer`（Linear+MSE） |
 | Python バインディング | コアサブセット: `Tensor`、`Variable`、`F.*`、`L.Linear`、`SGD`/`Adam`、`Chain` |
 | シリアライズ | ネイティブ `.mcn`、Chainer `.npz` は計画中 |
 | Trainer / Updater / Extensions | 計画中 |
@@ -55,6 +56,7 @@ cargo run --release --example paged_batching
 cargo run --release --example speculative
 cargo run --release --example cuda_matmul     # CUDA ドライバ + NVRTC/cuBLAS が必要
 cargo run --release --example cuda_bench
+cargo run --release --example graph_trainer
 cargo run --release --example vulkan_matmul   # Vulkan ローダ/ICD が必要
 ```
 
@@ -234,12 +236,15 @@ CUDA（RTX 2070 SUPER）対 PyTorch 2.11.0+cu128（同じ GPU）。`torch/ours` 
 
 ```bash
 cargo run --release --example cuda_bench
+cargo run --release --example graph_trainer
 # PyTorch 比較（CUDA 版 PyTorch の venv を使用）
 CUDA_VISIBLE_DEVICES=<RTX 2070S の UUID> \
   /tmp/opencode/torch-venv/bin/python scripts/bench_cuda_vs_pytorch.py
 ```
 
-cuBLASLt は bias、および GELU を GEMM エピローグで融合します。decoder の MLP は GELU に切り替え、bias+GELU を 1 カーネルで実行します。`ComputeType` で F32 / TF32 / F16 / BF16 を選べます。メモリプールがデバイス割り当てを再利用し、CUDA Graph は固定 shape の matmul / Adam 更新を再再生します。PyTorch 側の Adam Graph は `capturable=True` で測定しています。
+cuBLASLt は bias、および GELU を GEMM エピローグで融合します。decoder の MLP は GELU に切り替え、bias+GELU を 1 カーネルで実行します。`ComputeType` で F32 / TF32 / F16 / BF16 を選べます。メモリプールがデバイス割り当てを再利用します。
+
+`GraphLinearTrainer` はパラメータ・中間テンソル・Adam 状態を固定デバイスバッファに置き、Linear + MSE + Adam の 1 学習ステップ全体を CUDA Graph としてキャプチャします。step カウンタもデバイス上で進むため、同じ graph を繰り返し replay できます。
 
 - [`scripts/bench_vs_pytorch.py`](scripts/bench_vs_pytorch.py)
 - [`docs/benchmarks.md`](docs/benchmarks.md)（英語）
@@ -273,7 +278,7 @@ Vulkan テストは利用可能なアダプタ（NVIDIA / AMD / Intel / Mesa lav
 ## 主な制約
 
 - CUDA のネイティブ実装は elementwise / reduction / matmul / linear / Adam / softmax CE / embedding / layer_norm / attention / paged attention まで。汎用 `sum_to`（bias 以外）のみ CPU フォールバックです。
-- CUDA Graph は preallocated バッファ前提です（`graph_matmul` / `graph_adam`）。メモリプールは実装済みですが、任意の `Run` をキャプチャするには in-place な状態更新経路が必要で、未対応です。
+- CUDA Graph は preallocated バッファ前提です（`graph_matmul` / `graph_adam` / `GraphLinearTrainer`）。任意の `Run` / stateful decoder をそのままキャプチャするには、一般的な static step と in-place 状態更新 API が必要で、未対応です。
 - F16/BF16 は **compute type** と **autocast AMP** に対応しています。autocast は GEMM 系（linear / matmul）を低精度化し、LayerNorm / Softmax / reduction は f32 のままです。モデル全体を f16/bf16 dtype にする経路は未対応です。
 - wide paged attention は block-per-query の CUDA カーネルです。
 - Python の CUDA テンソル API、`Run` / `PagedBatchRunner` / `Trainer` は未公開（Rust ファースト）。

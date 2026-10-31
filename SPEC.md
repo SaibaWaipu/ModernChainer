@@ -215,8 +215,9 @@ sampling.
   LayerNorm, Softmax, reductions and the loss stay f32. `GradScaler` provides
   loss scaling, gradient unscaling, inf/nan detection and dynamic scale
   growth/backoff.
-- CUDA Graph capture/replay for preallocated matmul (`graph_matmul`) and Adam
-  (`graph_adam`).
+- CUDA Graph capture/replay for preallocated matmul (`graph_matmul`), Adam
+  (`graph_adam`) and `GraphLinearTrainer` (a full Linear+MSE+Adam training
+  step with device-resident buffers and step counter).
 - Wide paged attention: block-per-query kernels for single and batched decode.
 - Only generic `sum_to` (non-bias) falls back to CPU.
 - Verified against CPU for elementwise, matmul, linear, softmax CE, LLM
@@ -276,8 +277,8 @@ subclassing; custom ops must currently be written in Rust.
   embedding, layer_norm, split/merge heads, concat and last-row.
 - Only generic `sum_to` (non-bias) falls back to CPU.
 - cuBLASLt fused bias / GELU for `linear`; `ComputeType` F32/TF32/F16/BF16;
-  memory pool; CUDA Graph for fixed-shape matmul/Adam; block-per-query wide
-  paged attention.
+  memory pool; CUDA Graph for fixed-shape matmul/Adam and a static Linear
+  training step; block-per-query wide paged attention.
 - CUDA Graph capture requires preallocated buffers and a non-default stream;
   arbitrary `Run` capture is deferred.
 - Tested on RTX 2070 SUPER (sm_75) and compiled for the detected compute
@@ -365,6 +366,8 @@ docs/                      architecture, backends, API, benchmarks, roadmap
   a BF16 decoder logit comparison covers the mixed path.
 - Autocast decoder parity and an AMP training loop with `GradScaler` on CUDA;
   scaler unscale/growth/backoff and inf/nan skipping are tested on CPU.
+- `GraphLinearTrainer` capture/replay drives loss down over 200 steps and keeps
+  the device step counter in sync.
 - Memory-pool reuse and zeroed reuse are tested.
 - `cargo fmt`, `cargo clippy -D warnings`, `cargo test` in CI.
 

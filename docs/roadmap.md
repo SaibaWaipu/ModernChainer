@@ -58,8 +58,10 @@ Remaining: block-level in-place COW, wider kernels, CUDA.
 - Done: fused bias+GELU linear for the decoder MLP, wide block-per-query
   paged attention, CUDA memory pool, F32/TF32/F16/BF16 compute types,
   autocast AMP + GradScaler.
-- Next: full-model f16/bf16 dtype, run-level graph capture with an in-place
-  state path, TTFT/tokens/s.
+- Done: `GraphLinearTrainer` (fixed buffers + in-place Adam) as the first
+  Run-level CUDA Graph path.
+- Next: full-model f16/bf16 dtype, a general static-step/in-place graph API for
+  `Run` and stateful decoders, TTFT/tokens/s.
 
 ## v0.7 — Training-By-Run
 
