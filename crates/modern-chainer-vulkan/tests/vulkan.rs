@@ -125,7 +125,7 @@ fn bias_broadcast_matches_cpu() {
 
 #[test]
 #[serial]
-fn reductions_fall_back_to_cpu() {
+fn reductions_match_cpu() {
     if !is_available() {
         eprintln!("skipping: no Vulkan adapter");
         return;

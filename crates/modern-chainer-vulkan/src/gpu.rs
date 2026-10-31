@@ -33,7 +33,12 @@ impl GpuContext {
 
     fn from_adapter(adapter: wgpu::Adapter, adapter_index: usize) -> Result<Arc<Self>> {
         let info = adapter.get_info();
-        let limits = wgpu::Limits::downlevel_defaults();
+        let supported = adapter.limits();
+        let mut limits = wgpu::Limits::downlevel_defaults();
+        limits.max_storage_buffers_per_shader_stage = limits
+            .max_storage_buffers_per_shader_stage
+            .max(8)
+            .min(supported.max_storage_buffers_per_shader_stage);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("modern-chainer"),
             required_features: wgpu::Features::empty(),
