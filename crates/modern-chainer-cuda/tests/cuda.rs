@@ -713,3 +713,91 @@ fn cuda_bf16_decoder_matches_f32_cpu() {
         );
     }
 }
+
+#[test]
+#[serial]
+fn cuda_autocast_decoder_and_amp_training() {
+    use modern_chainer_autograd::Variable;
+    use modern_chainer_autograd::ops as F;
+    use modern_chainer_core::DType;
+    use modern_chainer_core::autocast::autocast;
+    use modern_chainer_llm::{Decoder, DecoderConfig};
+    use modern_chainer_nn::{Linear, Module};
+    use modern_chainer_optim::{Adam, GradScaler, zero_grad};
+    use modern_chainer_run::{Run, RunMode};
+
+    if !is_available() {
+        eprintln!("skipping: CUDA is not available");
+        return;
+    }
+    let backend = CudaBackend::new(0).unwrap();
+
+    let config = DecoderConfig {
+        vocab: 32,
+        d_model: 8,
+        n_layers: 2,
+        n_heads: 2,
+        d_ff: 16,
+        max_seq: 24,
+        eps: 1e-5,
+    };
+    let cuda_decoder = Decoder::new(backend.clone(), config.clone(), 7).unwrap();
+    let cpu_decoder = Decoder::new(CpuBackend::new(), config, 7).unwrap();
+    let mut cuda_run = Run::new(cuda_decoder, backend.clone(), RunMode::Inference, 11).unwrap();
+    let mut cpu_run = Run::new(cpu_decoder, CpuBackend::new(), RunMode::Inference, 11).unwrap();
+    let prompt = vec![1u32, 5, 9, 3];
+    let cuda_logits = autocast(DType::F16, || cuda_run.step(prompt.clone()))
+        .unwrap()
+        .unwrap();
+    let cpu_logits = cpu_run.step(prompt).unwrap();
+    for (index, (a, b)) in values(&cuda_logits)
+        .iter()
+        .zip(values(&cpu_logits))
+        .enumerate()
+    {
+        assert!(
+            (a - b).abs() < 0.2,
+            "autocast decoder logit {index}: {a} vs {b}"
+        );
+    }
+
+    let weight = Variable::new(Tensor::from_f32(backend.clone(), &[0.2, -0.4], [1, 2]).unwrap());
+    let bias = Variable::new(Tensor::from_f32(backend.clone(), &[0.1], [1]).unwrap());
+    let model = Linear::from_parts(weight, Some(bias), 2, 1).unwrap();
+    let x = Variable::new(
+        Tensor::from_f32(
+            backend.clone(),
+            &[1.0, 2.0, 2.0, 1.0, 3.0, 1.0, 4.0, 2.0],
+            [4, 2],
+        )
+        .unwrap(),
+    );
+    let target = Variable::constant(
+        Tensor::from_f32(backend.clone(), &[3.0, 4.0, 5.0, 6.0], [4, 1]).unwrap(),
+    );
+    let params = model.parameters();
+    let mut optimizer = Adam::new(0.01);
+    let mut scaler = GradScaler::new()
+        .with_scale(1024.0)
+        .with_growth_interval(10);
+    let mut first = None;
+    let mut last = 0.0;
+    for _ in 0..40 {
+        zero_grad(&params);
+        let loss = autocast(DType::F16, || {
+            let prediction = model.forward(&x)?;
+            let diff = F::sub(&prediction, &target)?;
+            F::mean(&F::mul(&diff, &diff)?)
+        })
+        .unwrap()
+        .unwrap();
+        last = loss.data().backend().ops().to_scalar(&loss.data()).unwrap();
+        first.get_or_insert(last);
+        let scaled = scaler.scale_loss(&loss).unwrap();
+        scaled.backward().unwrap();
+        assert!(scaler.step(&mut optimizer, &params).unwrap());
+    }
+    let first = first.unwrap();
+    eprintln!("cuda amp loss: {first} -> {last}, scale {}", scaler.scale());
+    assert!(last < first);
+}

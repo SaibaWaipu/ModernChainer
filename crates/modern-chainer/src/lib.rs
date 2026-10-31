@@ -16,6 +16,9 @@
 pub use modern_chainer_autograd::{
     NoGradGuard, Op, Variable, apply, gradcheck, is_grad_enabled, no_grad, set_grad_enabled,
 };
+pub use modern_chainer_core::autocast::{
+    AutocastGuard, autocast, autocast_dtype, is_autocast_enabled,
+};
 pub use modern_chainer_core::{
     Activation, AdamConfig, Backend, DType, Device, Error, Ops, Result, Shape, Strides, Tensor,
     he_normal,
@@ -30,7 +33,7 @@ pub use modern_chainer_llm::{
     RequestState, Sampler, argmax_token, generate, sample_token, speculative_generate,
 };
 pub use modern_chainer_nn::{Linear, Module, Parameter, Sequential};
-pub use modern_chainer_optim::{Adam, MomentumSGD, Optimizer, SGD, zero_grad};
+pub use modern_chainer_optim::{Adam, GradScaler, MomentumSGD, Optimizer, SGD, zero_grad};
 pub use modern_chainer_run::{
     Run, RunContext, RunMode, ScalarValue, StateBuilder, StateId, StateKey, StateSpec, StateStore,
     Step, Transaction,

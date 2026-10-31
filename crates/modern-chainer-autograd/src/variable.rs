@@ -89,6 +89,10 @@ impl<B: Backend> Variable<B> {
         *self.inner.grad.lock().expect("variable grad lock poisoned") = None;
     }
 
+    pub fn set_grad(&self, grad: Option<Tensor<B>>) {
+        *self.inner.grad.lock().expect("variable grad lock poisoned") = grad;
+    }
+
     pub fn requires_grad(&self) -> bool {
         self.inner.requires_grad.load(Ordering::Relaxed)
     }

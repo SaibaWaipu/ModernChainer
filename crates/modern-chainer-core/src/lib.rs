@@ -5,6 +5,7 @@
 //! Vulkan backends implement.
 
 pub mod activation;
+pub mod autocast;
 pub mod device;
 pub mod dtype;
 pub mod error;
@@ -15,6 +16,7 @@ pub mod storage;
 pub mod tensor;
 
 pub use activation::Activation;
+pub use autocast::{AutocastGuard, autocast, autocast_dtype, is_autocast_enabled};
 pub use device::Device;
 pub use dtype::DType;
 pub use error::{Error, Result};

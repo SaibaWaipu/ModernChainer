@@ -1,9 +1,13 @@
 //! Optimizers (`chainer.optimizers.*`).
 
+pub mod amp;
+
 use std::collections::HashMap;
 
 use modern_chainer_core::{AdamConfig, Backend, Ops, Result, Tensor};
 use modern_chainer_nn::Parameter;
+
+pub use amp::GradScaler;
 
 pub trait Optimizer<B: Backend>: Send {
     fn update(&mut self, params: &[Parameter<B>]) -> Result<()>;

@@ -6,6 +6,7 @@ use cudarc::cublaslt::{
     Activation as LtActivation, Matmul as BlasLtMatmul, MatmulConfig as BlasLtConfig,
 };
 use cudarc::driver::{CudaFunction, CudaSlice, LaunchConfig, PushKernelArg};
+use modern_chainer_core::autocast::autocast_dtype;
 use modern_chainer_core::{Activation, Backend, DType, Error, Ops, Result, Shape, Tensor};
 use modern_chainer_cpu::CpuBackend;
 
@@ -670,6 +671,13 @@ impl Ops<CudaBackend> for CudaOps {
         a: &Tensor<CudaBackend>,
         b: &Tensor<CudaBackend>,
     ) -> Result<Tensor<CudaBackend>> {
+        if let Some(dtype) = autocast_dtype() {
+            return match dtype {
+                DType::F16 => self.mixed_matmul(a, b, DType::F16),
+                DType::BF16 => self.mixed_matmul(a, b, DType::BF16),
+                other => Err(Error::UnsupportedDType(other)),
+            };
+        }
         match self.runtime.compute_type() {
             ComputeType::F16 => return self.mixed_matmul(a, b, DType::F16),
             ComputeType::Bf16 => return self.mixed_matmul(a, b, DType::BF16),
@@ -715,6 +723,13 @@ impl Ops<CudaBackend> for CudaOps {
         weight: &Tensor<CudaBackend>,
         bias: Option<&Tensor<CudaBackend>>,
     ) -> Result<Tensor<CudaBackend>> {
+        if let Some(dtype) = autocast_dtype() {
+            return match dtype {
+                DType::F16 => self.mixed_linear(x, weight, bias, None, DType::F16),
+                DType::BF16 => self.mixed_linear(x, weight, bias, None, DType::BF16),
+                other => Err(Error::UnsupportedDType(other)),
+            };
+        }
         match self.runtime.compute_type() {
             ComputeType::F16 => self.mixed_linear(x, weight, bias, None, DType::F16),
             ComputeType::Bf16 => self.mixed_linear(x, weight, bias, None, DType::BF16),
@@ -735,6 +750,18 @@ impl Ops<CudaBackend> for CudaOps {
             Activation::Gelu => Some(LtActivation::Gelu),
             Activation::Silu => None,
         };
+        if let Some(dtype) = autocast_dtype() {
+            let autocast_dtype = match dtype {
+                DType::F16 => DType::F16,
+                DType::BF16 => DType::BF16,
+                other => return Err(Error::UnsupportedDType(other)),
+            };
+            if activation == Activation::Silu {
+                let y = self.mixed_linear(x, weight, bias, None, autocast_dtype)?;
+                return self.silu(&y);
+            }
+            return self.mixed_linear(x, weight, bias, lt_activation, autocast_dtype);
+        }
         match self.runtime.compute_type() {
             ComputeType::F16 | ComputeType::Bf16 => {
                 let dtype = if self.runtime.compute_type() == ComputeType::F16 {
