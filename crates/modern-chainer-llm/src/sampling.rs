@@ -16,11 +16,7 @@ impl Sampler {
     }
 }
 
-pub fn sample_token<B: Backend>(
-    logits: &Tensor<B>,
-    sampler: &Sampler,
-    rng: &mut Rng,
-) -> Result<u32> {
+fn logits_values<B: Backend>(logits: &Tensor<B>) -> Result<Vec<f32>> {
     if logits.dtype() != DType::F32 {
         return Err(Error::UnsupportedDType(logits.dtype()));
     }
@@ -33,14 +29,29 @@ pub fn sample_token<B: Backend>(
     if values.is_empty() {
         return Err(Error::invalid("cannot sample from empty logits"));
     }
+    Ok(values)
+}
+
+pub fn argmax_token<B: Backend>(logits: &Tensor<B>) -> Result<u32> {
+    let values = logits_values(logits)?;
+    let index = values
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(index, _)| index)
+        .unwrap();
+    u32::try_from(index).map_err(|_| Error::invalid("token id exceeds u32"))
+}
+
+pub fn sample_token<B: Backend>(
+    logits: &Tensor<B>,
+    sampler: &Sampler,
+    rng: &mut Rng,
+) -> Result<u32> {
+    let values = logits_values(logits)?;
 
     let index = match *sampler {
-        Sampler::Greedy => values
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(index, _)| index)
-            .unwrap(),
+        Sampler::Greedy => return argmax_token(logits),
         Sampler::Temperature { temperature, top_k } => {
             if temperature <= 0.0 || !temperature.is_finite() {
                 return Err(Error::invalid("temperature must be positive and finite"));

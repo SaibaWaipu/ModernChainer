@@ -102,6 +102,20 @@ impl Ops<CpuBackend> for CpuOps {
         kernels::last_row(x)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn paged_attention(
+        &self,
+        q: &Tensor<CpuBackend>,
+        k_blocks: &Tensor<CpuBackend>,
+        v_blocks: &Tensor<CpuBackend>,
+        block_table: &Tensor<CpuBackend>,
+        seq_len: usize,
+        scale: f64,
+        causal: bool,
+    ) -> Result<Tensor<CpuBackend>> {
+        kernels::paged_attention(q, k_blocks, v_blocks, block_table, seq_len, scale, causal)
+    }
+
     fn linear(
         &self,
         x: &Tensor<CpuBackend>,

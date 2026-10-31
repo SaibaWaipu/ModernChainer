@@ -21,7 +21,8 @@ pub use modern_chainer_core::{
 };
 pub use modern_chainer_cpu::{CpuBackend, CpuOps, CpuStorage};
 pub use modern_chainer_llm::{
-    Decoder, DecoderConfig, DecoderHandles, Sampler, generate, sample_token,
+    BatchOutput, BatchPlan, ContinuousBatcher, Decoder, DecoderConfig, DecoderHandles, RequestId,
+    RequestState, Sampler, argmax_token, generate, sample_token, speculative_generate,
 };
 pub use modern_chainer_nn::{Linear, Module, Parameter, Sequential};
 pub use modern_chainer_optim::{Adam, MomentumSGD, Optimizer, SGD, zero_grad};
@@ -78,10 +79,10 @@ pub mod prelude {
     pub use crate::F as functional;
     pub use crate::L;
     pub use crate::{
-        Adam, Backend, CpuBackend, DType, Decoder, DecoderConfig, Device, Error, Linear, Module,
-        MomentumSGD, Ops, Optimizer, Parameter, Result, Run, RunMode, SGD, Sampler, Shape, StateId,
-        StateKey, StateSpec, StateStore, Step, Tensor, Variable, ZeroGrad, generate, no_grad,
-        zero_grad,
+        Adam, Backend, BatchPlan, ContinuousBatcher, CpuBackend, DType, Decoder, DecoderConfig,
+        Device, Error, Linear, Module, MomentumSGD, Ops, Optimizer, Parameter, RequestId, Result,
+        Run, RunMode, SGD, Sampler, Shape, StateId, StateKey, StateSpec, StateStore, Step, Tensor,
+        Variable, ZeroGrad, generate, no_grad, speculative_generate, zero_grad,
     };
 }
 

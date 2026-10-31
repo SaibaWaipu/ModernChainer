@@ -188,9 +188,31 @@ impl<B: Backend> StateStore<B> {
                 })
             }
             StateLayout::Scalar => Ok(StateValue::Scalar(ScalarValue::default_for(spec.dtype)?)),
-            StateLayout::Paged { .. } => Err(Error::unsupported(
-                "paged state allocation is reserved for the PagedAttention milestone",
-            )),
+            StateLayout::Paged {
+                block_size,
+                num_blocks,
+                trailing,
+            } => {
+                if *block_size == 0 || *num_blocks == 0 {
+                    return Err(Error::invalid(
+                        "paged state requires positive block_size and num_blocks",
+                    ));
+                }
+                let mut block_dims = Vec::with_capacity(2 + trailing.len());
+                block_dims.push(*num_blocks);
+                block_dims.push(*block_size);
+                block_dims.extend_from_slice(trailing);
+                let blocks =
+                    Tensor::zeros(self.backend.clone(), Shape::new(block_dims), spec.dtype)?;
+                let block_table =
+                    Tensor::zeros(self.backend.clone(), Shape::new([*num_blocks]), DType::I64)?;
+                Ok(StateValue::Paged(PagedState {
+                    blocks,
+                    block_table,
+                    block_size: *block_size,
+                    len: 0,
+                }))
+            }
         }
     }
 
@@ -255,6 +277,35 @@ impl<B: Backend> StateStore<B> {
         self.value(id)?
             .as_scalar()
             .ok_or_else(|| Error::invalid(format!("state {id} is not a scalar")))
+    }
+
+    pub fn paged(&self, id: StateId) -> Result<&PagedState<B>> {
+        match self.value(id)? {
+            StateValue::Paged(paged) => Ok(paged),
+            _ => Err(Error::invalid(format!("state {id} is not paged"))),
+        }
+    }
+
+    pub fn set_paged(&mut self, id: StateId, paged: PagedState<B>) -> Result<()> {
+        let spec = self.spec(id)?.clone();
+        match &spec.layout {
+            StateLayout::Paged { .. } => {
+                if paged.blocks.dtype() != spec.dtype {
+                    return Err(Error::DTypeMismatch {
+                        expected: spec.dtype,
+                        actual: paged.blocks.dtype(),
+                    });
+                }
+                match &mut self.resolve_mut(id)?.value {
+                    StateValue::Paged(current) => {
+                        *current = paged;
+                        Ok(())
+                    }
+                    _ => Err(Error::invalid(format!("state {id} is not paged"))),
+                }
+            }
+            _ => Err(Error::invalid(format!("state {id} is not paged"))),
+        }
     }
 
     pub fn set_tensor(&mut self, id: StateId, tensor: Tensor<B>) -> Result<()> {

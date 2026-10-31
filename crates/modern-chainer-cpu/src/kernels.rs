@@ -1017,3 +1017,123 @@ pub(crate) fn last_row(x: &Tensor<CpuBackend>) -> Result<Tensor<CpuBackend>> {
     let start = (rows - 1) * cols;
     make_f32(x, xv[start..start + cols].to_vec(), Shape::new([cols]))
 }
+
+#[allow(clippy::needless_range_loop)]
+pub(crate) fn paged_attention(
+    q: &Tensor<CpuBackend>,
+    k_blocks: &Tensor<CpuBackend>,
+    v_blocks: &Tensor<CpuBackend>,
+    block_table: &Tensor<CpuBackend>,
+    seq_len: usize,
+    scale: f64,
+    causal: bool,
+) -> Result<Tensor<CpuBackend>> {
+    if q.rank() != 3 {
+        return Err(Error::invalid(
+            "paged_attention q must be [heads, q_seq, head_dim]",
+        ));
+    }
+    if k_blocks.rank() != 4 || v_blocks.rank() != 4 {
+        return Err(Error::invalid(
+            "paged_attention blocks must be [num_blocks, block_size, heads, head_dim]",
+        ));
+    }
+    if block_table.rank() != 1 {
+        return Err(Error::invalid("block_table must be 1-D"));
+    }
+    if block_table.dtype() != DType::I64 {
+        return Err(Error::UnsupportedDType(block_table.dtype()));
+    }
+    let (heads, q_seq, head_dim) = (
+        q.shape().dims()[0],
+        q.shape().dims()[1],
+        q.shape().dims()[2],
+    );
+    let (num_blocks, block_size, block_heads, block_dim) = (
+        k_blocks.shape().dims()[0],
+        k_blocks.shape().dims()[1],
+        k_blocks.shape().dims()[2],
+        k_blocks.shape().dims()[3],
+    );
+    if block_heads != heads || block_dim != head_dim {
+        return Err(Error::invalid(
+            "paged_attention head dimensions do not match",
+        ));
+    }
+    if v_blocks.shape().dims() != k_blocks.shape().dims() {
+        return Err(Error::invalid("paged_attention k/v block shapes differ"));
+    }
+    if seq_len == 0 {
+        return Err(Error::invalid(
+            "paged_attention requires a positive seq_len",
+        ));
+    }
+    if block_table.numel() * block_size < seq_len {
+        return Err(Error::invalid(format!(
+            "block table covers {} tokens, need {seq_len}",
+            block_table.numel() * block_size
+        )));
+    }
+
+    let qv = f32_slice(q)?;
+    let kv = f32_slice(k_blocks)?;
+    let vv = f32_slice(v_blocks)?;
+    let table = block_table.as_slice::<i64>()?;
+    let mut out = vec![0f32; heads * q_seq * head_dim];
+    let offset = seq_len.saturating_sub(q_seq);
+
+    for head in 0..heads {
+        for i in 0..q_seq {
+            let mut scores = vec![f32::NEG_INFINITY; seq_len];
+            let mut max = f32::NEG_INFINITY;
+            for p in 0..seq_len {
+                if causal && p > offset + i {
+                    continue;
+                }
+                let logical = p / block_size;
+                let physical = table[logical];
+                if physical < 0 || physical as usize >= num_blocks {
+                    return Err(Error::invalid(format!(
+                        "block table entry {logical} points outside {num_blocks} blocks"
+                    )));
+                }
+                let physical = physical as usize;
+                let within = p % block_size;
+                let k_base = ((physical * block_size + within) * heads + head) * head_dim;
+                let mut dot = 0f64;
+                for d in 0..head_dim {
+                    dot += qv[(head * q_seq + i) * head_dim + d] as f64 * kv[k_base + d] as f64;
+                }
+                let score = (dot * scale) as f32;
+                scores[p] = score;
+                if score > max {
+                    max = score;
+                }
+            }
+            if max == f32::NEG_INFINITY {
+                continue;
+            }
+            let mut sum = 0f64;
+            for &score in &scores {
+                if score != f32::NEG_INFINITY {
+                    sum += ((score - max) as f64).exp();
+                }
+            }
+            let inv = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+            for p in 0..seq_len {
+                if scores[p] == f32::NEG_INFINITY {
+                    continue;
+                }
+                let logical = p / block_size;
+                let physical = table[logical] as usize;
+                let within = p % block_size;
+                let v_base = ((physical * block_size + within) * heads + head) * head_dim;
+                let prob = (((scores[p] - max) as f64) * inv) as f32;
+                for d in 0..head_dim {
+                    out[(head * q_seq + i) * head_dim + d] += prob * vv[v_base + d];
+                }
+            }
+        }
+    }
+    make_f32(q, out, Shape::new([heads, q_seq, head_dim]))
+}

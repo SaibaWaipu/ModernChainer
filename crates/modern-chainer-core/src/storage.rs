@@ -112,6 +112,25 @@ pub trait Ops<B: Backend>: Send + Sync + 'static {
         Err(Error::unsupported("concat_seq"))
     }
 
+    /// Paged attention over block-addressed KV storage.
+    ///
+    /// `q` is `[heads, q_seq, head_dim]`; `k_blocks`/`v_blocks` are
+    /// `[num_blocks, block_size, heads, head_dim]`; `block_table` maps logical
+    /// blocks to physical blocks.
+    #[allow(clippy::too_many_arguments)]
+    fn paged_attention(
+        &self,
+        _q: &Tensor<B>,
+        _k_blocks: &Tensor<B>,
+        _v_blocks: &Tensor<B>,
+        _block_table: &Tensor<B>,
+        _seq_len: usize,
+        _scale: f64,
+        _causal: bool,
+    ) -> Result<Tensor<B>> {
+        Err(Error::unsupported("paged_attention"))
+    }
+
     /// Last row of a `[rows, cols]` tensor, returned as `[cols]`.
     fn last_row(&self, _x: &Tensor<B>) -> Result<Tensor<B>> {
         Err(Error::unsupported("last_row"))

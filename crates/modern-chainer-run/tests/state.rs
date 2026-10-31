@@ -131,3 +131,16 @@ fn incompatible_redeclaration_is_rejected() {
         .unwrap_err();
     assert!(error.to_string().contains("incompatible"));
 }
+
+#[test]
+fn paged_state_allocates_blocks() {
+    let mut store = modern_chainer_run::StateStore::new(CpuBackend::new());
+    let id = store
+        .declare("paged", StateSpec::paged(4, 2, [2, 3], DType::F32))
+        .unwrap();
+    let paged = store.paged(id).unwrap();
+    assert_eq!(paged.blocks.shape().dims(), &[2, 4, 2, 3]);
+    assert_eq!(paged.block_table.shape().dims(), &[2]);
+    assert_eq!(paged.len, 0);
+    assert!(store.memory_usage() > 0);
+}
