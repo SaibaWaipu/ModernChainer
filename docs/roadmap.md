@@ -14,19 +14,24 @@ come before backends.
 - Tests: fork isolation, rollback, prefill vs incremental decode parity,
   generation determinism, state visibility.
 
-## v0.3 — Paged state, batching, speculation
+## v0.3 — Paged primitives, batching, speculation (done, reference)
 
-- `StateLayout::Paged` allocation: block allocator, block table, refcounts,
-  copy-on-write.
-- Native paged attention (CPU reference first), block gather/append.
-- `RequestTable`, `BatchPlan`, scheduler trait, continuous batching.
-- Speculative decoding driver: draft fork, verify, commit accepted prefix,
-  rollback the rest.
-- Property tests for block refcounts, batch equivalence (batched vs sequential),
-  and speculative acceptance/rollback.
+- `StateLayout::Paged` allocation with a block table.
+- CPU paged attention matching dense attention for prefill and decode.
+- `RequestTable` / `BatchPlan` / `ContinuousBatcher`; requests can be added
+  between steps. Execution is per-request in v0.3.
+- Greedy speculative decoding with `fork` / `snapshot` / verify / commit;
+  output equals target-only greedy decoding.
+- Tests: paged-vs-dense parity, batching equivalence, speculative equality,
+  position synchronisation.
 
-## v0.4 — CUDA
+Remaining for v0.4: block allocator with refcounts and block-level COW,
+vectorised paged attention, vectorised batched step.
 
+## v0.4 — Vectorised paging and CUDA
+
+- Block allocator, refcounts, block-level COW, wide/vectorised paged attention.
+- Vectorised continuous batching over `BatchPlan`.
 - `cudarc` dynamic loading, NVRTC compute kernels, cuBLAS/cuBLASLt.
 - Paged-attention / flash-decode kernels.
 - CUDA Graph capture for static-shape training loops.

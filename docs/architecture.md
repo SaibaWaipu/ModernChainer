@@ -110,10 +110,12 @@ during unwinding.
 - `snapshot`/`restore` and `transaction` (with rollback on drop) make speculative
   and failure-recovery flows explicit.
 
-`modern-chainer-llm` builds a dense KV decoder on this layer. Each layer owns a
-`k`/`v` slot and a shared `position` scalar. Prefill and decode use the same
+`modern-chainer-llm` builds a decoder on this layer. Each layer owns a `k`/`v`
+slot and a shared `position` scalar. Prefill and decode use the same
 `embedding -> layer_norm -> q/k/v -> attention -> MLP` path; the KV cache grows
-by `concat_seq`. See `docs/state-by-run.md`.
+by `concat_seq`. `StateLayout::Paged` and `Ops::paged_attention` provide the
+block-table path, `ContinuousBatcher` adds a request table / `BatchPlan`, and
+`speculative_generate` uses fork/verify/commit. See `docs/state-by-run.md`.
 
 ## Modules and optimizers
 

@@ -87,10 +87,12 @@ suite; the harness is checked in so improvements are measurable.
 
 ## State-by-Run and the decoder
 
-The v0.2 decoder is a correctness reference (2 layers, `d_model=8`) used to
-verify explicit KV state, prefill/decode parity and fork/rollback. It is not a
-performance target. TTFT, inter-token latency and tokens/s benchmarks arrive
-with paged attention and the CUDA kernels.
+The decoder is a correctness reference (2 layers, `d_model=8`) used to verify
+explicit KV state, prefill/decode parity, paged-vs-dense attention, batching
+equivalence and speculative equality. v0.3 batching is logically batched but
+executed per request. It is not a performance target; TTFT, inter-token latency,
+tokens/s and block utilisation benchmarks arrive with the vectorised/CUDA
+kernels.
 
 ## Reproducing the Vulkan numbers
 

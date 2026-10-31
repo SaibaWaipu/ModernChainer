@@ -1,6 +1,6 @@
 # Modern Chainer — Specification
 
-Status: v0.2.0 implementation. This document records the product intent, the
+Status: v0.3.0 implementation. This document records the product intent, the
 implemented surface, and the deliberately deferred work.
 
 ## 1. Vision
@@ -65,8 +65,11 @@ Implemented:
   `StateSpec`, `StateId`, `StateKey`, `StatePlan`, `Transaction`
 - Dense LLM state: `Decoder`, `DecoderConfig`, `KvCacheHandles`,
   `Sampler`, `generate`
+- Paged state: `StateLayout::Paged`, `PagedState`, `Ops::paged_attention`
+- Batching: `RequestId`, `BatchPlan`, `ContinuousBatcher`, `BatchOutput`
+- Speculation: `speculative_generate`, `argmax_token`
 - LLM kernels: embedding, layer_norm, softmax, SiLU, split/merge heads,
-  dense causal attention, sequence concat, last-row extraction
+  dense causal attention, paged attention, sequence concat, last-row extraction
 
 ### Python
 
@@ -144,7 +147,7 @@ pub trait Step<B: Backend>: Send + Sync {
   `snapshot`/`restore` and `transaction` provide rollback. `Transaction` also
   rolls back on drop.
 
-### v0.2 dense KV decoder
+### Dense KV decoder (v0.2)
 
 `modern-chainer-llm` implements a 2-layer reference decoder with explicit dense
 KV state:
@@ -162,8 +165,22 @@ Implemented: embedding, layer_norm, softmax, SiLU, split/merge heads, causal
 attention, sequence concat, last-row extraction, greedy/temperature/top-k
 sampling.
 
-Deferred: PagedAttention, continuous batching, speculative decoding driver,
-CUDA kernels, optimizer-state migration, Training-By-Run, Python bindings.
+### v0.3 paged state, batching and speculation
+
+- `StateLayout::Paged { block_size, num_blocks, trailing }` allocates
+  `blocks [num_blocks, block_size, trailing...]` and an i64 block table.
+- `Ops::paged_attention` reads K/V through a logical-to-physical block table;
+  the CPU reference matches dense attention for prefill and decode.
+- `ContinuousBatcher` maintains a request table and a `BatchPlan` with separate
+  `prefill` and `decode` lists. Requests can be added between steps. v0.3
+  executes a plan sequentially; vectorised paged kernels are the next step.
+- `speculative_generate(target, draft, ...)` uses target-side greedy
+  verification. The target model decides every accepted token; rejected draft
+  state is discarded with `snapshot`/`restore`. The result is identical to
+  target-only greedy decoding, which is the acceptance test.
+
+Deferred: block allocator + refcount COW, vectorised paged attention, CUDA
+kernels, optimizer-state migration, Training-By-Run, Python bindings.
 
 ## 5. Autograd semantics
 
@@ -265,6 +282,10 @@ docs/                      architecture, backends, API, benchmarks, roadmap
   snapshot/restore, transaction commit/rollback/drop.
 - KV parity: prefill vs incremental decode logits, position and shape checks,
   max-sequence enforcement.
+- Paged attention parity against dense attention for prefill and decode.
+- Continuous batching equivalence against independent per-request generation.
+- Speculative decoding equality against target-only greedy generation, including
+  target/draft position synchronisation.
 - Generation determinism and sampler range checks.
 - `cargo fmt`, `cargo clippy -D warnings`, `cargo test` in CI.
 
@@ -282,3 +303,5 @@ docs/                      architecture, backends, API, benchmarks, roadmap
 | String lookup in hot loops | `StateId` handles compiled at first step |
 | Fork/rollback bugs | Immutable dense values in v0.2; COW property tests in v0.3 |
 | Training/inference state semantics diverge | `GradPolicy` and `RunMode` on every state declaration |
+| Logical batching hides a throughput gap | Per-request execution in v0.3; vectorised paged kernels and throughput gates in v0.4 |
+| Paged block-table bugs | Dense-vs-paged parity tests and bounds checks on every table lookup |

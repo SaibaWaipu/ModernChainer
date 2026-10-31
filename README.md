@@ -31,14 +31,16 @@ class MLP(chainer.Chain):
         return self.l2(F.relu(self.l1(x)))
 ```
 
-## Status (v0.2.0)
+## Status (v0.3.0)
 
 | Area | Status |
 |---|---|
 | Define-by-run autograd (Rust) | Stable |
 | State by Run (`Run`, `Step`, `StateStore`) | Stable: fork, snapshot/rollback, transactions |
 | Dense KV decoder | Working: 2-layer reference decoder, prefill/decode, sampling |
-| Paged state / continuous batching / speculative decoding | Planned (state types reserved) |
+| Paged state + CPU paged attention | Working: block table, paged attention parity |
+| Continuous batching | Working: `RequestTable` / `BatchPlan`; per-request execution |
+| Speculative decoding | Working: greedy fork/verify/commit reference |
 | Training-By-Run | Planned |
 | CPU backend | Stable, fused Linear + fused Adam, `gemm` + rayon |
 | Vulkan backend | Working (wgpu/Vulkan), core kernels + CPU fallbacks |
@@ -57,6 +59,8 @@ cleaning up the parts that no longer make sense on modern Python.
 ```bash
 cargo run --release --example mlp_regression
 cargo run --release --example state_decoder
+cargo run --release --example continuous_batching
+cargo run --release --example speculative
 cargo run --release --example vulkan_matmul   # requires a Vulkan loader/ICD
 ```
 
@@ -113,6 +117,16 @@ draft.step(vec![next_token])?;                // parent is untouched
 `Run` owns the store, RNG and step counter; `Step` declares state once and gets
 typed `StateId` handles, so the hot path has no string lookup. Dense state uses
 immutable `Arc`-backed tensors, which makes `fork` cheap and rollback trivial.
+
+Continuous batching and speculative decoding are drivers over the same
+contract: a `BatchPlan` lists requests, and speculative decoding uses
+`fork`/`snapshot`/verify/commit instead of hidden cache surgery.
+
+```rust
+let mut batcher = ContinuousBatcher::new(decoder, CpuBackend::new(), 7)?;
+batcher.add_request(vec![1, 2, 3], 5, Sampler::Greedy)?;
+let output = batcher.step()?;              // prefill/decode plan is visible
+```
 
 See [`docs/state-by-run.md`](docs/state-by-run.md).
 

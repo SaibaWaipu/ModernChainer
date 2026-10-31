@@ -1,6 +1,7 @@
 # State by Run
 
-Status: v0.2 implementation (dense state, tiny decoder, fork/rollback).
+Status: v0.3 implementation (dense + paged state primitives, decoder, continuous
+batching, greedy speculative decoding).
 
 ## Motivation
 
@@ -124,6 +125,61 @@ let logits = run.step(vec![token])?;         // decode
 
 The acceptance test is parity: prefill logits must equal token-by-token decode
 logits for the same prompt. See `crates/modern-chainer-llm/tests/decoder.rs`.
+
+## Paged state and paged attention
+
+`StateLayout::Paged { block_size, num_blocks, trailing }` allocates:
+
+```
+blocks       [num_blocks, block_size, heads, head_dim]
+block_table  [num_blocks]  i64  (logical block -> physical block)
+len          logical token count
+```
+
+`Ops::paged_attention` takes `q [heads, q_seq, head_dim]`, K/V blocks, the block
+table and `seq_len`, and performs the same causal attention as the dense path
+without materialising a gathered KV tensor. The CPU reference matches dense
+attention for both prefill and decode, including a shuffled block table.
+
+`PagedState` values are still immutable in v0.3: updates replace the block
+tensors, so a fork is isolated. A block allocator, refcounts and block-level COW
+land with the vectorised paged kernel.
+
+## Continuous batching
+
+```rust
+let mut batcher = ContinuousBatcher::new(decoder, backend, seed);
+let id = batcher.add_request(prompt, max_new_tokens, Sampler::Greedy)?;
+let output = batcher.step()?;    // BatchPlan { prefill, decode }
+```
+
+- `RequestTable` is the batcher's request vector; each request owns its own
+  `Run` and therefore its own KV cache and RNG.
+- `BatchPlan` separates newly added requests (`prefill`) from ongoing ones
+  (`decode`). Requests can be added or removed between steps.
+- v0.3 executes a plan sequentially. State layout and the `BatchPlan` boundary
+  are the ones a vectorised paged-attention kernel will consume; the acceptance
+  test is that every request's generated tokens equal independent greedy
+  decoding.
+
+## Speculative decoding
+
+```rust
+let tokens = speculative_generate(&mut target, &mut draft, prompt, max_new, 3)?;
+```
+
+The greedy reference:
+
+1. Draft proposes `k` tokens from a snapshot of the draft state.
+2. A `target.fork()` verifies the proposals without touching the real target.
+3. The longest matching prefix is accepted; on a mismatch the target's own
+   choice is accepted for that position and the round ends.
+4. Only accepted tokens are committed to the target.
+5. The draft is restored from its snapshot and stepped with the accepted tokens,
+   keeping the two KV states aligned.
+
+Because the target decides every token, the output is exactly target-only greedy
+decoding. The tests assert this equality and that target/draft positions match.
 
 ## Mapping LLM features onto state
 
