@@ -1390,6 +1390,206 @@ impl CudaStaticContext {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn flash_attention_prefill(
+        &self,
+        q: &Tensor<CudaBackend>,
+        k_cache: &Tensor<CudaBackend>,
+        v_cache: &Tensor<CudaBackend>,
+        out: &mut Tensor<CudaBackend>,
+        batch_heads: usize,
+        prefill_len: usize,
+        max_seq: usize,
+        head_dim: usize,
+        scale: f32,
+        dtype: DType,
+    ) -> Result<()> {
+        if head_dim > 128 {
+            return Err(Error::invalid("flash prefill requires head_dim <= 128"));
+        }
+        let tq = 8usize;
+        let tk = 32usize;
+        let shared = (((2 * tq + 2 * tk) * head_dim + tq * tk + 2 * tq) * 4) as u32;
+        let bh_i = i32::try_from(batch_heads).map_err(|_| Error::invalid("tensor too large"))?;
+        let len_i = i32::try_from(prefill_len).map_err(|_| Error::invalid("tensor too large"))?;
+        let seq_i = i32::try_from(max_seq).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let dtype_code = match dtype {
+            DType::F32 => 0i32,
+            DType::F16 => 1,
+            DType::BF16 => 2,
+            _ => return Err(Error::invalid("unsupported KV dtype")),
+        };
+        let runtime = self.backend.runtime.clone();
+        let q_slice = q.storage().f32()?;
+        let out_slice = storage_mut(out)?.f32_mut()?;
+        macro_rules! launch {
+            ($k:expr, $v:expr) => {{
+                let mut builder = runtime
+                    .stream
+                    .launch_builder(&runtime.kernels.flash_attention_prefill);
+                builder
+                    .arg(q_slice)
+                    .arg($k)
+                    .arg($v)
+                    .arg(out_slice)
+                    .arg(&bh_i)
+                    .arg(&len_i)
+                    .arg(&seq_i)
+                    .arg(&dim_i)
+                    .arg(&scale)
+                    .arg(&dtype_code);
+                unsafe {
+                    builder
+                        .launch(LaunchConfig {
+                            grid_dim: (
+                                (prefill_len as u32).div_ceil(tq as u32),
+                                batch_heads as u32,
+                                1,
+                            ),
+                            block_dim: (128, 1, 1),
+                            shared_mem_bytes: shared,
+                        })
+                        .map_err(|error| {
+                            Error::Backend(format!("static flash prefill: {error}"))
+                        })?;
+                }
+            }};
+        }
+        match dtype {
+            DType::F32 => {
+                launch!(k_cache.storage().f32()?, v_cache.storage().f32()?);
+            }
+            DType::F16 => {
+                launch!(k_cache.storage().f16()?, v_cache.storage().f16()?);
+            }
+            DType::BF16 => {
+                launch!(k_cache.storage().bf16()?, v_cache.storage().bf16()?);
+            }
+            _ => return Err(Error::invalid("unsupported KV dtype")),
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn flash_attention_decode_lowp(
+        &self,
+        q: &Tensor<CudaBackend>,
+        k_cache: &Tensor<CudaBackend>,
+        v_cache: &Tensor<CudaBackend>,
+        positions: &CudaSlice<i32>,
+        out: &mut Tensor<CudaBackend>,
+        batch: usize,
+        heads: usize,
+        max_seq: usize,
+        head_dim: usize,
+        scale: f32,
+        dtype: DType,
+    ) -> Result<()> {
+        if head_dim > 256 {
+            return Err(Error::invalid("flash decode requires head_dim <= 256"));
+        }
+        let shared = ((8 * head_dim + 16) * 4) as u32;
+        let batch_i = i32::try_from(batch).map_err(|_| Error::invalid("tensor too large"))?;
+        let heads_i = i32::try_from(heads).map_err(|_| Error::invalid("tensor too large"))?;
+        let seq_i = i32::try_from(max_seq).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let dtype_code = match dtype {
+            DType::F16 => 1i32,
+            DType::BF16 => 2,
+            _ => return Err(Error::invalid("flash decode requires low-precision KV")),
+        };
+        let runtime = self.backend.runtime.clone();
+        let q_slice = q.storage().f32()?;
+        let out_slice = storage_mut(out)?.f32_mut()?;
+        macro_rules! launch {
+            ($k:expr, $v:expr) => {{
+                let mut builder = runtime
+                    .stream
+                    .launch_builder(&runtime.kernels.flash_attention_decode_lowp);
+                builder
+                    .arg(q_slice)
+                    .arg($k)
+                    .arg($v)
+                    .arg(positions)
+                    .arg(out_slice)
+                    .arg(&batch_i)
+                    .arg(&heads_i)
+                    .arg(&seq_i)
+                    .arg(&dim_i)
+                    .arg(&scale)
+                    .arg(&dtype_code);
+                unsafe {
+                    builder
+                        .launch(LaunchConfig {
+                            grid_dim: ((batch * heads) as u32, 1, 1),
+                            block_dim: (256, 1, 1),
+                            shared_mem_bytes: shared,
+                        })
+                        .map_err(|error| Error::Backend(format!("static flash decode: {error}")))?;
+                }
+            }};
+        }
+        match dtype {
+            DType::F16 => launch!(k_cache.storage().f16()?, v_cache.storage().f16()?),
+            DType::BF16 => launch!(k_cache.storage().bf16()?, v_cache.storage().bf16()?),
+            _ => return Err(Error::invalid("flash decode requires low-precision KV")),
+        }
+        Ok(())
+    }
+
+    pub fn copy_i32(
+        &self,
+        src: &CudaSlice<i32>,
+        dst: &mut CudaSlice<i32>,
+        len: usize,
+    ) -> Result<()> {
+        let len_i = i32::try_from(len).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let mut builder = runtime.stream.launch_builder(&runtime.kernels.copy_i32);
+        builder.arg(src).arg(dst).arg(&len_i);
+        unsafe {
+            builder
+                .launch(LaunchConfig::for_num_elems(len as u32))
+                .map_err(|error| Error::Backend(format!("static copy i32: {error}")))?;
+        }
+        Ok(())
+    }
+
+    pub fn gather_last_rows_var(
+        &self,
+        x: &Tensor<CudaBackend>,
+        lengths: &CudaSlice<i32>,
+        out: &mut Tensor<CudaBackend>,
+        batch: usize,
+        rows: usize,
+        dim: usize,
+    ) -> Result<()> {
+        let total = batch * dim;
+        let batch_i = i32::try_from(batch).map_err(|_| Error::invalid("tensor too large"))?;
+        let rows_i = i32::try_from(rows).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let x_slice = x.storage().f32()?;
+        let out_slice = storage_mut(out)?.f32_mut()?;
+        let mut builder = runtime
+            .stream
+            .launch_builder(&runtime.kernels.gather_last_rows_var);
+        builder
+            .arg(x_slice)
+            .arg(lengths)
+            .arg(out_slice)
+            .arg(&batch_i)
+            .arg(&rows_i)
+            .arg(&dim_i);
+        unsafe {
+            builder
+                .launch(LaunchConfig::for_num_elems(total as u32))
+                .map_err(|error| Error::Backend(format!("static gather last rows var: {error}")))?;
+        }
+        Ok(())
+    }
+
     pub fn gather_last_rows(
         &self,
         x: &Tensor<CudaBackend>,
@@ -2195,25 +2395,31 @@ impl BatchTensors {
         rows: usize,
         config: &DecoderConfig,
         prefill: Option<(usize, usize, bool)>,
+        flash_prefill: bool,
     ) -> Result<Self> {
         let (qh, attn_h, scores, k_work, v_work) = if let Some((batch, prefill_len, lowp)) = prefill
         {
             let batch_heads = batch * config.n_heads;
             let width = config.head_dim();
+            let flash = flash_prefill && width <= 128;
             let qh = builder.zeros([batch_heads * prefill_len * width], DType::F32)?;
             let attn_h = builder.zeros([batch_heads * prefill_len * width], DType::F32)?;
-            let scores = builder.zeros([batch_heads * prefill_len * prefill_len], DType::F32)?;
-            let k_work = if lowp {
+            let scores = if flash {
+                None
+            } else {
+                Some(builder.zeros([batch_heads * prefill_len * prefill_len], DType::F32)?)
+            };
+            let k_work = if lowp && !flash {
                 Some(builder.zeros([batch_heads * prefill_len * width], DType::F32)?)
             } else {
                 None
             };
-            let v_work = if lowp {
+            let v_work = if lowp && !flash {
                 Some(builder.zeros([batch_heads * prefill_len * width], DType::F32)?)
             } else {
                 None
             };
-            (Some(qh), Some(attn_h), Some(scores), k_work, v_work)
+            (Some(qh), Some(attn_h), scores, k_work, v_work)
         } else {
             (None, None, None, None, None)
         };
@@ -2309,11 +2515,12 @@ struct BatchedStaticDecoderBuffers {
     weights: HashMap<String, Tensor<CudaBackend>>,
     kv: Vec<(Tensor<CudaBackend>, Tensor<CudaBackend>)>,
     prefill_tokens: CudaSlice<i32>,
+    prefill_lengths: CudaSlice<i32>,
     decode_tokens: CudaSlice<i32>,
     positions: CudaSlice<i32>,
     prefill: BatchTensors,
     decode: BatchTensors,
-    decode_ws: DecodeWorkspace,
+    decode_ws: Option<DecodeWorkspace>,
 }
 
 /// Fixed-shape batched prefill + decode with a shared KV cache.
@@ -2327,6 +2534,7 @@ pub struct BatchedStaticDecoder {
     batch: usize,
     prefill_len: usize,
     kv_dtype: KvDType,
+    flash_prefill: bool,
     ctx: CudaStaticContext,
     buffers: BatchedStaticDecoderBuffers,
     prefill_graph: CudaGraphRunner,
@@ -2344,6 +2552,16 @@ impl BatchedStaticDecoder {
         batch: usize,
         prefill_len: usize,
         kv_dtype: KvDType,
+    ) -> Result<Self> {
+        Self::new_with_options(decoder, batch, prefill_len, kv_dtype, true)
+    }
+
+    pub fn new_with_options(
+        decoder: Decoder<CudaBackend>,
+        batch: usize,
+        prefill_len: usize,
+        kv_dtype: KvDType,
+        flash_prefill: bool,
     ) -> Result<Self> {
         let config = decoder.config().clone();
         if batch == 0 || prefill_len == 0 {
@@ -2381,6 +2599,7 @@ impl BatchedStaticDecoder {
             weights,
             kv,
             prefill_tokens: builder.i32_zeros(batch * prefill_len)?,
+            prefill_lengths: builder.i32_zeros(batch)?,
             decode_tokens: builder.i32_zeros(batch)?,
             positions: builder.i32_zeros(batch)?,
             prefill: BatchTensors::allocate(
@@ -2388,14 +2607,33 @@ impl BatchedStaticDecoder {
                 batch * prefill_len,
                 &config,
                 Some((batch, prefill_len, lowp)),
+                flash_prefill,
             )?,
-            decode: BatchTensors::allocate(&builder, batch, &config, None)?,
-            decode_ws: DecodeWorkspace::allocate(&builder, batch, config.max_seq, &config, lowp)?,
+            decode: BatchTensors::allocate(&builder, batch, &config, None, flash_prefill)?,
+            decode_ws: if lowp && config.head_dim() <= 256 {
+                None
+            } else {
+                Some(DecodeWorkspace::allocate(
+                    &builder,
+                    batch,
+                    config.max_seq,
+                    &config,
+                    lowp,
+                )?)
+            },
         };
         let ctx = CudaStaticContext::new(backend.clone());
         let mut buffers = buffers;
         let prefill_graph = backend.capture(|| {
-            enqueue_batched_prefill(&config, batch, prefill_len, kv_dtype, &ctx, &mut buffers)
+            enqueue_batched_prefill(
+                &config,
+                batch,
+                prefill_len,
+                kv_dtype,
+                flash_prefill,
+                &ctx,
+                &mut buffers,
+            )
         })?;
         let decode_graph = backend
             .capture(|| enqueue_batched_decode(&config, batch, kv_dtype, &ctx, &mut buffers))?;
@@ -2404,6 +2642,7 @@ impl BatchedStaticDecoder {
             batch,
             prefill_len,
             kv_dtype,
+            flash_prefill,
             ctx,
             buffers,
             prefill_graph,
@@ -2422,6 +2661,10 @@ impl BatchedStaticDecoder {
 
     pub fn kv_dtype(&self) -> KvDType {
         self.kv_dtype
+    }
+
+    pub fn flash_prefill(&self) -> bool {
+        self.flash_prefill
     }
 
     pub fn kv_bytes(&self) -> usize {
@@ -2480,16 +2723,41 @@ impl BatchedStaticDecoder {
         if tokens.len() != self.batch * self.prefill_len {
             return Err(Error::invalid("prefill token count mismatch"));
         }
-        let tokens: Vec<i32> = tokens
-            .iter()
-            .map(|&token| {
-                i32::try_from(token).map_err(|_| Error::invalid("token id does not fit i32"))
-            })
-            .collect::<Result<_>>()?;
+        let prompts: Vec<&[u32]> = tokens.chunks(self.prefill_len).collect();
+        self.prefill_batch(&prompts)
+    }
+
+    /// Run a variable-length prefill. Each prompt must fit in `prefill_len`;
+    /// shorter prompts are padded and their positions start at their length.
+    pub fn prefill_batch(&mut self, prompts: &[&[u32]]) -> Result<Vec<Vec<f32>>> {
+        if prompts.len() != self.batch {
+            return Err(Error::invalid("prefill batch size mismatch"));
+        }
+        let mut tokens = vec![0i32; self.batch * self.prefill_len];
+        let mut lengths = vec![0i32; self.batch];
+        for (b, prompt) in prompts.iter().enumerate() {
+            if prompt.is_empty() || prompt.len() > self.prefill_len {
+                return Err(Error::invalid(format!(
+                    "prompt {b} length {} is outside 1..={}",
+                    prompt.len(),
+                    self.prefill_len
+                )));
+            }
+            lengths[b] = prompt.len() as i32;
+            for (i, &token) in prompt.iter().enumerate() {
+                tokens[b * self.prefill_len + i] = i32::try_from(token)
+                    .map_err(|_| Error::invalid("token id does not fit i32"))?;
+            }
+        }
         self.ctx
             .write_i32_slice(&mut self.buffers.prefill_tokens, &tokens)?;
+        self.ctx
+            .write_i32_slice(&mut self.buffers.prefill_lengths, &lengths)?;
         self.prefill_graph.replay()?;
-        self.host_positions.fill(self.prefill_len);
+        self.host_positions = lengths
+            .iter()
+            .map(|&len| usize::try_from(len).map_err(|_| Error::invalid("negative length")))
+            .collect::<Result<_>>()?;
         self.last_prefill_logits()
     }
 
@@ -2555,6 +2823,7 @@ fn enqueue_batched_prefill(
     batch: usize,
     prefill_len: usize,
     kv_dtype: KvDType,
+    flash_prefill: bool,
     ctx: &CudaStaticContext,
     buffers: &mut BatchedStaticDecoderBuffers,
 ) -> Result<()> {
@@ -2568,6 +2837,7 @@ fn enqueue_batched_prefill(
         weights,
         kv,
         prefill_tokens,
+        prefill_lengths,
         positions,
         prefill,
         ..
@@ -2641,68 +2911,82 @@ fn enqueue_batched_prefill(
             kv_dtype.dtype(),
         )?;
 
-        let (k_used, v_used, kv_stride) = if lowp {
-            let k_work = k_work
-                .as_mut()
-                .ok_or_else(|| Error::invalid("missing low-precision K workspace"))?;
-            let v_work = v_work
-                .as_mut()
-                .ok_or_else(|| Error::invalid("missing low-precision V workspace"))?;
-            ctx.kv_cache_to_f32_typed(
-                k_cache,
-                v_cache,
-                k_work,
-                v_work,
-                batch,
-                config.n_heads,
-                prefill_len,
-                config.max_seq,
-                head_dim,
-                kv_dtype.dtype(),
-            )?;
-            (
-                k_work as &Tensor<CudaBackend>,
-                v_work as &Tensor<CudaBackend>,
-                prefill_len * head_dim,
-            )
-        } else {
-            (
-                k_cache as &Tensor<CudaBackend>,
-                v_cache as &Tensor<CudaBackend>,
-                config.max_seq * head_dim,
-            )
-        };
-
         let qh = qh
             .as_mut()
             .ok_or_else(|| Error::invalid("missing prefill Q workspace"))?;
         let attn_h = attn_h
             .as_mut()
             .ok_or_else(|| Error::invalid("missing prefill attention workspace"))?;
-        let scores = scores
-            .as_mut()
-            .ok_or_else(|| Error::invalid("missing prefill score workspace"))?;
         ctx.split_heads_prefill(q, qh, batch, prefill_len, config.n_heads, head_dim)?;
-        ctx.prefill_scores(
-            qh,
-            k_used,
-            scores,
-            batch_heads,
-            prefill_len,
-            kv_stride,
-            head_dim,
-            scale,
-        )?;
-        ctx.causal_softmax(scores, batch_heads * prefill_len, prefill_len)?;
-        ctx.prefill_out(
-            scores,
-            v_used,
-            attn_h,
-            batch_heads,
-            prefill_len,
-            kv_stride,
-            head_dim,
-        )?;
+        if flash_prefill && head_dim <= 128 {
+            ctx.flash_attention_prefill(
+                qh,
+                k_cache,
+                v_cache,
+                attn_h,
+                batch_heads,
+                prefill_len,
+                config.max_seq,
+                head_dim,
+                scale,
+                kv_dtype.dtype(),
+            )?;
+        } else {
+            let (k_used, v_used, kv_stride) = if lowp {
+                let k_work = k_work
+                    .as_mut()
+                    .ok_or_else(|| Error::invalid("missing low-precision K workspace"))?;
+                let v_work = v_work
+                    .as_mut()
+                    .ok_or_else(|| Error::invalid("missing low-precision V workspace"))?;
+                ctx.kv_cache_to_f32_typed(
+                    k_cache,
+                    v_cache,
+                    k_work,
+                    v_work,
+                    batch,
+                    config.n_heads,
+                    prefill_len,
+                    config.max_seq,
+                    head_dim,
+                    kv_dtype.dtype(),
+                )?;
+                (
+                    k_work as &Tensor<CudaBackend>,
+                    v_work as &Tensor<CudaBackend>,
+                    prefill_len * head_dim,
+                )
+            } else {
+                (
+                    k_cache as &Tensor<CudaBackend>,
+                    v_cache as &Tensor<CudaBackend>,
+                    config.max_seq * head_dim,
+                )
+            };
+            let scores = scores
+                .as_mut()
+                .ok_or_else(|| Error::invalid("missing prefill score workspace"))?;
+            ctx.prefill_scores(
+                qh,
+                k_used,
+                scores,
+                batch_heads,
+                prefill_len,
+                kv_stride,
+                head_dim,
+                scale,
+            )?;
+            ctx.causal_softmax(scores, batch_heads * prefill_len, prefill_len)?;
+            ctx.prefill_out(
+                scores,
+                v_used,
+                attn_h,
+                batch_heads,
+                prefill_len,
+                kv_stride,
+                head_dim,
+            )?;
+        }
         ctx.merge_heads_prefill(attn_h, attn, batch, prefill_len, config.n_heads, head_dim)?;
 
         ctx.linear_into(
@@ -2743,7 +3027,7 @@ fn enqueue_batched_prefill(
     let last_norm = last_norm
         .as_mut()
         .ok_or_else(|| Error::invalid("missing last-token norm workspace"))?;
-    ctx.gather_last_rows(x, last_x, batch, prefill_len, d_model)?;
+    ctx.gather_last_rows_var(x, prefill_lengths, last_x, batch, prefill_len, d_model)?;
     ctx.layer_norm_batch(
         last_x,
         weight(weights, "ln_f_g")?,
@@ -2754,7 +3038,7 @@ fn enqueue_batched_prefill(
         config.eps as f32,
     )?;
     ctx.linear_into(last_norm, weight(weights, "lm_head")?, None, logits)?;
-    ctx.fill_positions(positions, prefill_len as i32, batch)?;
+    ctx.copy_i32(prefill_lengths, positions, batch)?;
     Ok(())
 }
 
@@ -2828,79 +3112,98 @@ fn enqueue_batched_decode(
             kv_dtype.dtype(),
         )?;
         let lowp = kv_dtype != KvDType::F32;
-        let (k_used, v_used, kv_stride) = if lowp {
-            let k_work = decode_ws
-                .k_work
-                .as_mut()
-                .ok_or_else(|| Error::invalid("missing decode K workspace"))?;
-            let v_work = decode_ws
-                .v_work
-                .as_mut()
-                .ok_or_else(|| Error::invalid("missing decode V workspace"))?;
-            ctx.kv_cache_to_f32_typed(
+        if lowp && head_dim <= 256 {
+            ctx.flash_attention_decode_lowp(
+                &decode.q,
                 k_cache,
                 v_cache,
-                k_work,
-                v_work,
+                positions,
+                &mut decode.attn,
                 batch,
                 config.n_heads,
                 config.max_seq,
-                config.max_seq,
                 head_dim,
+                scale,
                 kv_dtype.dtype(),
             )?;
-            (
-                k_work as &Tensor<CudaBackend>,
-                v_work as &Tensor<CudaBackend>,
-                config.max_seq * head_dim,
-            )
         } else {
-            (
-                k_cache as &Tensor<CudaBackend>,
-                v_cache as &Tensor<CudaBackend>,
-                config.max_seq * head_dim,
-            )
-        };
-        ctx.split_heads_decode(
-            &decode.q,
-            &mut decode_ws.qh,
-            batch,
-            config.n_heads,
-            head_dim,
-        )?;
-        ctx.decode_scores(
-            &decode_ws.qh,
-            k_used,
-            &mut decode_ws.scores,
-            batch * config.n_heads,
-            config.max_seq,
-            kv_stride,
-            head_dim,
-            scale,
-        )?;
-        ctx.decode_softmax(
-            &mut decode_ws.scores,
-            positions,
-            batch,
-            config.n_heads,
-            config.max_seq,
-        )?;
-        ctx.decode_out(
-            &decode_ws.scores,
-            v_used,
-            &mut decode_ws.attn_h,
-            batch * config.n_heads,
-            config.max_seq,
-            kv_stride,
-            head_dim,
-        )?;
-        ctx.merge_heads_decode(
-            &decode_ws.attn_h,
-            &mut decode.attn,
-            batch,
-            config.n_heads,
-            head_dim,
-        )?;
+            let decode_ws = decode_ws
+                .as_mut()
+                .ok_or_else(|| Error::invalid("missing decode workspace"))?;
+            let (k_used, v_used, kv_stride) = if lowp {
+                let k_work = decode_ws
+                    .k_work
+                    .as_mut()
+                    .ok_or_else(|| Error::invalid("missing decode K workspace"))?;
+                let v_work = decode_ws
+                    .v_work
+                    .as_mut()
+                    .ok_or_else(|| Error::invalid("missing decode V workspace"))?;
+                ctx.kv_cache_to_f32_typed(
+                    k_cache,
+                    v_cache,
+                    k_work,
+                    v_work,
+                    batch,
+                    config.n_heads,
+                    config.max_seq,
+                    config.max_seq,
+                    head_dim,
+                    kv_dtype.dtype(),
+                )?;
+                (
+                    k_work as &Tensor<CudaBackend>,
+                    v_work as &Tensor<CudaBackend>,
+                    config.max_seq * head_dim,
+                )
+            } else {
+                (
+                    k_cache as &Tensor<CudaBackend>,
+                    v_cache as &Tensor<CudaBackend>,
+                    config.max_seq * head_dim,
+                )
+            };
+            ctx.split_heads_decode(
+                &decode.q,
+                &mut decode_ws.qh,
+                batch,
+                config.n_heads,
+                head_dim,
+            )?;
+            ctx.decode_scores(
+                &decode_ws.qh,
+                k_used,
+                &mut decode_ws.scores,
+                batch * config.n_heads,
+                config.max_seq,
+                kv_stride,
+                head_dim,
+                scale,
+            )?;
+            ctx.decode_softmax(
+                &mut decode_ws.scores,
+                positions,
+                batch,
+                config.n_heads,
+                config.max_seq,
+            )?;
+            ctx.decode_out(
+                &decode_ws.scores,
+                v_used,
+                &mut decode_ws.attn_h,
+                batch * config.n_heads,
+                config.max_seq,
+                kv_stride,
+                head_dim,
+            )?;
+            ctx.merge_heads_decode(
+                &decode_ws.attn_h,
+                &mut decode.attn,
+                batch,
+                config.n_heads,
+                head_dim,
+            )?;
+        }
         ctx.linear_into(
             &decode.attn,
             weight(weights, &name("wo"))?,

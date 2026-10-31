@@ -989,6 +989,7 @@ fn cuda_static_decoder_replays_tokens() {
 }
 
 #[test]
+#[serial]
 fn cuda_batched_static_decoder_long_prefill() {
     use modern_chainer_cuda::BatchedStaticDecoder;
     use modern_chainer_llm::{Decoder, DecoderConfig};
@@ -1026,6 +1027,7 @@ fn cuda_batched_static_decoder_long_prefill() {
 }
 
 #[test]
+#[serial]
 fn cuda_batched_static_decoder_low_precision_kv() {
     use modern_chainer_cuda::{BatchedStaticDecoder, KvDType};
     use modern_chainer_llm::{Decoder, DecoderConfig};
@@ -1083,6 +1085,7 @@ fn cuda_batched_static_decoder_low_precision_kv() {
 }
 
 #[test]
+#[serial]
 fn cuda_batched_static_decoder_per_sequence_positions() {
     use modern_chainer_cuda::BatchedStaticDecoder;
     use modern_chainer_llm::{Decoder, DecoderConfig};
@@ -1137,6 +1140,7 @@ fn cuda_batched_static_decoder_per_sequence_positions() {
 }
 
 #[test]
+#[serial]
 fn cuda_batched_static_decoder_prefill_and_decode() {
     use modern_chainer_cuda::BatchedStaticDecoder;
     use modern_chainer_llm::{Decoder, DecoderConfig};
@@ -1191,6 +1195,117 @@ fn cuda_batched_static_decoder_prefill_and_decode() {
             assert!(
                 (a - b).abs() < 1e-2,
                 "decode batch {b} logit {index}: cuda {a} vs cpu {b}"
+            );
+        }
+    }
+}
+
+#[test]
+#[serial]
+fn cuda_batched_static_decoder_variable_length_prefill() {
+    use modern_chainer_cuda::BatchedStaticDecoder;
+    use modern_chainer_llm::{Decoder, DecoderConfig};
+    use modern_chainer_run::{Run, RunMode};
+
+    if !is_available() {
+        eprintln!("skipping: CUDA is not available");
+        return;
+    }
+    let backend = CudaBackend::new(0).unwrap();
+    let config = DecoderConfig {
+        vocab: 32,
+        d_model: 8,
+        n_layers: 2,
+        n_heads: 2,
+        d_ff: 16,
+        max_seq: 12,
+        eps: 1e-5,
+    };
+    let cuda_decoder = Decoder::new(backend.clone(), config.clone(), 9).unwrap();
+    let mut batched = BatchedStaticDecoder::new(cuda_decoder, 2, 5).unwrap();
+    let prompts: [&[u32]; 2] = [&[1, 5, 9, 3, 6], &[2, 4, 11]];
+    let logits = batched.prefill_batch(&prompts).unwrap();
+    assert_eq!(batched.positions().unwrap(), vec![5, 3]);
+
+    let mut cpu_runs = (0..2)
+        .map(|_| {
+            let decoder = Decoder::new(CpuBackend::new(), config.clone(), 9).unwrap();
+            Run::new(decoder, CpuBackend::new(), RunMode::Inference, 13).unwrap()
+        })
+        .collect::<Vec<_>>();
+    for (b, prompt) in prompts.iter().enumerate() {
+        let expected = values(&cpu_runs[b].step(prompt.to_vec()).unwrap());
+        for (index, (a, b)) in logits[b].iter().zip(&expected).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-2,
+                "variable prefill batch {b} logit {index}: cuda {a} vs cpu {b}"
+            );
+        }
+    }
+
+    let next = [7u32, 11];
+    let logits = batched.decode(&next).unwrap();
+    assert_eq!(batched.positions().unwrap(), vec![6, 4]);
+    for (b, token) in next.iter().enumerate() {
+        let expected = values(&cpu_runs[b].step(vec![*token]).unwrap());
+        for (index, (a, b)) in logits[b].iter().zip(&expected).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-2,
+                "variable decode batch {b} logit {index}: cuda {a} vs cpu {b}"
+            );
+        }
+    }
+}
+
+#[test]
+#[serial]
+fn cuda_batched_static_decoder_flash_wide_head() {
+    use modern_chainer_cuda::{BatchedStaticDecoder, KvDType};
+    use modern_chainer_llm::{Decoder, DecoderConfig};
+    use modern_chainer_run::{Run, RunMode};
+
+    if !is_available() {
+        eprintln!("skipping: CUDA is not available");
+        return;
+    }
+    let backend = CudaBackend::new(0).unwrap();
+    let config = DecoderConfig {
+        vocab: 32,
+        d_model: 64,
+        n_layers: 2,
+        n_heads: 1,
+        d_ff: 128,
+        max_seq: 20,
+        eps: 1e-5,
+    };
+    let prompt = [1u32, 5, 9, 3, 6, 8, 2, 7];
+    for (dtype, tolerance) in [
+        (KvDType::F32, 1e-2f32),
+        (KvDType::F16, 0.2f32),
+        (KvDType::Bf16, 0.5f32),
+    ] {
+        let cuda_decoder = Decoder::new(backend.clone(), config.clone(), 31).unwrap();
+        let mut batched =
+            BatchedStaticDecoder::new_with_kv_dtype(cuda_decoder, 1, 8, dtype).unwrap();
+        let logits = batched.prefill(&prompt).unwrap();
+        assert_eq!(batched.positions().unwrap(), vec![8]);
+
+        let cpu_decoder = Decoder::new(CpuBackend::new(), config.clone(), 31).unwrap();
+        let mut cpu_run = Run::new(cpu_decoder, CpuBackend::new(), RunMode::Inference, 37).unwrap();
+        let expected = values(&cpu_run.step(prompt.to_vec()).unwrap());
+        for (index, (a, b)) in logits[0].iter().zip(&expected).enumerate() {
+            assert!(
+                (a - b).abs() < tolerance,
+                "{dtype:?} wide-head logit {index}: cuda {a} vs cpu {b}"
+            );
+        }
+        let next = [11u32];
+        let logits = batched.decode(&next).unwrap();
+        let expected = values(&cpu_run.step(next.to_vec()).unwrap());
+        for (index, (a, b)) in logits[0].iter().zip(&expected).enumerate() {
+            assert!(
+                (a - b).abs() < tolerance,
+                "{dtype:?} wide-head decode logit {index}: cuda {a} vs cpu {b}"
             );
         }
     }

@@ -5,6 +5,23 @@ use cudarc::nvrtc::{CompileOptions, compile_ptx_with_opts};
 use modern_chainer_core::{Error, Result};
 
 const SOURCE: &str = r#"
+__device__ __forceinline__ float kv_h2f(unsigned short h) {
+    float f;
+    asm("{ cvt.f32.f16 %0, %1; }" : "=f"(f) : "h"(h));
+    return f;
+}
+__device__ __forceinline__ unsigned short kv_f2h(float f) {
+    unsigned short h;
+    asm("{ cvt.rn.f16.f32 %0, %1; }" : "=h"(h) : "f"(f));
+    return h;
+}
+__device__ __forceinline__ float kv_b2f(unsigned short b) {
+    return __uint_as_float(((unsigned int)b) << 16);
+}
+__device__ __forceinline__ unsigned short kv_f2b(float f) {
+    return (unsigned short)(__float_as_uint(f) >> 16);
+}
+
 __device__ __forceinline__ float warp_sum_f32(float value) {
     for (int offset = 16; offset > 0; offset >>= 1) {
         value += __shfl_down_sync(0xffffffffu, value, offset);
@@ -75,6 +92,25 @@ extern "C" __global__ void causal_softmax_warp_f32(float* scores, int rows, int 
 }
 
 
+
+extern "C" __global__ void copy_i32(const int* src, int* dst, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = src[i];
+}
+
+extern "C" __global__ void gather_last_rows_var_f32(
+    const float* x, const int* lengths, float* out, int batch, int rows, int dim
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * dim;
+    if (i < total) {
+        int b = i / dim;
+        int d = i % dim;
+        int len = lengths[b];
+        out[i] = x[(b * rows + len - 1) * dim + d];
+    }
+}
+
 extern "C" __global__ void gather_last_rows_f32(
     const float* x, float* out, int batch, int rows, int dim
 ) {
@@ -84,6 +120,196 @@ extern "C" __global__ void gather_last_rows_f32(
         int b = i / dim;
         int d = i % dim;
         out[i] = x[((b + 1) * rows - 1) * dim + d];
+    }
+}
+
+
+__device__ __forceinline__ float flash_load_kv(const void* p, long long idx, int dtype) {
+    if (dtype == 0) return ((const float*)p)[idx];
+    if (dtype == 1) return kv_h2f(((const unsigned short*)p)[idx]);
+    return kv_b2f(((const unsigned short*)p)[idx]);
+}
+
+extern "C" __global__ void flash_attention_prefill_f32(
+    const float* q, const void* k_cache, const void* v_cache, float* out,
+    int batch_heads, int prefill_len, int max_seq, int head_dim, float scale, int dtype
+) {
+    const int TQ = 8;
+    const int TK = 32;
+    extern __shared__ float smem[];
+    int hd = head_dim;
+    float* s_q = smem;
+    float* s_k = s_q + TQ * hd;
+    float* s_v = s_k + TK * hd;
+    float* s_scores = s_v + TK * hd;
+    float* s_out = s_scores + TQ * TK;
+    float* s_m = s_out + TQ * hd;
+    float* s_l = s_m + TQ;
+    int tid = threadIdx.x;
+    int q0 = blockIdx.x * TQ;
+    int bh = blockIdx.y;
+    for (int i = tid; i < TQ * hd; i += blockDim.x) {
+        int qi = i / hd;
+        int d = i % hd;
+        int qpos = q0 + qi;
+        s_q[i] = qpos < prefill_len
+            ? q[((long long)bh * prefill_len + qpos) * hd + d]
+            : 0.0f;
+        s_out[i] = 0.0f;
+    }
+    for (int qi = tid; qi < TQ; qi += blockDim.x) {
+        s_m[qi] = -1e30f;
+        s_l[qi] = 0.0f;
+    }
+    __syncthreads();
+
+    for (int kt = 0; kt < prefill_len; kt += TK) {
+        for (int i = tid; i < TK * hd; i += blockDim.x) {
+            int ki = i / hd;
+            int d = i % hd;
+            int j = kt + ki;
+            if (j < prefill_len) {
+                long long idx = ((long long)bh * max_seq + j) * hd + d;
+                s_k[i] = flash_load_kv(k_cache, idx, dtype);
+                s_v[i] = flash_load_kv(v_cache, idx, dtype);
+            } else {
+                s_k[i] = 0.0f;
+                s_v[i] = 0.0f;
+            }
+        }
+        __syncthreads();
+        for (int i = tid; i < TQ * TK; i += blockDim.x) {
+            int qi = i / TK;
+            int ki = i % TK;
+            int qpos = q0 + qi;
+            int j = kt + ki;
+            float dot = 0.0f;
+            if (qpos < prefill_len && j < prefill_len && j <= qpos) {
+                for (int d = 0; d < hd; d++) dot += s_q[qi * hd + d] * s_k[ki * hd + d];
+                s_scores[i] = dot * scale;
+            } else {
+                s_scores[i] = -1e30f;
+            }
+        }
+        __syncthreads();
+
+        int warp = tid >> 5;
+        int lane = tid & 31;
+        for (int qi = warp; qi < TQ; qi += 4) {
+            if (q0 + qi >= prefill_len) continue;
+            float m = s_m[qi];
+            float tmax = -1e30f;
+            for (int ki = lane; ki < TK; ki += 32) {
+                tmax = fmaxf(tmax, s_scores[qi * TK + ki]);
+            }
+            tmax = warp_max_f32(tmax);
+            tmax = __shfl_sync(0xffffffffu, tmax, 0);
+            float mnew = fmaxf(m, tmax);
+            float alpha = __expf(m - mnew);
+            float sum = 0.0f;
+            for (int ki = lane; ki < TK; ki += 32) {
+                float w = __expf(s_scores[qi * TK + ki] - mnew);
+                s_scores[qi * TK + ki] = w;
+                sum += w;
+            }
+            sum = warp_sum_f32(sum);
+            sum = __shfl_sync(0xffffffffu, sum, 0);
+            __syncwarp();
+            float l = s_l[qi] * alpha + sum;
+            for (int d = lane; d < hd; d += 32) {
+                float acc = 0.0f;
+                for (int ki = 0; ki < TK; ki++) {
+                    acc += s_scores[qi * TK + ki] * s_v[ki * hd + d];
+                }
+                s_out[qi * hd + d] = s_out[qi * hd + d] * alpha + acc;
+            }
+            if (lane == 0) {
+                s_m[qi] = mnew;
+                s_l[qi] = l;
+            }
+        }
+        __syncthreads();
+    }
+
+    for (int i = tid; i < TQ * hd; i += blockDim.x) {
+        int qi = i / hd;
+        int qpos = q0 + qi;
+        if (qpos < prefill_len) {
+            int d = i % hd;
+            out[((long long)bh * prefill_len + qpos) * hd + d] = s_out[i] / s_l[qi];
+        }
+    }
+}
+
+extern "C" __global__ void flash_attention_decode_lowp_f32(
+    const float* q, const void* k_cache, const void* v_cache,
+    const int* positions, float* out,
+    int batch, int heads, int max_seq, int head_dim, float scale, int dtype
+) {
+    extern __shared__ float smem[];
+    int hd = head_dim;
+    const int W = 8;
+    float* s_acc = smem;
+    float* s_m = s_acc + W * hd;
+    float* s_l = s_m + W;
+    int tid = threadIdx.x;
+    int lane = tid & 31;
+    int warp = tid >> 5;
+    int idx = blockIdx.x;
+    int head = idx % heads;
+    int b = idx / heads;
+    int n = positions[b] + 1;
+    if (n > max_seq) n = max_seq;
+    int q_base = (b * heads + head) * hd;
+    long long cache_base = (long long)(b * heads + head) * max_seq * hd;
+    float acc[8];
+    #pragma unroll
+    for (int i = 0; i < 8; i++) acc[i] = 0.0f;
+    float m = -1e30f;
+    float l = 0.0f;
+    for (int p = warp; p < n; p += W) {
+        float dot = 0.0f;
+        #pragma unroll
+        for (int i = 0; i < 8; i++) {
+            int d = lane + i * 32;
+            if (d < hd) dot += q[q_base + d] * flash_load_kv(k_cache, cache_base + (long long)p * hd + d, dtype);
+        }
+        dot = warp_sum_f32(dot);
+        dot = __shfl_sync(0xffffffffu, dot, 0) * scale;
+        float mnew = fmaxf(m, dot);
+        float alpha = __expf(m - mnew);
+        float weight = __expf(dot - mnew);
+        l = l * alpha + weight;
+        #pragma unroll
+        for (int i = 0; i < 8; i++) {
+            int d = lane + i * 32;
+            if (d < hd) {
+                acc[i] = acc[i] * alpha + weight * flash_load_kv(v_cache, cache_base + (long long)p * hd + d, dtype);
+            }
+        }
+        m = mnew;
+    }
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        int d = lane + i * 32;
+        if (d < hd) s_acc[warp * hd + d] = acc[i];
+    }
+    if (lane == 0) {
+        s_m[warp] = m;
+        s_l[warp] = l;
+    }
+    __syncthreads();
+    float gm = -1e30f;
+    for (int w = 0; w < W; w++) gm = fmaxf(gm, s_m[w]);
+    for (int d = tid; d < hd; d += blockDim.x) {
+        float sum = 0.0f;
+        float denom = 0.0f;
+        for (int w = 0; w < W; w++) {
+            float s = __expf(s_m[w] - gm);
+            sum += s_acc[w * hd + d] * s;
+            denom += s_l[w] * s;
+        }
+        out[q_base + d] = sum / denom;
     }
 }
 
@@ -144,22 +370,7 @@ extern "C" __global__ void decode_softmax_f32(
     }
 }
 
-__device__ __forceinline__ float kv_h2f(unsigned short h) {
-    float f;
-    asm("{ cvt.f32.f16 %0, %1; }" : "=f"(f) : "h"(h));
-    return f;
-}
-__device__ __forceinline__ unsigned short kv_f2h(float f) {
-    unsigned short h;
-    asm("{ cvt.rn.f16.f32 %0, %1; }" : "=h"(h) : "f"(f));
-    return h;
-}
-__device__ __forceinline__ float kv_b2f(unsigned short b) {
-    return __uint_as_float(((unsigned int)b) << 16);
-}
-__device__ __forceinline__ unsigned short kv_f2b(float f) {
-    return (unsigned short)(__float_as_uint(f) >> 16);
-}
+
 
 
 extern "C" __global__ void split_heads_prefill_f32(
@@ -234,8 +445,8 @@ extern "C" __global__ void attention_batch_decode_wide_f32(
         dot = warp_sum_f32(dot);
         dot = __shfl_sync(0xffffffffu, dot, 0) * scale;
         float mnew = fmaxf(m, dot);
-        float alpha = expf(m - mnew);
-        float weight = expf(dot - mnew);
+        float alpha = __expf(m - mnew);
+        float weight = __expf(dot - mnew);
         l = l * alpha + weight;
         #pragma unroll
         for (int i = 0; i < 8; i++) {
@@ -285,8 +496,8 @@ extern "C" __global__ void attention_batch_decode_wide_f16_f32(
         dot = warp_sum_f32(dot);
         dot = __shfl_sync(0xffffffffu, dot, 0) * scale;
         float mnew = fmaxf(m, dot);
-        float alpha = expf(m - mnew);
-        float weight = expf(dot - mnew);
+        float alpha = __expf(m - mnew);
+        float weight = __expf(dot - mnew);
         l = l * alpha + weight;
         #pragma unroll
         for (int i = 0; i < 8; i++) {
@@ -336,8 +547,8 @@ extern "C" __global__ void attention_batch_decode_wide_bf16_f32(
         dot = warp_sum_f32(dot);
         dot = __shfl_sync(0xffffffffu, dot, 0) * scale;
         float mnew = fmaxf(m, dot);
-        float alpha = expf(m - mnew);
-        float weight = expf(dot - mnew);
+        float alpha = __expf(m - mnew);
+        float weight = __expf(dot - mnew);
         l = l * alpha + weight;
         #pragma unroll
         for (int i = 0; i < 8; i++) {
@@ -1499,6 +1710,10 @@ pub(crate) struct Kernels {
     pub merge_heads_prefill: CudaFunction,
     pub causal_softmax_warp: CudaFunction,
     pub gather_last_rows: CudaFunction,
+    pub copy_i32: CudaFunction,
+    pub gather_last_rows_var: CudaFunction,
+    pub flash_attention_prefill: CudaFunction,
+    pub flash_attention_decode_lowp: CudaFunction,
     pub attention_batch_decode_wide: CudaFunction,
     pub attention_batch_decode_wide_f16: CudaFunction,
     pub attention_batch_decode_wide_bf16: CudaFunction,
@@ -1587,6 +1802,10 @@ impl Kernels {
             merge_heads_prefill: load("merge_heads_prefill_f32")?,
             causal_softmax_warp: load("causal_softmax_warp_f32")?,
             gather_last_rows: load("gather_last_rows_f32")?,
+            copy_i32: load("copy_i32")?,
+            gather_last_rows_var: load("gather_last_rows_var_f32")?,
+            flash_attention_prefill: load("flash_attention_prefill_f32")?,
+            flash_attention_decode_lowp: load("flash_attention_decode_lowp_f32")?,
             attention_batch_decode_wide: load("attention_batch_decode_wide_f32")?,
             attention_batch_decode_wide_f16: load("attention_batch_decode_wide_f16_f32")?,
             attention_batch_decode_wide_bf16: load("attention_batch_decode_wide_bf16_f32")?,
