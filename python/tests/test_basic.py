@@ -69,3 +69,13 @@ def test_numpy_interop():
     back = tensor.numpy()
     assert back.shape == (2, 3)
     assert back.tolist() == [[0.0, 1.0, 2.0], [3.0, 4.0, 5.0]]
+
+
+def test_elementwise_extras():
+    a = chainer.Variable(chainer.Tensor.from_list([4.0, 9.0], [2]))
+    b = chainer.Variable(chainer.Tensor.from_list([2.0, 3.0], [2]))
+    assert F.sqrt(a).data.tolist() == [2.0, 3.0]
+    assert F.div(a, b).data.tolist() == [2.0, 3.0]
+    assert F.transpose(
+        chainer.Variable(chainer.Tensor.from_list([1.0, 2.0, 3.0, 4.0], [2, 2]))
+    ).data.tolist() == [1.0, 3.0, 2.0, 4.0]
