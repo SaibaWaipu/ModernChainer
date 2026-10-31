@@ -943,3 +943,47 @@ fn cuda_static_run_linear_forward_replays_new_input() {
     assert_eq!(second.len(), 12);
     assert_ne!(first, second);
 }
+
+#[test]
+#[serial]
+fn cuda_static_decoder_replays_tokens() {
+    use modern_chainer_cuda::{StaticDecoderInput, StaticDecoderStep, StaticRun};
+    use modern_chainer_llm::{Decoder, DecoderConfig};
+    use modern_chainer_run::{Run, RunMode};
+
+    if !is_available() {
+        eprintln!("skipping: CUDA is not available");
+        return;
+    }
+    let backend = CudaBackend::new(0).unwrap();
+    let config = DecoderConfig {
+        vocab: 32,
+        d_model: 8,
+        n_layers: 2,
+        n_heads: 2,
+        d_ff: 16,
+        max_seq: 24,
+        eps: 1e-5,
+    };
+    let cuda_decoder = Decoder::new(backend.clone(), config.clone(), 7).unwrap();
+    let model = StaticDecoderStep::from_decoder(cuda_decoder).unwrap();
+    let mut run = StaticRun::new(model, backend).unwrap();
+    let cpu_decoder = Decoder::new(CpuBackend::new(), config, 7).unwrap();
+    let mut cpu_run = Run::new(cpu_decoder, CpuBackend::new(), RunMode::Inference, 11).unwrap();
+
+    let prompt = [1u32, 5, 9, 3, 7];
+    for token in prompt {
+        run.replay(&StaticDecoderInput { token }).unwrap();
+        let output = run.output().unwrap();
+        let cpu_logits = values(&cpu_run.step(vec![token]).unwrap());
+        for (index, (a, b)) in output.logits.iter().zip(&cpu_logits).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-2,
+                "token {token} logit {index}: static {a} vs dense {b}"
+            );
+        }
+    }
+    let output = run.output().unwrap();
+    assert_eq!(output.position, 5);
+    assert_eq!(output.logits.len(), 32);
+}

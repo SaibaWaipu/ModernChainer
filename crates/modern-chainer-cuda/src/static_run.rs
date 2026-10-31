@@ -2,7 +2,10 @@ use cudarc::cublas::sys::cublasOperation_t;
 use cudarc::cublas::{Gemm, GemmConfig};
 use cudarc::driver::{CudaSlice, LaunchConfig, PushKernelArg};
 
+use std::collections::HashMap;
+
 use modern_chainer_core::{AdamConfig, Backend, DType, Error, Result, Shape, Tensor};
+use modern_chainer_llm::{Decoder, DecoderConfig};
 
 use crate::backend::{CudaBackend, CudaStorage};
 use crate::graph::CudaGraphRunner;
@@ -32,6 +35,14 @@ impl StaticBuilder {
 
     pub fn from_f32(&self, shape: impl Into<Shape>, values: &[f32]) -> Result<Tensor<CudaBackend>> {
         Tensor::from_f32(self.backend.clone(), values, shape)
+    }
+
+    pub fn from_tensor(&self, tensor: &Tensor<CudaBackend>) -> Result<Tensor<CudaBackend>> {
+        let bytes = tensor.to_bytes()?;
+        let mut out = self.zeros(tensor.shape().clone(), tensor.dtype())?;
+        self.backend
+            .copy_from_host(storage_mut(&mut out)?, &bytes)?;
+        Ok(out)
     }
 
     pub fn i32_scalar(&self) -> Result<CudaSlice<i32>> {
@@ -64,6 +75,14 @@ impl CudaStaticContext {
         }
         let bytes = bytemuck::cast_slice::<f32, u8>(values);
         self.backend.copy_from_host(storage_mut(tensor)?, bytes)
+    }
+
+    pub fn write_i32(&self, slice: &mut CudaSlice<i32>, value: i32) -> Result<()> {
+        self.backend
+            .runtime
+            .stream
+            .memcpy_htod(&[value], slice)
+            .map_err(|error| Error::Backend(format!("htod: {error}")))
     }
 
     pub fn read_f32(&self, tensor: &Tensor<CudaBackend>) -> Result<f32> {
@@ -351,6 +370,193 @@ impl CudaStaticContext {
             builder
                 .launch(LaunchConfig::for_num_elems(n as u32))
                 .map_err(|error| Error::Backend(format!("static adam: {error}")))?;
+        }
+        Ok(())
+    }
+
+    pub fn embedding_one(
+        &self,
+        token: &CudaSlice<i32>,
+        weight: &Tensor<CudaBackend>,
+        out: &mut Tensor<CudaBackend>,
+        dim: usize,
+    ) -> Result<()> {
+        let dim_i = i32::try_from(dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let weight_slice = weight.storage().f32()?;
+        let out_slice = storage_mut(out)?.f32_mut()?;
+        let mut builder = runtime
+            .stream
+            .launch_builder(&runtime.kernels.embedding_one);
+        builder
+            .arg(token)
+            .arg(weight_slice)
+            .arg(out_slice)
+            .arg(&dim_i);
+        unsafe {
+            builder
+                .launch(LaunchConfig::for_num_elems(dim as u32))
+                .map_err(|error| Error::Backend(format!("static embedding: {error}")))?;
+        }
+        Ok(())
+    }
+
+    pub fn layer_norm_into(
+        &self,
+        x: &Tensor<CudaBackend>,
+        gamma: &Tensor<CudaBackend>,
+        beta: &Tensor<CudaBackend>,
+        out: &mut Tensor<CudaBackend>,
+        dim: usize,
+        eps: f32,
+    ) -> Result<()> {
+        let rows = 1i32;
+        let dim_i = i32::try_from(dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let x_slice = x.storage().f32()?;
+        let gamma_slice = gamma.storage().f32()?;
+        let beta_slice = beta.storage().f32()?;
+        let out_slice = storage_mut(out)?.f32_mut()?;
+        let mut builder = runtime.stream.launch_builder(&runtime.kernels.layer_norm);
+        builder
+            .arg(x_slice)
+            .arg(gamma_slice)
+            .arg(beta_slice)
+            .arg(out_slice)
+            .arg(&rows)
+            .arg(&dim_i)
+            .arg(&eps);
+        unsafe {
+            builder
+                .launch(LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (256, 1, 1),
+                    shared_mem_bytes: 0,
+                })
+                .map_err(|error| Error::Backend(format!("static layer_norm: {error}")))?;
+        }
+        Ok(())
+    }
+
+    pub fn gelu_inplace(&self, x: &mut Tensor<CudaBackend>, n: usize) -> Result<()> {
+        let n_i = i32::try_from(n).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let x_slice = storage_mut(x)?.f32_mut()?;
+        let mut builder = runtime.stream.launch_builder(&runtime.kernels.gelu_inplace);
+        builder.arg(x_slice).arg(&n_i);
+        unsafe {
+            builder
+                .launch(LaunchConfig::for_num_elems(n as u32))
+                .map_err(|error| Error::Backend(format!("static gelu: {error}")))?;
+        }
+        Ok(())
+    }
+
+    pub fn residual_inplace(
+        &self,
+        x: &mut Tensor<CudaBackend>,
+        delta: &Tensor<CudaBackend>,
+        n: usize,
+    ) -> Result<()> {
+        let n_i = i32::try_from(n).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let delta_slice = delta.storage().f32()?;
+        let x_slice = storage_mut(x)?.f32_mut()?;
+        let mut builder = runtime
+            .stream
+            .launch_builder(&runtime.kernels.residual_inplace);
+        builder.arg(x_slice).arg(delta_slice).arg(&n_i);
+        unsafe {
+            builder
+                .launch(LaunchConfig::for_num_elems(n as u32))
+                .map_err(|error| Error::Backend(format!("static residual: {error}")))?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn kv_append_one(
+        &self,
+        k_new: &Tensor<CudaBackend>,
+        v_new: &Tensor<CudaBackend>,
+        k_cache: &mut Tensor<CudaBackend>,
+        v_cache: &mut Tensor<CudaBackend>,
+        position: &CudaSlice<i32>,
+        heads: usize,
+        head_dim: usize,
+        max_seq: usize,
+    ) -> Result<()> {
+        let total = heads * head_dim;
+        let heads_i = i32::try_from(heads).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let seq_i = i32::try_from(max_seq).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let k_slice = k_new.storage().f32()?;
+        let v_slice = v_new.storage().f32()?;
+        let k_cache_slice = storage_mut(k_cache)?.f32_mut()?;
+        let v_cache_slice = storage_mut(v_cache)?.f32_mut()?;
+        let mut builder = runtime
+            .stream
+            .launch_builder(&runtime.kernels.kv_append_one);
+        builder
+            .arg(k_slice)
+            .arg(v_slice)
+            .arg(k_cache_slice)
+            .arg(v_cache_slice)
+            .arg(position)
+            .arg(&heads_i)
+            .arg(&dim_i)
+            .arg(&seq_i);
+        unsafe {
+            builder
+                .launch(LaunchConfig::for_num_elems(total as u32))
+                .map_err(|error| Error::Backend(format!("static kv append: {error}")))?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn attention_single(
+        &self,
+        q: &Tensor<CudaBackend>,
+        k_cache: &Tensor<CudaBackend>,
+        v_cache: &Tensor<CudaBackend>,
+        position: &CudaSlice<i32>,
+        out: &mut Tensor<CudaBackend>,
+        heads: usize,
+        max_seq: usize,
+        head_dim: usize,
+        scale: f32,
+    ) -> Result<()> {
+        let heads_i = i32::try_from(heads).map_err(|_| Error::invalid("tensor too large"))?;
+        let seq_i = i32::try_from(max_seq).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let q_slice = q.storage().f32()?;
+        let k_slice = k_cache.storage().f32()?;
+        let v_slice = v_cache.storage().f32()?;
+        let out_slice = storage_mut(out)?.f32_mut()?;
+        let mut builder = runtime
+            .stream
+            .launch_builder(&runtime.kernels.attention_single);
+        builder
+            .arg(q_slice)
+            .arg(k_slice)
+            .arg(v_slice)
+            .arg(position)
+            .arg(out_slice)
+            .arg(&heads_i)
+            .arg(&seq_i)
+            .arg(&dim_i)
+            .arg(&scale);
+        unsafe {
+            builder
+                .launch(LaunchConfig {
+                    grid_dim: (heads as u32, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                })
+                .map_err(|error| Error::Backend(format!("static attention: {error}")))?;
         }
         Ok(())
     }
@@ -650,5 +856,207 @@ impl CudaStaticStep for LinearForwardStep {
         buffers: &Self::Buffers,
     ) -> Result<Self::Output> {
         ctx.read_f32_vec(&buffers.y)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct StaticDecoderInput {
+    pub token: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct StaticDecoderOutput {
+    pub logits: Vec<f32>,
+    pub position: i32,
+}
+
+pub struct StaticDecoderBuffers {
+    weights: HashMap<String, Tensor<CudaBackend>>,
+    kv: Vec<(Tensor<CudaBackend>, Tensor<CudaBackend>)>,
+    x: Tensor<CudaBackend>,
+    norm: Tensor<CudaBackend>,
+    q: Tensor<CudaBackend>,
+    k: Tensor<CudaBackend>,
+    v: Tensor<CudaBackend>,
+    attn: Tensor<CudaBackend>,
+    hidden: Tensor<CudaBackend>,
+    update: Tensor<CudaBackend>,
+    logits: Tensor<CudaBackend>,
+    token: CudaSlice<i32>,
+    position: CudaSlice<i32>,
+}
+
+pub struct StaticDecoderStep {
+    decoder: Decoder<CudaBackend>,
+    config: DecoderConfig,
+}
+
+impl StaticDecoderStep {
+    pub fn from_decoder(decoder: Decoder<CudaBackend>) -> Result<Self> {
+        let config = decoder.config().clone();
+        Ok(Self { decoder, config })
+    }
+}
+
+impl CudaStaticStep for StaticDecoderStep {
+    type Buffers = StaticDecoderBuffers;
+    type Input = StaticDecoderInput;
+    type Output = StaticDecoderOutput;
+
+    fn allocate(&self, builder: &mut StaticBuilder) -> Result<Self::Buffers> {
+        let cfg = &self.config;
+        let mut weights = HashMap::new();
+        for (name, tensor) in self.decoder.parameters() {
+            weights.insert(name, builder.from_tensor(&tensor)?);
+        }
+        let head_dim = cfg.head_dim();
+        let mut kv = Vec::with_capacity(cfg.n_layers);
+        for _ in 0..cfg.n_layers {
+            kv.push((
+                builder.zeros([cfg.n_heads, cfg.max_seq, head_dim], DType::F32)?,
+                builder.zeros([cfg.n_heads, cfg.max_seq, head_dim], DType::F32)?,
+            ));
+        }
+        Ok(StaticDecoderBuffers {
+            weights,
+            kv,
+            x: builder.zeros([1, cfg.d_model], DType::F32)?,
+            norm: builder.zeros([1, cfg.d_model], DType::F32)?,
+            q: builder.zeros([1, cfg.d_model], DType::F32)?,
+            k: builder.zeros([1, cfg.d_model], DType::F32)?,
+            v: builder.zeros([1, cfg.d_model], DType::F32)?,
+            attn: builder.zeros([1, cfg.d_model], DType::F32)?,
+            hidden: builder.zeros([1, cfg.d_ff], DType::F32)?,
+            update: builder.zeros([1, cfg.d_model], DType::F32)?,
+            logits: builder.zeros([1, cfg.vocab], DType::F32)?,
+            token: builder.i32_scalar()?,
+            position: builder.i32_scalar()?,
+        })
+    }
+
+    fn write_input(
+        &self,
+        ctx: &CudaStaticContext,
+        buffers: &mut Self::Buffers,
+        input: &Self::Input,
+    ) -> Result<()> {
+        ctx.write_i32(&mut buffers.token, input.token as i32)
+    }
+
+    fn enqueue(&self, ctx: &CudaStaticContext, buffers: &mut Self::Buffers) -> Result<()> {
+        let cfg = &self.config;
+        let d_model = cfg.d_model;
+        let head_dim = cfg.head_dim();
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        let StaticDecoderBuffers {
+            weights,
+            kv,
+            x,
+            norm,
+            q,
+            k,
+            v,
+            attn,
+            hidden,
+            update,
+            logits,
+            token,
+            position,
+        } = buffers;
+        let weight = |name: &str| -> Result<&Tensor<CudaBackend>> {
+            weights
+                .get(name)
+                .ok_or_else(|| Error::invalid(format!("missing decoder weight {name}")))
+        };
+
+        ctx.embedding_one(token, weight("tok_emb")?, x, d_model)?;
+        for (layer, (k_cache, v_cache)) in kv.iter_mut().enumerate() {
+            let prefix = format!("layers.{layer}");
+            let name = |suffix: &str| format!("{prefix}.{suffix}");
+            ctx.layer_norm_into(
+                x,
+                weight(&name("ln1_g"))?,
+                weight(&name("ln1_b"))?,
+                norm,
+                d_model,
+                cfg.eps as f32,
+            )?;
+            ctx.linear_into(norm, weight(&name("wq"))?, Some(weight(&name("bq"))?), q)?;
+            ctx.linear_into(norm, weight(&name("wk"))?, Some(weight(&name("bk"))?), k)?;
+            ctx.linear_into(norm, weight(&name("wv"))?, Some(weight(&name("bv"))?), v)?;
+            ctx.kv_append_one(
+                k,
+                v,
+                k_cache,
+                v_cache,
+                position,
+                cfg.n_heads,
+                head_dim,
+                cfg.max_seq,
+            )?;
+            ctx.attention_single(
+                q,
+                k_cache,
+                v_cache,
+                position,
+                attn,
+                cfg.n_heads,
+                cfg.max_seq,
+                head_dim,
+                scale,
+            )?;
+            ctx.linear_into(
+                attn,
+                weight(&name("wo"))?,
+                Some(weight(&name("bo"))?),
+                update,
+            )?;
+            ctx.residual_inplace(x, update, d_model)?;
+
+            ctx.layer_norm_into(
+                x,
+                weight(&name("ln2_g"))?,
+                weight(&name("ln2_b"))?,
+                norm,
+                d_model,
+                cfg.eps as f32,
+            )?;
+            ctx.linear_into(
+                norm,
+                weight(&name("w1"))?,
+                Some(weight(&name("b1"))?),
+                hidden,
+            )?;
+            ctx.gelu_inplace(hidden, cfg.d_ff)?;
+            ctx.linear_into(
+                hidden,
+                weight(&name("w2"))?,
+                Some(weight(&name("b2"))?),
+                update,
+            )?;
+            ctx.residual_inplace(x, update, d_model)?;
+        }
+        ctx.layer_norm_into(
+            x,
+            weight("ln_f_g")?,
+            weight("ln_f_b")?,
+            norm,
+            d_model,
+            cfg.eps as f32,
+        )?;
+        ctx.linear_into(norm, weight("lm_head")?, None, logits)?;
+        ctx.bump_step(position)?;
+        Ok(())
+    }
+
+    fn read_output(
+        &self,
+        ctx: &CudaStaticContext,
+        buffers: &Self::Buffers,
+    ) -> Result<Self::Output> {
+        Ok(StaticDecoderOutput {
+            logits: ctx.read_f32_vec(&buffers.logits)?,
+            position: ctx.read_i32(&buffers.position)?,
+        })
     }
 }

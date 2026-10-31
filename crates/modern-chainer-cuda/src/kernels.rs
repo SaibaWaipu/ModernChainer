@@ -691,6 +691,75 @@ extern "C" __global__ void adam_step_f32(
     }
 }
 
+extern "C" __global__ void embedding_one_f32(
+    const int* token, const float* weight, float* out, int dim
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < dim) out[i] = weight[(*token) * dim + i];
+}
+
+extern "C" __global__ void kv_append_one_f32(
+    const float* k_new, const float* v_new, float* k_cache, float* v_cache,
+    const int* position, int heads, int head_dim, int max_seq
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = heads * head_dim;
+    int pos = *position;
+    if (i < total && pos < max_seq) {
+        int head = i / head_dim;
+        int d = i % head_dim;
+        int dst = (head * max_seq + pos) * head_dim + d;
+        k_cache[dst] = k_new[i];
+        v_cache[dst] = v_new[i];
+    }
+}
+
+extern "C" __global__ void attention_single_f32(
+    const float* q, const float* k_cache, const float* v_cache,
+    const int* position, float* out,
+    int heads, int max_seq, int head_dim, float scale
+) {
+    int head = blockIdx.x;
+    int n = *position + 1;
+    if (n > max_seq) n = max_seq;
+    int q_base = head * head_dim;
+    int cache_base = head * max_seq * head_dim;
+    float maxv = -1e30f;
+    for (int p = 0; p < n; p++) {
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; d++) dot += q[q_base + d] * k_cache[cache_base + p * head_dim + d];
+        dot *= scale;
+        if (dot > maxv) maxv = dot;
+    }
+    float sum = 0.0f;
+    for (int p = 0; p < n; p++) {
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; d++) dot += q[q_base + d] * k_cache[cache_base + p * head_dim + d];
+        sum += expf(dot * scale - maxv);
+    }
+    float inv = 1.0f / sum;
+    for (int d = 0; d < head_dim; d++) out[q_base + d] = 0.0f;
+    for (int p = 0; p < n; p++) {
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; d++) dot += q[q_base + d] * k_cache[cache_base + p * head_dim + d];
+        float prob = expf(dot * scale - maxv) * inv;
+        for (int d = 0; d < head_dim; d++) out[q_base + d] += prob * v_cache[cache_base + p * head_dim + d];
+    }
+}
+
+extern "C" __global__ void residual_inplace_f32(float* x, const float* delta, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] += delta[i];
+}
+
+extern "C" __global__ void gelu_inplace_f32(float* x, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float v = x[i];
+        x[i] = 0.5f * v * (1.0f + tanhf(0.7978845608f * (v + 0.044715f * v * v * v)));
+    }
+}
+
 "#;
 
 pub(crate) struct Kernels {
@@ -713,6 +782,11 @@ pub(crate) struct Kernels {
     pub grad_b: CudaFunction,
     pub bump_step: CudaFunction,
     pub adam_step: CudaFunction,
+    pub embedding_one: CudaFunction,
+    pub kv_append_one: CudaFunction,
+    pub attention_single: CudaFunction,
+    pub residual_inplace: CudaFunction,
+    pub gelu_inplace: CudaFunction,
     pub scale: CudaFunction,
     pub fill: CudaFunction,
     pub transpose2d: CudaFunction,
@@ -770,6 +844,11 @@ impl Kernels {
             grad_b: load("grad_b_f32")?,
             bump_step: load("bump_step_f32")?,
             adam_step: load("adam_step_f32")?,
+            embedding_one: load("embedding_one_f32")?,
+            kv_append_one: load("kv_append_one_f32")?,
+            attention_single: load("attention_single_f32")?,
+            residual_inplace: load("residual_inplace_f32")?,
+            gelu_inplace: load("gelu_inplace_f32")?,
             scale: load("scale_f32")?,
             fill: load("fill_f32")?,
             transpose2d: load("transpose2d_f32")?,

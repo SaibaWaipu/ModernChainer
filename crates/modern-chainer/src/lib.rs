@@ -28,6 +28,7 @@ pub use modern_chainer_cuda::{
     ComputeType, CudaBackend, CudaGraphRunner, CudaOps, CudaStaticContext, CudaStaticStep,
     CudaStorage, GraphAdam, GraphLinearTrainer, GraphMatmul, GraphTrainerConfig,
     LinearForwardBuffers, LinearForwardStep, LinearMseAdamStep, LinearMseBuffers, StaticBuilder,
+    StaticDecoderBuffers, StaticDecoderInput, StaticDecoderOutput, StaticDecoderStep,
     StaticForwardConfig, StaticForwardInput, StaticLinearConfig, StaticLinearInput,
     StaticLinearOutput, StaticRun,
 };
@@ -96,9 +97,9 @@ pub mod prelude {
         Device, Error, GradScaler, GraphLinearTrainer, GraphTrainerConfig, Linear,
         LinearMseAdamStep, Module, MomentumSGD, Ops, Optimizer, PagedBatchRunner, Parameter,
         RequestId, Result, Run, RunMode, SGD, Sampler, Shape, StateId, StateKey, StateSpec,
-        StateStore, StaticLinearConfig, StaticLinearInput, StaticRun, Step, Tensor, Variable,
-        ZeroGrad, autocast, autocast_dtype, generate, is_autocast_enabled, no_grad,
-        speculative_generate, zero_grad,
+        StateStore, StaticDecoderInput, StaticDecoderStep, StaticLinearConfig, StaticLinearInput,
+        StaticRun, Step, Tensor, Variable, ZeroGrad, autocast, autocast_dtype, generate,
+        is_autocast_enabled, no_grad, speculative_generate, zero_grad,
     };
 }
 

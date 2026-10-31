@@ -26,7 +26,8 @@ pub use ops::CudaOps;
 #[cfg(feature = "cuda")]
 pub use static_run::{
     CudaStaticContext, CudaStaticStep, LinearForwardBuffers, LinearForwardStep, LinearMseAdamStep,
-    LinearMseBuffers, StaticBuilder, StaticForwardConfig, StaticForwardInput, StaticLinearConfig,
+    LinearMseBuffers, StaticBuilder, StaticDecoderBuffers, StaticDecoderInput, StaticDecoderOutput,
+    StaticDecoderStep, StaticForwardConfig, StaticForwardInput, StaticLinearConfig,
     StaticLinearInput, StaticLinearOutput, StaticRun,
 };
 
