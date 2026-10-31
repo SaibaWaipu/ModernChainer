@@ -1,6 +1,6 @@
 # Modern Chainer — Specification
 
-Status: v0.4.0 implementation. This document records the product intent, the
+Status: v0.5.0 implementation. This document records the product intent, the
 implemented surface, and the deliberately deferred work.
 
 ## 1. Vision
@@ -60,7 +60,8 @@ Implemented:
 - Optimizers: `SGD`, `MomentumSGD`, `Adam` (fused CPU kernel), `zero_grad`
 - Data: `Dataset`, `VecDataset`, `BatchIterator`
 - Serialization: native `.mcn` save/load
-- Backend probes: `cuda::probe`, `vulkan::probe`
+- Backends: `CpuBackend`, `VulkanBackend`, `CudaBackend` (NVRTC + cuBLAS),
+  `cuda::probe`, `vulkan::probe`
 - State by Run: `Run`, `Step`, `RunContext`, `RunMode`, `StateStore`,
   `StateSpec`, `StateId`, `StateKey`, `StatePlan`, `Transaction`
 - Dense LLM state: `Decoder`, `DecoderConfig`, `KvCacheHandles`,
@@ -99,7 +100,7 @@ above, `O.SGD`, `O.Adam`, NumPy interop (`Tensor.from_numpy`, `Tensor.numpy`,
 Not yet implemented in Python: `Run`/state APIs, `Trainer`, `Updater`,
 `Iterator` wrappers, `Extension`, `chainer.config`, `FunctionNode` subclassing,
 `.npz` serialization, `chainer.cuda`/`chainer.backends`. The State-by-Run layer
-is Rust-first in v0.2.
+is Rust-first in v0.5; `chainer.cuda_available()` reports the CUDA probe.
 
 ## 4. State by Run
 
@@ -195,8 +196,22 @@ sampling.
   converts KV into paged caches, then performs a single batched decode step over
   all active requests. Generated tokens match dense greedy decoding.
 
-Deferred: block-level in-place COW, CUDA kernels, optimizer-state migration,
-Training-By-Run, Python bindings.
+### v0.5 CUDA core backend
+
+- `modern-chainer-cuda` uses `cudarc` with dynamic loading. No CUDA toolkit or
+  `nvcc` is needed at build time.
+- Device init via the driver API, typed `CudaStorage` (`f32`/`i64`/`u8`),
+  host/device copies.
+- NVRTC compiles elementwise, ReLU/SiLU, sqrt, scale, fill, bias-add,
+  transpose and Adam kernels at runtime for the device's compute capability.
+- cuBLAS handles `matmul`, fused `linear`, and `linear_backward`.
+- Reductions, softmax cross entropy, embedding/layer_norm/attention and paged
+  ops currently fall back to CPU; they stay on the same `Ops` ABI.
+- Verified against CPU for elementwise, matmul, linear, softmax cross entropy
+  and a 40-step Adam training loop on an RTX 2070 SUPER.
+
+Deferred: CUDA reduction/attention/paged-attention kernels, block-level
+in-place COW, optimizer-state migration, Training-By-Run, Python bindings.
 
 ## 5. Autograd semantics
 
@@ -238,11 +253,18 @@ subclassing; custom ops must currently be written in Rust.
 - Verified on RTX 2070 SUPER and Mesa lavapipe; tests skip when no adapter is
   available.
 
-### CUDA (scaffold)
+### CUDA (core ops)
 
-- Capability probe only; the planned implementation uses `cudarc` with NVRTC
-  (no `nvcc` at build time), cuBLAS/cuBLASLt for GEMM, and im2col/Winograd for
-  convolution. cuDNN is not a requirement. See `docs/backends.md`.
+- `cudarc` with dynamic loading; NVRTC runtime compilation; cuBLAS GEMM.
+- Native kernels: add/sub/mul/div, sqrt, relu, relu backward, SiLU, scale,
+  fill, bias add, transpose, fused Adam.
+- Native cuBLAS path: matmul, linear, linear_backward.
+- CPU fallback: reductions, softmax cross entropy, embedding, layer_norm,
+  attention, concat, last-row and paged operations.
+- Tested on RTX 2070 SUPER (sm_75) and compiled for the detected compute
+  capability; GTX 1080 (sm_61) is supported by the same mechanism.
+- `LD_LIBRARY_PATH` must expose `libnvrtc` / `libcublas` when using pip CUDA
+  wheels. See `docs/backends.md`.
 
 ## 7. Performance
 
@@ -258,9 +280,9 @@ Acceptance gates proposed in the design phase:
 | geometric mean (CPU/CUDA) | 1.2×, no item below 0.9× |
 
 Current CPU result on the checked-in micro-suite is a ~0.87–0.91× geometric mean
-(Adam wins, Linear backward loses). CUDA and transformer/ResNet benchmarks are
-blocked on the CUDA backend. See `docs/benchmarks.md` for the full table and
-caveats.
+(Adam wins, Linear backward loses). CUDA core ops are verified against CPU but
+CUDA/transformer/ResNet throughput is not yet benchmarked. See
+`docs/benchmarks.md` for the full table and caveats.
 
 ## 8. Repository layout
 
@@ -307,6 +329,8 @@ docs/                      architecture, backends, API, benchmarks, roadmap
 - Speculative decoding equality against target-only greedy generation, including
   target/draft position synchronisation.
 - Generation determinism and sampler range checks.
+- CUDA parity: elementwise, matmul, linear, softmax cross entropy and an Adam
+  training loop against CPU.
 - `cargo fmt`, `cargo clippy -D warnings`, `cargo test` in CI.
 
 ## 10. Risks and mitigations
@@ -323,7 +347,8 @@ docs/                      architecture, backends, API, benchmarks, roadmap
 | String lookup in hot loops | `StateId` handles compiled at first step |
 | Fork/rollback bugs | Immutable dense values in v0.2; COW property tests in v0.3 |
 | Training/inference state semantics diverge | `GradPolicy` and `RunMode` on every state declaration |
-| Logical batching hides a throughput gap | Per-request execution in v0.3; vectorised paged kernels and throughput gates in v0.4 |
+| Logical batching hides a throughput gap | `PagedBatchRunner` provides real batched decode; vectorised kernels and throughput gates next |
 | Paged block-table bugs | Dense-vs-paged parity tests and bounds checks on every table lookup |
 | Batched decode drifts from dense decoding | Token-level parity test against dense greedy generation |
-| Tensor-granularity COW costs bandwidth | Correctness first; block-level in-place COW and vectorised kernels in the CUDA milestone |
+| Tensor-granularity COW costs bandwidth | Correctness first; block-level in-place COW and vectorised kernels in the next CUDA milestone |
+| CUDA fallbacks hide a performance cliff | Native/fallback boundary documented per op; CUDA attention/reduction kernels next |

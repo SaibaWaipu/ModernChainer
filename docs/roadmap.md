@@ -40,14 +40,21 @@ vectorised paged attention, vectorised batched step.
 
 Remaining: block-level in-place COW, wider kernels, CUDA.
 
-## v0.5 — CUDA and throughput
+## v0.5 — CUDA core backend (done)
 
-- `cudarc` dynamic loading, NVRTC compute kernels, cuBLAS/cuBLASLt.
-- Paged-attention / flash-decode kernels.
-- CUDA Graph capture for static-shape training loops.
+- `cudarc` dynamic loading, NVRTC kernels, cuBLAS.
+- Native elementwise, matmul, linear/linear_backward, transpose and fused Adam.
+- CPU fallbacks for reductions, softmax CE, attention and paged ops.
+- CPU-parity tests and a CUDA Adam training loop on RTX 2070 SUPER.
+
+## v0.6 — CUDA kernels and throughput
+
+- Native reduction / softmax CE / layer_norm / embedding kernels.
+- Dense and paged attention CUDA kernels; vectorised batched decode.
+- cuBLASLt fused GEMM+bias+activation and CUDA Graph capture.
 - Benchmarks: TTFT, inter-token latency, tokens/s, block utilisation.
 
-## v0.6 — Training-By-Run
+## v0.7 — Training-By-Run
 
 - Move optimizer state into `StateStore` namespaces (`optim.*`).
 - `TrainingRun`: params, grads, optimizer, RNG, data cursor, metrics.
@@ -55,7 +62,7 @@ Remaining: block-level in-place COW, wider kernels, CUDA.
 - Truncated BPTT with `GradPolicy::Differentiable` state.
 - RL rollouts via `fork` + `no_grad`.
 
-## v0.7 — Python and ecosystem
+## v0.8 — Python and ecosystem
 
 - Python `chainer.Run`, `run.state` (read-only views), `run.prefill/decode`,
   `run.fork`, and a `Trainer` built on the same `Step` contract.

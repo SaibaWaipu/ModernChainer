@@ -93,6 +93,9 @@ equivalence and speculative equality. `PagedBatchRunner` performs a real batched
 decode step over paged KV, but the CPU reference is not performance-tuned: block
 appends copy storage and the attention kernel is scalar. TTFT, inter-token
 latency, tokens/s and block utilisation benchmarks arrive with the CUDA kernels.
+The CUDA backend currently matches CPU for elementwise, matmul, linear, softmax
+cross entropy and a short Adam training loop; no CUDA throughput numbers are
+claimed yet.
 
 ## Reproducing the Vulkan numbers
 

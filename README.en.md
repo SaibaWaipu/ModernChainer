@@ -33,7 +33,7 @@ class MLP(chainer.Chain):
         return self.l2(F.relu(self.l1(x)))
 ```
 
-## Status (v0.4.0)
+## Status (v0.5.0)
 
 | Area | Status |
 |---|---|
@@ -44,7 +44,7 @@ class MLP(chainer.Chain):
 | Batched decode | Working: `PagedBatchRunner` + batched paged attention |
 | Continuous batching | Working: `RequestTable` / `BatchPlan` (logical batching) |
 | Speculative decoding | Working: greedy fork/verify/commit reference |
-| CUDA backend | Scaffold: capability probe only |
+| CUDA backend | Working: NVRTC + cuBLAS core ops; reductions/attention fall back to CPU |
 | Python bindings | Core subset: `Tensor`, `Variable`, `F.*`, `L.Linear`, `SGD`/`Adam`, `Chain` |
 | Serialization | Native `.mcn`; Chainer `.npz` reader planned |
 | Trainer / Updater / Extensions | Planned |
@@ -63,6 +63,7 @@ cargo run --release --example state_decoder
 cargo run --release --example continuous_batching
 cargo run --release --example paged_batching
 cargo run --release --example speculative
+cargo run --release --example cuda_matmul     # requires a CUDA driver and NVRTC/cuBLAS
 cargo run --release --example vulkan_matmul   # requires a Vulkan loader/ICD
 ```
 
@@ -75,6 +76,19 @@ let y = model.forward(&x)?;
 let loss = F::sum(&y)?;
 loss.backward()?;
 ```
+
+### CUDA
+
+When using the pip CUDA libraries, expose NVRTC/cuBLAS before running:
+
+```bash
+export LD_LIBRARY_PATH="$PWD/python/.venv/lib/python3.13/site-packages/nvidia/cuda_nvrtc/lib:$PWD/python/.venv/lib/python3.13/site-packages/nvidia/cublas/lib:$PWD/python/.venv/lib/python3.13/site-packages/nvidia/cuda_runtime/lib:$LD_LIBRARY_PATH"
+cargo run --release --example cuda_matmul
+```
+
+`cudarc` uses dynamic loading, so no CUDA toolkit or `nvcc` is required at
+build time. NVRTC compiles kernels at runtime for the device's compute
+capability.
 
 ## Quick start — Python
 
@@ -217,7 +231,8 @@ better. These are micro-benchmarks, not a claim about every workload.
 Adam wins, matmul/elementwise are close, and Linear backward is the weak spot.
 The original 1.2× geometric-mean target is not met, but the benchmark harness is
 checked in so improvements are measurable. Paged/batched decode is a CPU
-reference and not yet part of the performance comparison.
+reference and not yet part of the performance comparison. CUDA core ops are
+verified against CPU, but CUDA performance has not been benchmarked yet.
 
 - [`scripts/bench_vs_pytorch.py`](scripts/bench_vs_pytorch.py)
 - [`docs/benchmarks.md`](docs/benchmarks.md)
@@ -251,12 +266,12 @@ lavapipe) and skip cleanly when no Vulkan loader is present.
 
 ## Known limitations
 
-- CUDA is capability-probe only. `cudarc` / NVRTC / cuBLAS is the next
-  milestone.
-- Python does not expose `Run`, `PagedBatchRunner` or `Trainer` yet
-  (Rust-first).
-- Paged COW is tensor-granularity; block-level in-place COW and CUDA kernels
-  are future work.
+- CUDA native coverage is elementwise / matmul / linear / Adam. Reductions,
+  softmax cross entropy and the LLM attention/paged ops fall back to CPU.
+- Python does not expose CUDA tensors, `Run`, `PagedBatchRunner` or `Trainer`
+  yet (Rust-first).
+- Paged COW is tensor-granularity; block-level in-place COW and CUDA
+  paged-attention kernels are future work.
 - No release has been made.
 
 ## License

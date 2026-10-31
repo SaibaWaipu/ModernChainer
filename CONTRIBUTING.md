@@ -17,6 +17,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --exclude modern-chainer-python
 cargo test -p modern-chainer-vulkan           # skips without an adapter
+cargo test -p modern-chainer-cuda             # skips without CUDA; see below
 cd python && .venv/bin/pytest
 ```
 
@@ -30,6 +31,17 @@ cd python && .venv/bin/pytest
 4. If the op is on the training hot path, add a fused kernel to `Ops` with a
    default composition and override it in the CPU (and GPU) backend.
 5. Expose it through `modern-chainer/src/lib.rs` (`F` / `L`).
+
+### CUDA tests
+
+The CUDA backend loads NVRTC and cuBLAS dynamically. With pip CUDA wheels:
+
+```bash
+export LD_LIBRARY_PATH="$PWD/python/.venv/lib/python3.13/site-packages/nvidia/cuda_nvrtc/lib:$PWD/python/.venv/lib/python3.13/site-packages/nvidia/cublas/lib:$PWD/python/.venv/lib/python3.13/site-packages/nvidia/cuda_runtime/lib:$LD_LIBRARY_PATH"
+cargo test -p modern-chainer-cuda
+```
+
+Tests skip when the driver or runtime libraries are unavailable.
 
 ## Adding stateful models
 

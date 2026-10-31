@@ -86,25 +86,62 @@ CPU, then run a 100-step Linear training loop and assert the loss decreases.
 They skip with a message when `probe()` reports no adapter. A CI job installs
 Mesa's lavapipe and runs the same suite headlessly.
 
-## CUDA (planned)
+## CUDA (core ops)
 
-The existing `modern-chainer-cuda` crate only probes availability. The intended
-implementation:
+The CUDA backend is implemented with [`cudarc`](https://crates.io/crates/cudarc)
+and dynamic library loading, so a build does not require the CUDA toolkit or
+`nvcc`.
 
-1. **Runtime**: [`cudarc`](https://crates.io/crates/cudarc) with dynamic
-   loading, so builds do not require a CUDA toolkit.
-2. **Kernels**: NVRTC compiles CUDA C at runtime; no `nvcc` in the build.
-3. **GEMM**: cuBLAS for general matmul, cuBLASLt for fused
-   GEMM+bias+activation.
-4. **Convolution**: im2col + GEMM first, Winograd for 3×3 later. cuDNN is
-   optional, not required.
-5. **Memory**: pooling allocator, multiple streams, CUDA Graph capture for
-   static-shape training loops.
-6. **Precision**: fp32 first, then fp16/bf16 autocast with loss scaling.
+### Runtime
 
-Driver/runtime notes: the development machine has an NVIDIA driver but no
-CUDA runtime or headers. CUDA 12.x is the target because CUDA 13 drops Pascal
-(sm_61, GTX 1080); the RTX 2070 SUPER (sm_75) works with either.
+- Device selection through the CUDA driver API (`CudaContext::new(ordinal)`).
+- One default stream and one cuBLAS handle per backend.
+- NVRTC compiles a single kernel module at runtime using the detected compute
+  capability (`compute_61` for GTX 1080, `compute_75` for RTX 2070 SUPER).
+- Typed storage: `CudaStorage::{F32, I64, U8}`. `Backend::alloc_for` allocates
+  the dtype the tensor needs.
+
+### Native ops
+
+| Op | Implementation |
+|---|---|
+| add / sub / mul / div | NVRTC elementwise kernels (equal shapes) |
+| sqrt, relu, relu backward, SiLU, scale, fill | NVRTC kernels |
+| one/zero/full like | fill kernel |
+| bias add | row-bias kernel |
+| transpose2d | NVRTC kernel |
+| matmul | cuBLAS sgemm (row-major via the standard swap) |
+| linear | cuBLAS + bias kernel |
+| linear_backward | cuBLAS + transpose |
+| adam_update | fused NVRTC kernel |
+| to_scalar | device-to-host readback |
+
+### CPU fallbacks
+
+`sum_all`, `sum_to`, softmax cross entropy and its backward, embedding,
+layer_norm, softmax, split/merge heads, dense attention, concat/last-row and all
+paged state/attention ops currently copy to the CPU backend and upload the
+result. This keeps the full decoder usable on CUDA while the native kernels are
+developed.
+
+### Running
+
+Using pip CUDA wheels:
+
+```bash
+export LD_LIBRARY_PATH="$PWD/python/.venv/lib/python3.13/site-packages/nvidia/cuda_nvrtc/lib:$PWD/python/.venv/lib/python3.13/site-packages/nvidia/cublas/lib:$PWD/python/.venv/lib/python3.13/site-packages/nvidia/cuda_runtime/lib:$LD_LIBRARY_PATH"
+cargo test -p modern-chainer-cuda
+cargo run --release --example cuda_matmul
+```
+
+Tests skip when no CUDA driver/runtime is available.
+
+### Next
+
+- Native reduction, softmax cross entropy, layer_norm/embedding kernels.
+- Dense and paged attention CUDA kernels.
+- Vectorised batched decode on paged CUDA buffers.
+- cuBLASLt fused GEMM+bias+activation and CUDA Graph capture.
 
 ## Adding a backend
 

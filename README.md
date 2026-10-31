@@ -26,7 +26,7 @@ class MLP(chainer.Chain):
         return self.l2(F.relu(self.l1(x)))
 ```
 
-## ステータス（v0.4.0）
+## ステータス（v0.5.0）
 
 | 領域 | 状態 |
 |---|---|
@@ -37,7 +37,7 @@ class MLP(chainer.Chain):
 | Batched decode | 動作: `PagedBatchRunner` + batched paged attention |
 | Continuous batching | 動作: `RequestTable` / `BatchPlan`（論理バッチ） |
 | Speculative decoding | 動作: greedy の fork/verify/commit 参照実装 |
-| CUDA バックエンド | スキャフォールド（能力検出のみ） |
+| CUDA バックエンド | 動作: NVRTC + cuBLAS のコア ops、reduction / attention は CPU フォールバック |
 | Python バインディング | コアサブセット: `Tensor`、`Variable`、`F.*`、`L.Linear`、`SGD`/`Adam`、`Chain` |
 | シリアライズ | ネイティブ `.mcn`、Chainer `.npz` は計画中 |
 | Trainer / Updater / Extensions | 計画中 |
@@ -53,6 +53,7 @@ cargo run --release --example state_decoder
 cargo run --release --example continuous_batching
 cargo run --release --example paged_batching
 cargo run --release --example speculative
+cargo run --release --example cuda_matmul     # CUDA ドライバ + NVRTC/cuBLAS が必要
 cargo run --release --example vulkan_matmul   # Vulkan ローダ/ICD が必要
 ```
 
@@ -65,6 +66,17 @@ let y = model.forward(&x)?;
 let loss = F::sum(&y)?;
 loss.backward()?;
 ```
+
+### CUDA
+
+pip 版の CUDA ライブラリを使う場合は、NVRTC / cuBLAS のパスを通してから実行します。
+
+```bash
+export LD_LIBRARY_PATH="$PWD/python/.venv/lib/python3.13/site-packages/nvidia/cuda_nvrtc/lib:$PWD/python/.venv/lib/python3.13/site-packages/nvidia/cublas/lib:$PWD/python/.venv/lib/python3.13/site-packages/nvidia/cuda_runtime/lib:$LD_LIBRARY_PATH"
+cargo run --release --example cuda_matmul
+```
+
+`cudarc` の動的ロードを使うため、ビルド時に CUDA toolkit / `nvcc` は不要です。NVRTC はデバイスの compute capability に合わせて実行時コンパイルします。
 
 ## クイックスタート — Python
 
@@ -190,7 +202,7 @@ let tokens = speculative_generate(&mut target, &mut draft, prompt, 8, 3)?;
 | Adam step 1024×1024 | 3.38–3.81 ms | 4.02–4.98 ms | 1.19–1.40× |
 | **幾何平均** | **~1.20 ms** | **~1.04 ms** | **~0.87–0.91×** |
 
-Adam は勝利、matmul / elementwise はほぼ互角、Linear backward が課題です。目標だった幾何平均 1.2× は未達ですが、ベンチマークハーネスをリポジトリに含めているので改善を測定できます。Paged / batched decode は CPU 参照実装のため、まだ性能評価の対象外です。
+Adam は勝利、matmul / elementwise はほぼ互角、Linear backward が課題です。目標だった幾何平均 1.2× は未達ですが、ベンチマークハーネスをリポジトリに含めているので改善を測定できます。Paged / batched decode は CPU 参照実装のため、まだ性能評価の対象外です。CUDA はコア ops の正しさを CPU と比較して検証していますが、CUDA の性能測定はまだ行っていません。
 
 - [`scripts/bench_vs_pytorch.py`](scripts/bench_vs_pytorch.py)
 - [`docs/benchmarks.md`](docs/benchmarks.md)（英語）
@@ -223,9 +235,9 @@ Vulkan テストは利用可能なアダプタ（NVIDIA / AMD / Intel / Mesa lav
 
 ## 主な制約
 
-- CUDA は能力検出のみ。`cudarc` / NVRTC / cuBLAS の実装は次のマイルストーン。
-- Python の `Run` / `PagedBatchRunner` / `Trainer` は未公開（Rust ファースト）。
-- Paged COW はテンソル単位。ブロック単位の in-place COW と CUDA カーネルは今後。
+- CUDA のネイティブ実装は elementwise / matmul / linear / Adam まで。reduction、softmax cross entropy、LLM の attention / paged ops は CPU フォールバックです。
+- Python の CUDA テンソル API、`Run` / `PagedBatchRunner` / `Trainer` は未公開（Rust ファースト）。
+- Paged COW はテンソル単位。ブロック単位の in-place COW と CUDA paged-attention カーネルは今後。
 - リリースはまだ行っていません。
 
 ## ライセンス

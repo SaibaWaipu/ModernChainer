@@ -1,7 +1,7 @@
 # State by Run
 
-Status: v0.4 implementation (dense + paged state, block allocator, batched
-decode, continuous batching, greedy speculative decoding).
+Status: v0.5 implementation (dense + paged state, block allocator, batched
+decode, continuous batching, greedy speculative decoding; CUDA core backend).
 
 ## Motivation
 
@@ -238,7 +238,8 @@ Not in v0.2:
 - Continuous batching scheduler.
 - Speculative decoding driver (fork/rollback primitives are tested, the
   verification algorithm is next).
-- CUDA kernels.
+- CUDA attention/reduction kernels (CUDA core ops are implemented; the rest
+  falls back to CPU).
 - Training-By-Run, optimizer-state migration, checkpoints.
 - Python `Run` binding.
 
