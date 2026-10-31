@@ -9,7 +9,7 @@ use cudarc::driver::{CudaFunction, CudaSlice, LaunchConfig, PushKernelArg};
 use modern_chainer_core::{Activation, Backend, DType, Error, Ops, Result, Shape, Tensor};
 use modern_chainer_cpu::CpuBackend;
 
-use crate::backend::{CudaBackend, CudaRuntime, CudaStorage};
+use crate::backend::{ComputeType, CudaBackend, CudaRuntime, CudaStorage};
 
 #[derive(Clone)]
 pub struct CudaOps {
@@ -259,6 +259,343 @@ impl CudaOps {
     }
 }
 
+impl CudaOps {
+    fn linear_f32_strict(
+        &self,
+        x: &Tensor<CudaBackend>,
+        weight: &Tensor<CudaBackend>,
+        bias: Option<&Tensor<CudaBackend>>,
+    ) -> Result<Tensor<CudaBackend>> {
+        if x.rank() != 2 || weight.rank() != 2 {
+            return Err(Error::invalid("cuda linear expects 2-D input and weight"));
+        }
+        let (batch, in_features) = (x.shape().dims()[0], x.shape().dims()[1]);
+        let (out_features, k2) = (weight.shape().dims()[0], weight.shape().dims()[1]);
+        if in_features != k2 {
+            return Err(Error::shape_mismatch(
+                "cuda linear inner dimension",
+                x.shape().clone(),
+                weight.shape().clone(),
+            ));
+        }
+        let x_slice = self.f32(x)?;
+        let weight_slice = self.f32(weight)?;
+        let (backend, mut storage) = self.out_f32(&Shape::new([batch, out_features]))?;
+        {
+            let out = storage.f32_mut()?;
+            let config = GemmConfig {
+                transa: cublasOperation_t::CUBLAS_OP_T,
+                transb: cublasOperation_t::CUBLAS_OP_N,
+                m: out_features as i32,
+                n: batch as i32,
+                k: in_features as i32,
+                alpha: 1.0,
+                lda: in_features as i32,
+                ldb: in_features as i32,
+                beta: 0.0,
+                ldc: out_features as i32,
+            };
+            self.gemm(config, weight_slice, x_slice, out)?;
+            if let Some(bias) = bias {
+                let bias_slice = self.f32(bias)?;
+                let rows = i32::try_from(batch).map_err(|_| Error::invalid("tensor too large"))?;
+                let cols =
+                    i32::try_from(out_features).map_err(|_| Error::invalid("tensor too large"))?;
+                let total = u32::try_from(batch * out_features)
+                    .map_err(|_| Error::invalid("tensor too large"))?;
+                let mut builder = self
+                    .runtime
+                    .stream
+                    .launch_builder(&self.runtime.kernels.bias_add);
+                builder.arg(out).arg(bias_slice).arg(&rows).arg(&cols);
+                unsafe {
+                    builder
+                        .launch(LaunchConfig::for_num_elems(total))
+                        .map_err(|error| cuda_error("launch", error))?;
+                }
+            }
+        }
+        self.tensor_from_storage(backend, storage, &Shape::new([batch, out_features]))
+    }
+
+    fn cast_f32_to(&self, a: &Tensor<CudaBackend>, dtype: DType) -> Result<Tensor<CudaBackend>> {
+        if a.dtype() != DType::F32 {
+            return Err(Error::UnsupportedDType(a.dtype()));
+        }
+        let n = a.numel();
+        let a_slice = self.f32(a)?;
+        let backend = self.backend();
+        let mut storage = backend.alloc_zeroed_for(n * 2, dtype)?;
+        let n_i = i32::try_from(n).map_err(|_| Error::invalid("tensor too large"))?;
+        match dtype {
+            DType::F16 => {
+                let out = storage.f16_mut()?;
+                let mut builder = self
+                    .runtime
+                    .stream
+                    .launch_builder(&self.runtime.kernels.f32_to_f16);
+                builder.arg(a_slice).arg(out).arg(&n_i);
+                unsafe {
+                    builder
+                        .launch(LaunchConfig::for_num_elems(n as u32))
+                        .map_err(|error| cuda_error("launch", error))?;
+                }
+            }
+            DType::BF16 => {
+                let out = storage.bf16_mut()?;
+                let mut builder = self
+                    .runtime
+                    .stream
+                    .launch_builder(&self.runtime.kernels.f32_to_bf16);
+                builder.arg(a_slice).arg(out).arg(&n_i);
+                unsafe {
+                    builder
+                        .launch(LaunchConfig::for_num_elems(n as u32))
+                        .map_err(|error| cuda_error("launch", error))?;
+                }
+            }
+            other => return Err(Error::UnsupportedDType(other)),
+        }
+        Tensor::from_storage(
+            backend,
+            storage,
+            dtype,
+            a.shape().clone(),
+            a.strides().clone(),
+            0,
+        )
+    }
+
+    fn cast_to_f32(&self, a: &Tensor<CudaBackend>) -> Result<Tensor<CudaBackend>> {
+        if !a.is_contiguous() {
+            return Err(Error::invalid("cast requires a contiguous tensor"));
+        }
+        let n = a.numel();
+        let backend = self.backend();
+        let mut storage = backend.alloc_zeroed_for(n * 4, DType::F32)?;
+        let n_i = i32::try_from(n).map_err(|_| Error::invalid("tensor too large"))?;
+        match a.dtype() {
+            DType::F16 => {
+                let input = a.storage().f16()?;
+                let out = storage.f32_mut()?;
+                let mut builder = self
+                    .runtime
+                    .stream
+                    .launch_builder(&self.runtime.kernels.f16_to_f32);
+                builder.arg(input).arg(out).arg(&n_i);
+                unsafe {
+                    builder
+                        .launch(LaunchConfig::for_num_elems(n as u32))
+                        .map_err(|error| cuda_error("launch", error))?;
+                }
+            }
+            DType::BF16 => {
+                let input = a.storage().bf16()?;
+                let out = storage.f32_mut()?;
+                let mut builder = self
+                    .runtime
+                    .stream
+                    .launch_builder(&self.runtime.kernels.bf16_to_f32);
+                builder.arg(input).arg(out).arg(&n_i);
+                unsafe {
+                    builder
+                        .launch(LaunchConfig::for_num_elems(n as u32))
+                        .map_err(|error| cuda_error("launch", error))?;
+                }
+            }
+            other => return Err(Error::UnsupportedDType(other)),
+        }
+        Tensor::from_storage(
+            backend,
+            storage,
+            DType::F32,
+            a.shape().clone(),
+            a.strides().clone(),
+            0,
+        )
+    }
+
+    fn mixed_linear(
+        &self,
+        x: &Tensor<CudaBackend>,
+        weight: &Tensor<CudaBackend>,
+        bias: Option<&Tensor<CudaBackend>>,
+        activation: Option<LtActivation>,
+        dtype: DType,
+    ) -> Result<Tensor<CudaBackend>> {
+        if x.rank() != 2 || weight.rank() != 2 {
+            return Err(Error::invalid(
+                "cuda mixed linear expects 2-D input and weight",
+            ));
+        }
+        let (batch, in_features) = (x.shape().dims()[0], x.shape().dims()[1]);
+        let (out_features, k2) = (weight.shape().dims()[0], weight.shape().dims()[1]);
+        if in_features != k2 {
+            return Err(Error::shape_mismatch(
+                "cuda mixed linear inner dimension",
+                x.shape().clone(),
+                weight.shape().clone(),
+            ));
+        }
+        let x_cast = self.cast_f32_to(x, dtype)?;
+        let w_cast = self.cast_f32_to(weight, dtype)?;
+        let bias_cast = bias.map(|b| self.cast_f32_to(b, dtype)).transpose()?;
+        let backend = self.backend();
+        let shape = Shape::new([batch, out_features]);
+        let mut storage = backend.alloc_zeroed_for(batch * out_features * 2, dtype)?;
+        let config = BlasLtConfig {
+            transa: true,
+            transb: false,
+            transc: false,
+            m: out_features as u64,
+            n: batch as u64,
+            k: in_features as u64,
+            alpha: 1.0,
+            lda: in_features as i64,
+            ldb: in_features as i64,
+            beta: 0.0,
+            ldc: out_features as i64,
+            stride_a: None,
+            stride_b: None,
+            stride_c: None,
+            stride_bias: None,
+            batch_size: None,
+        };
+        let act = activation.as_ref();
+        match dtype {
+            DType::F16 => {
+                let out = storage.f16_mut()?;
+                let bias_slice = bias_cast
+                    .as_ref()
+                    .map(|tensor| tensor.storage().f16())
+                    .transpose()?;
+                unsafe {
+                    self.runtime.blaslt.matmul(
+                        config,
+                        w_cast.storage().f16()?,
+                        x_cast.storage().f16()?,
+                        out,
+                        bias_slice,
+                        act,
+                    )
+                }
+                .map_err(|error| cuda_error("cublaslt mixed linear", error))?;
+            }
+            DType::BF16 => {
+                let out = storage.bf16_mut()?;
+                let bias_slice = bias_cast
+                    .as_ref()
+                    .map(|tensor| tensor.storage().bf16())
+                    .transpose()?;
+                unsafe {
+                    self.runtime.blaslt.matmul(
+                        config,
+                        w_cast.storage().bf16()?,
+                        x_cast.storage().bf16()?,
+                        out,
+                        bias_slice,
+                        act,
+                    )
+                }
+                .map_err(|error| cuda_error("cublaslt mixed linear", error))?;
+            }
+            other => return Err(Error::UnsupportedDType(other)),
+        }
+        let out = Tensor::from_storage(
+            backend,
+            storage,
+            dtype,
+            shape.clone(),
+            shape.contiguous_strides(),
+            0,
+        )?;
+        self.cast_to_f32(&out)
+    }
+
+    fn mixed_matmul(
+        &self,
+        a: &Tensor<CudaBackend>,
+        b: &Tensor<CudaBackend>,
+        dtype: DType,
+    ) -> Result<Tensor<CudaBackend>> {
+        if a.rank() != 2 || b.rank() != 2 {
+            return Err(Error::invalid("cuda mixed matmul expects 2-D tensors"));
+        }
+        let (m, k) = (a.shape().dims()[0], a.shape().dims()[1]);
+        let (k2, n) = (b.shape().dims()[0], b.shape().dims()[1]);
+        if k != k2 {
+            return Err(Error::shape_mismatch(
+                "cuda mixed matmul inner dimension",
+                a.shape().clone(),
+                b.shape().clone(),
+            ));
+        }
+        let a_cast = self.cast_f32_to(a, dtype)?;
+        let b_cast = self.cast_f32_to(b, dtype)?;
+        let backend = self.backend();
+        let shape = Shape::new([m, n]);
+        let mut storage = backend.alloc_zeroed_for(m * n * 2, dtype)?;
+        let config = BlasLtConfig {
+            transa: false,
+            transb: false,
+            transc: false,
+            m: n as u64,
+            n: m as u64,
+            k: k as u64,
+            alpha: 1.0,
+            lda: n as i64,
+            ldb: k as i64,
+            beta: 0.0,
+            ldc: n as i64,
+            stride_a: None,
+            stride_b: None,
+            stride_c: None,
+            stride_bias: None,
+            batch_size: None,
+        };
+        match dtype {
+            DType::F16 => {
+                let out = storage.f16_mut()?;
+                unsafe {
+                    self.runtime.blaslt.matmul(
+                        config,
+                        b_cast.storage().f16()?,
+                        a_cast.storage().f16()?,
+                        out,
+                        None,
+                        None,
+                    )
+                }
+                .map_err(|error| cuda_error("cublaslt mixed matmul", error))?;
+            }
+            DType::BF16 => {
+                let out = storage.bf16_mut()?;
+                unsafe {
+                    self.runtime.blaslt.matmul(
+                        config,
+                        b_cast.storage().bf16()?,
+                        a_cast.storage().bf16()?,
+                        out,
+                        None,
+                        None,
+                    )
+                }
+                .map_err(|error| cuda_error("cublaslt mixed matmul", error))?;
+            }
+            other => return Err(Error::UnsupportedDType(other)),
+        }
+        let out = Tensor::from_storage(
+            backend,
+            storage,
+            dtype,
+            shape.clone(),
+            shape.contiguous_strides(),
+            0,
+        )?;
+        self.cast_to_f32(&out)
+    }
+}
+
 impl Ops<CudaBackend> for CudaOps {
     fn add(&self, a: &Tensor<CudaBackend>, b: &Tensor<CudaBackend>) -> Result<Tensor<CudaBackend>> {
         if a.shape() == b.shape() {
@@ -333,6 +670,11 @@ impl Ops<CudaBackend> for CudaOps {
         a: &Tensor<CudaBackend>,
         b: &Tensor<CudaBackend>,
     ) -> Result<Tensor<CudaBackend>> {
+        match self.runtime.compute_type() {
+            ComputeType::F16 => return self.mixed_matmul(a, b, DType::F16),
+            ComputeType::Bf16 => return self.mixed_matmul(a, b, DType::BF16),
+            _ => {}
+        }
         if a.rank() != 2 || b.rank() != 2 {
             return Err(Error::invalid("cuda matmul expects 2-D tensors"));
         }
@@ -373,7 +715,12 @@ impl Ops<CudaBackend> for CudaOps {
         weight: &Tensor<CudaBackend>,
         bias: Option<&Tensor<CudaBackend>>,
     ) -> Result<Tensor<CudaBackend>> {
-        self.linear_impl(x, weight, bias, None)
+        match self.runtime.compute_type() {
+            ComputeType::F16 => self.mixed_linear(x, weight, bias, None, DType::F16),
+            ComputeType::Bf16 => self.mixed_linear(x, weight, bias, None, DType::BF16),
+            ComputeType::F32 => self.linear_f32_strict(x, weight, bias),
+            ComputeType::Tf32 => self.linear_impl(x, weight, bias, None),
+        }
     }
 
     fn linear_activation(
@@ -383,13 +730,34 @@ impl Ops<CudaBackend> for CudaOps {
         bias: Option<&Tensor<CudaBackend>>,
         activation: Activation,
     ) -> Result<Tensor<CudaBackend>> {
-        match activation {
-            Activation::Relu => self.linear_impl(x, weight, bias, Some(LtActivation::Relu)),
-            Activation::Gelu => self.linear_impl(x, weight, bias, Some(LtActivation::Gelu)),
-            Activation::Silu => {
-                let y = self.linear(x, weight, bias)?;
-                self.silu(&y)
+        let lt_activation = match activation {
+            Activation::Relu => Some(LtActivation::Relu),
+            Activation::Gelu => Some(LtActivation::Gelu),
+            Activation::Silu => None,
+        };
+        match self.runtime.compute_type() {
+            ComputeType::F16 | ComputeType::Bf16 => {
+                let dtype = if self.runtime.compute_type() == ComputeType::F16 {
+                    DType::F16
+                } else {
+                    DType::BF16
+                };
+                if activation == Activation::Silu {
+                    let y = self.mixed_linear(x, weight, bias, None, dtype)?;
+                    self.silu(&y)
+                } else {
+                    self.mixed_linear(x, weight, bias, lt_activation, dtype)
+                }
             }
+            ComputeType::F32 => {
+                let y = self.linear_f32_strict(x, weight, bias)?;
+                match activation {
+                    Activation::Relu => self.relu(&y),
+                    Activation::Gelu => self.gelu(&y),
+                    Activation::Silu => self.silu(&y),
+                }
+            }
+            ComputeType::Tf32 => self.linear_impl(x, weight, bias, lt_activation),
         }
     }
 

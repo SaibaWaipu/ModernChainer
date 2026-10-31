@@ -22,7 +22,7 @@ pub use modern_chainer_core::{
 };
 pub use modern_chainer_cpu::{CpuBackend, CpuOps, CpuStorage};
 pub use modern_chainer_cuda::{
-    CudaBackend, CudaGraphRunner, CudaOps, CudaStorage, GraphAdam, GraphMatmul,
+    ComputeType, CudaBackend, CudaGraphRunner, CudaOps, CudaStorage, GraphAdam, GraphMatmul,
 };
 pub use modern_chainer_llm::{
     BatchOutput, BatchPlan, BlockAllocator, ContinuousBatcher, Decoder, DecoderConfig,

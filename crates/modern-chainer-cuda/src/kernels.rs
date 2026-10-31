@@ -607,6 +607,39 @@ extern "C" __global__ void paged_attention_batch_wide_f32(
     for (int d = tid; d < head_dim; d += blockDim.x) out[q_base + d] = s_out[d];
 }
 
+extern "C" __global__ void f32_to_f16_f32(const float* a, unsigned short* out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        unsigned short h;
+        asm("{ cvt.rn.f16.f32 %0, %1; }" : "=h"(h) : "f"(a[i]));
+        out[i] = h;
+    }
+}
+
+extern "C" __global__ void f16_to_f32_f32(const unsigned short* a, float* out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float f;
+        asm("{ cvt.f32.f16 %0, %1; }" : "=f"(f) : "h"(a[i]));
+        out[i] = f;
+    }
+}
+
+extern "C" __global__ void f32_to_bf16_f32(const float* a, unsigned short* out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        unsigned int bits = __float_as_uint(a[i]);
+        out[i] = (unsigned short)(bits >> 16);
+    }
+}
+
+extern "C" __global__ void bf16_to_f32_f32(const unsigned short* a, float* out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        out[i] = __uint_as_float(((unsigned int)a[i]) << 16);
+    }
+}
+
 "#;
 
 pub(crate) struct Kernels {
@@ -619,6 +652,11 @@ pub(crate) struct Kernels {
     pub relu_backward: CudaFunction,
     pub silu: CudaFunction,
     pub gelu: CudaFunction,
+    pub f32_to_f16: CudaFunction,
+    pub f16_to_f32: CudaFunction,
+    pub f32_to_bf16: CudaFunction,
+    pub bf16_to_f32: CudaFunction,
+    pub bias_add: CudaFunction,
     pub scale: CudaFunction,
     pub fill: CudaFunction,
     pub transpose2d: CudaFunction,
@@ -666,6 +704,11 @@ impl Kernels {
             relu_backward: load("relu_backward_f32")?,
             silu: load("silu_f32")?,
             gelu: load("gelu_f32")?,
+            f32_to_f16: load("f32_to_f16_f32")?,
+            f16_to_f32: load("f16_to_f32_f32")?,
+            f32_to_bf16: load("f32_to_bf16_f32")?,
+            bf16_to_f32: load("bf16_to_f32_f32")?,
+            bias_add: load("bias_add_f32")?,
             scale: load("scale_f32")?,
             fill: load("fill_f32")?,
             transpose2d: load("transpose2d_f32")?,

@@ -16,7 +16,7 @@ mod kernels;
 mod ops;
 
 #[cfg(feature = "cuda")]
-pub use backend::{CudaBackend, CudaStorage};
+pub use backend::{ComputeType, CudaBackend, CudaStorage};
 pub use graph::{CudaGraphRunner, GraphAdam, GraphMatmul};
 #[cfg(feature = "cuda")]
 pub use ops::CudaOps;

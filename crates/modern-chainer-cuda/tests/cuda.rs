@@ -583,3 +583,133 @@ fn cuda_graph_matmul_and_adam_match_eager() {
     assert_close(&values(graph_adam.m()), &values(&eager_m));
     assert_close(&values(graph_adam.v()), &values(&eager_v));
 }
+
+#[test]
+#[serial]
+fn cuda_memory_pool_reuses_buffers() {
+    if !is_available() {
+        eprintln!("skipping: CUDA is not available");
+        return;
+    }
+    let backend = CudaBackend::new(0).unwrap();
+    assert_eq!(backend.pooled_blocks(), 0);
+    {
+        let tensor = Tensor::from_f32(backend.clone(), &vec![1.0f32; 1024], [1024]).unwrap();
+        backend.synchronize().unwrap();
+        let _ = tensor;
+    }
+    let pooled = backend.pooled_blocks();
+    assert!(pooled >= 1);
+    {
+        let zeroed = Tensor::zeros(backend.clone(), [1024], DType::F32).unwrap();
+        backend.synchronize().unwrap();
+        assert!(values(&zeroed).iter().all(|value| *value == 0.0));
+    }
+    assert!(backend.pooled_blocks() <= pooled + 1);
+}
+
+#[test]
+#[serial]
+fn cuda_compute_types_match_f32() {
+    use modern_chainer_core::Activation;
+    use modern_chainer_cuda::ComputeType;
+
+    if !is_available() {
+        eprintln!("skipping: CUDA is not available");
+        return;
+    }
+    let backend = CudaBackend::new(0).unwrap();
+    let batch = 16;
+    let input = 32;
+    let output = 8;
+    let x_data: Vec<f32> = (0..batch * input)
+        .map(|i| (i as f32 * 0.017).sin())
+        .collect();
+    let w_data: Vec<f32> = (0..output * input)
+        .map(|i| (i as f32 * 0.013).cos() * 0.2)
+        .collect();
+    let bias_data: Vec<f32> = (0..output).map(|i| i as f32 * 0.01).collect();
+    let x = Tensor::from_f32(backend.clone(), &x_data, [batch, input]).unwrap();
+    let w = Tensor::from_f32(backend.clone(), &w_data, [output, input]).unwrap();
+    let bias = Tensor::from_f32(backend.clone(), &bias_data, [output]).unwrap();
+
+    backend.set_compute_type(ComputeType::F32);
+    let reference = backend
+        .ops()
+        .linear_activation(&x, &w, Some(&bias), Activation::Gelu)
+        .unwrap();
+    let reference_values = values(&reference);
+
+    for (compute, tolerance) in [(ComputeType::F16, 0.08f32), (ComputeType::Bf16, 0.15)] {
+        backend.set_compute_type(compute);
+        let mixed = backend
+            .ops()
+            .linear_activation(&x, &w, Some(&bias), Activation::Gelu)
+            .unwrap();
+        for (index, (actual, expected)) in values(&mixed).iter().zip(&reference_values).enumerate()
+        {
+            assert!(
+                (actual - expected).abs() < tolerance,
+                "{compute:?} element {index}: {actual} vs {expected}"
+            );
+        }
+    }
+
+    let a = Tensor::from_f32(backend.clone(), &x_data, [batch, input]).unwrap();
+    let b = Tensor::from_f32(
+        backend.clone(),
+        &(0..input * output)
+            .map(|i| (i as f32 * 0.007).sin())
+            .collect::<Vec<_>>(),
+        [input, output],
+    )
+    .unwrap();
+    backend.set_compute_type(ComputeType::F32);
+    let reference = values(&backend.ops().matmul(&a, &b).unwrap());
+    backend.set_compute_type(ComputeType::F16);
+    let mixed = values(&backend.ops().matmul(&a, &b).unwrap());
+    for (index, (actual, expected)) in mixed.iter().zip(&reference).enumerate() {
+        assert!(
+            (actual - expected).abs() < 0.1,
+            "matmul {index}: {actual} vs {expected}"
+        );
+    }
+    backend.set_compute_type(ComputeType::Tf32);
+}
+
+#[test]
+#[serial]
+fn cuda_bf16_decoder_matches_f32_cpu() {
+    use modern_chainer_cuda::ComputeType;
+    use modern_chainer_llm::{Decoder, DecoderConfig};
+    use modern_chainer_run::{Run, RunMode};
+
+    if !is_available() {
+        eprintln!("skipping: CUDA is not available");
+        return;
+    }
+    let backend = CudaBackend::new(0).unwrap();
+    backend.set_compute_type(ComputeType::Bf16);
+    let config = DecoderConfig {
+        vocab: 32,
+        d_model: 8,
+        n_layers: 2,
+        n_heads: 2,
+        d_ff: 16,
+        max_seq: 24,
+        eps: 1e-5,
+    };
+    let cuda_decoder = Decoder::new(backend.clone(), config.clone(), 7).unwrap();
+    let cpu_decoder = Decoder::new(CpuBackend::new(), config, 7).unwrap();
+    let mut cuda_run = Run::new(cuda_decoder, backend, RunMode::Inference, 11).unwrap();
+    let mut cpu_run = Run::new(cpu_decoder, CpuBackend::new(), RunMode::Inference, 11).unwrap();
+    let prompt = vec![1u32, 5, 9, 3];
+    let cuda_logits = values(&cuda_run.step(prompt.clone()).unwrap());
+    let cpu_logits = values(&cpu_run.step(prompt).unwrap());
+    for (index, (a, b)) in cuda_logits.iter().zip(&cpu_logits).enumerate() {
+        assert!(
+            (a - b).abs() < 0.3,
+            "bf16 decoder logit {index}: {a} vs {b}"
+        );
+    }
+}
