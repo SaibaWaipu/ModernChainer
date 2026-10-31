@@ -760,6 +760,135 @@ extern "C" __global__ void gelu_inplace_f32(float* x, int n) {
     }
 }
 
+extern "C" __global__ void embedding_batch_i32(
+    const int* tokens, const float* weight, float* out, int rows, int dim
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = rows * dim;
+    if (i < total) {
+        int row = i / dim;
+        int d = i % dim;
+        out[i] = weight[tokens[row] * dim + d];
+    }
+}
+
+extern "C" __global__ void kv_prefill_f32(
+    const float* k, const float* v, float* k_cache, float* v_cache,
+    int batch, int prefill_len, int heads, int head_dim, int max_seq
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * prefill_len * heads * head_dim;
+    if (i < total) {
+        int d = i % head_dim;
+        int t = i / head_dim;
+        int head = t % heads;
+        int t2 = t / heads;
+        int pos = t2 % prefill_len;
+        int b = t2 / prefill_len;
+        int src = ((b * prefill_len + pos) * heads + head) * head_dim + d;
+        int dst = ((b * heads + head) * max_seq + pos) * head_dim + d;
+        k_cache[dst] = k[src];
+        v_cache[dst] = v[src];
+    }
+}
+
+extern "C" __global__ void attention_prefill_f32(
+    const float* q, const float* k_cache, const float* v_cache, float* out,
+    int batch, int prefill_len, int heads, int max_seq, int head_dim, float scale
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * heads * prefill_len;
+    if (idx >= total) return;
+    int qpos = idx % prefill_len;
+    int t = idx / prefill_len;
+    int head = t % heads;
+    int b = t / heads;
+    int q_base = ((b * prefill_len + qpos) * heads + head) * head_dim;
+    int cache_base = (b * heads + head) * max_seq * head_dim;
+
+    float maxv = -1e30f;
+    for (int p = 0; p <= qpos; p++) {
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; d++) dot += q[q_base + d] * k_cache[cache_base + p * head_dim + d];
+        dot *= scale;
+        if (dot > maxv) maxv = dot;
+    }
+    float sum = 0.0f;
+    for (int p = 0; p <= qpos; p++) {
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; d++) dot += q[q_base + d] * k_cache[cache_base + p * head_dim + d];
+        sum += expf(dot * scale - maxv);
+    }
+    float inv = 1.0f / sum;
+    for (int d = 0; d < head_dim; d++) out[q_base + d] = 0.0f;
+    for (int p = 0; p <= qpos; p++) {
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; d++) dot += q[q_base + d] * k_cache[cache_base + p * head_dim + d];
+        float prob = expf(dot * scale - maxv) * inv;
+        for (int d = 0; d < head_dim; d++) out[q_base + d] += prob * v_cache[cache_base + p * head_dim + d];
+    }
+}
+
+extern "C" __global__ void kv_append_batch_f32(
+    const float* k, const float* v, float* k_cache, float* v_cache,
+    const int* position, int batch, int heads, int head_dim, int max_seq
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * heads * head_dim;
+    int pos = *position;
+    if (i < total && pos < max_seq) {
+        int d = i % head_dim;
+        int t = i / head_dim;
+        int head = t % heads;
+        int b = t / heads;
+        int src = (b * heads + head) * head_dim + d;
+        int dst = ((b * heads + head) * max_seq + pos) * head_dim + d;
+        k_cache[dst] = k[src];
+        v_cache[dst] = v[src];
+    }
+}
+
+extern "C" __global__ void attention_batch_decode_f32(
+    const float* q, const float* k_cache, const float* v_cache,
+    const int* position, float* out,
+    int batch, int heads, int max_seq, int head_dim, float scale
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * heads;
+    if (idx >= total) return;
+    int head = idx % heads;
+    int b = idx / heads;
+    int n = *position + 1;
+    if (n > max_seq) n = max_seq;
+    int q_base = (b * heads + head) * head_dim;
+    int cache_base = (b * heads + head) * max_seq * head_dim;
+    float maxv = -1e30f;
+    for (int p = 0; p < n; p++) {
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; d++) dot += q[q_base + d] * k_cache[cache_base + p * head_dim + d];
+        dot *= scale;
+        if (dot > maxv) maxv = dot;
+    }
+    float sum = 0.0f;
+    for (int p = 0; p < n; p++) {
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; d++) dot += q[q_base + d] * k_cache[cache_base + p * head_dim + d];
+        sum += expf(dot * scale - maxv);
+    }
+    float inv = 1.0f / sum;
+    for (int d = 0; d < head_dim; d++) out[q_base + d] = 0.0f;
+    for (int p = 0; p < n; p++) {
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; d++) dot += q[q_base + d] * k_cache[cache_base + p * head_dim + d];
+        float prob = expf(dot * scale - maxv) * inv;
+        for (int d = 0; d < head_dim; d++) out[q_base + d] += prob * v_cache[cache_base + p * head_dim + d];
+    }
+}
+
+extern "C" __global__ void set_i32_value(int* dst, int value) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) *dst = value;
+}
+
 "#;
 
 pub(crate) struct Kernels {
@@ -787,6 +916,12 @@ pub(crate) struct Kernels {
     pub attention_single: CudaFunction,
     pub residual_inplace: CudaFunction,
     pub gelu_inplace: CudaFunction,
+    pub embedding_batch: CudaFunction,
+    pub kv_prefill: CudaFunction,
+    pub attention_prefill: CudaFunction,
+    pub kv_append_batch: CudaFunction,
+    pub attention_batch_decode: CudaFunction,
+    pub set_i32_value: CudaFunction,
     pub scale: CudaFunction,
     pub fill: CudaFunction,
     pub transpose2d: CudaFunction,
@@ -849,6 +984,12 @@ impl Kernels {
             attention_single: load("attention_single_f32")?,
             residual_inplace: load("residual_inplace_f32")?,
             gelu_inplace: load("gelu_inplace_f32")?,
+            embedding_batch: load("embedding_batch_i32")?,
+            kv_prefill: load("kv_prefill_f32")?,
+            attention_prefill: load("attention_prefill_f32")?,
+            kv_append_batch: load("kv_append_batch_f32")?,
+            attention_batch_decode: load("attention_batch_decode_f32")?,
+            set_i32_value: load("set_i32_value")?,
             scale: load("scale_f32")?,
             fill: load("fill_f32")?,
             transpose2d: load("transpose2d_f32")?,

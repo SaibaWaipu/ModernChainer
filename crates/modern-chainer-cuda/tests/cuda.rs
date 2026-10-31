@@ -987,3 +987,63 @@ fn cuda_static_decoder_replays_tokens() {
     assert_eq!(output.position, 5);
     assert_eq!(output.logits.len(), 32);
 }
+
+#[test]
+fn cuda_batched_static_decoder_prefill_and_decode() {
+    use modern_chainer_cuda::BatchedStaticDecoder;
+    use modern_chainer_llm::{Decoder, DecoderConfig};
+    use modern_chainer_run::{Run, RunMode};
+
+    if !is_available() {
+        eprintln!("skipping: CUDA is not available");
+        return;
+    }
+    let backend = CudaBackend::new(0).unwrap();
+    let config = DecoderConfig {
+        vocab: 32,
+        d_model: 8,
+        n_layers: 2,
+        n_heads: 2,
+        d_ff: 16,
+        max_seq: 12,
+        eps: 1e-5,
+    };
+    let batch = 2;
+    let prefill_len = 4;
+    let cuda_decoder = Decoder::new(backend.clone(), config.clone(), 9).unwrap();
+    let mut batched = BatchedStaticDecoder::new(cuda_decoder, batch, prefill_len).unwrap();
+
+    let prompts = [[1u32, 5, 9, 3], [2, 4, 6, 8]];
+    let flat: Vec<u32> = prompts.iter().flatten().copied().collect();
+    let logits = batched.prefill(&flat).unwrap();
+    assert_eq!(batched.position().unwrap(), prefill_len);
+
+    let mut cpu_runs = (0..batch)
+        .map(|_| {
+            let decoder = Decoder::new(CpuBackend::new(), config.clone(), 9).unwrap();
+            Run::new(decoder, CpuBackend::new(), RunMode::Inference, 13).unwrap()
+        })
+        .collect::<Vec<_>>();
+    for (b, prompt) in prompts.iter().enumerate() {
+        let expected = values(&cpu_runs[b].step(prompt.to_vec()).unwrap());
+        for (index, (a, b)) in logits[b].iter().zip(&expected).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-2,
+                "prefill batch {b} logit {index}: cuda {a} vs cpu {b}"
+            );
+        }
+    }
+
+    let next = [7u32, 11];
+    let logits = batched.decode(&next).unwrap();
+    assert_eq!(batched.position().unwrap(), prefill_len + 1);
+    for (b, token) in next.iter().enumerate() {
+        let expected = values(&cpu_runs[b].step(vec![*token]).unwrap());
+        for (index, (a, b)) in logits[b].iter().zip(&expected).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-2,
+                "decode batch {b} logit {index}: cuda {a} vs cpu {b}"
+            );
+        }
+    }
+}

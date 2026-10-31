@@ -46,10 +46,14 @@ impl StaticBuilder {
     }
 
     pub fn i32_scalar(&self) -> Result<CudaSlice<i32>> {
+        self.i32_zeros(1)
+    }
+
+    pub fn i32_zeros(&self, len: usize) -> Result<CudaSlice<i32>> {
         self.backend
             .runtime
             .stream
-            .alloc_zeros::<i32>(1)
+            .alloc_zeros::<i32>(len)
             .map_err(|error| Error::Backend(format!("cuda alloc: {error}")))
     }
 }
@@ -95,6 +99,17 @@ impl CudaStaticContext {
             .first()
             .map(|chunk| f32::from_ne_bytes(*chunk))
             .ok_or_else(|| Error::invalid("empty f32 tensor"))
+    }
+
+    pub fn write_i32_slice(&self, dst: &mut CudaSlice<i32>, values: &[i32]) -> Result<()> {
+        if values.len() != dst.len() {
+            return Err(Error::invalid("static i32 slice size mismatch"));
+        }
+        self.backend
+            .runtime
+            .stream
+            .memcpy_htod(values, dst)
+            .map_err(|error| Error::Backend(format!("htod: {error}")))
     }
 
     pub fn read_i32(&self, slice: &CudaSlice<i32>) -> Result<i32> {
@@ -557,6 +572,275 @@ impl CudaStaticContext {
                     shared_mem_bytes: 0,
                 })
                 .map_err(|error| Error::Backend(format!("static attention: {error}")))?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn embedding_batch(
+        &self,
+        tokens: &CudaSlice<i32>,
+        weight: &Tensor<CudaBackend>,
+        out: &mut Tensor<CudaBackend>,
+        rows: usize,
+        dim: usize,
+    ) -> Result<()> {
+        let total = rows * dim;
+        let rows_i = i32::try_from(rows).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let weight_slice = weight.storage().f32()?;
+        let out_slice = storage_mut(out)?.f32_mut()?;
+        let mut builder = runtime
+            .stream
+            .launch_builder(&runtime.kernels.embedding_batch);
+        builder
+            .arg(tokens)
+            .arg(weight_slice)
+            .arg(out_slice)
+            .arg(&rows_i)
+            .arg(&dim_i);
+        unsafe {
+            builder
+                .launch(LaunchConfig::for_num_elems(total as u32))
+                .map_err(|error| Error::Backend(format!("static embedding batch: {error}")))?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn layer_norm_batch(
+        &self,
+        x: &Tensor<CudaBackend>,
+        gamma: &Tensor<CudaBackend>,
+        beta: &Tensor<CudaBackend>,
+        out: &mut Tensor<CudaBackend>,
+        rows: usize,
+        dim: usize,
+        eps: f32,
+    ) -> Result<()> {
+        let rows_i = i32::try_from(rows).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let x_slice = x.storage().f32()?;
+        let gamma_slice = gamma.storage().f32()?;
+        let beta_slice = beta.storage().f32()?;
+        let out_slice = storage_mut(out)?.f32_mut()?;
+        let mut builder = runtime.stream.launch_builder(&runtime.kernels.layer_norm);
+        builder
+            .arg(x_slice)
+            .arg(gamma_slice)
+            .arg(beta_slice)
+            .arg(out_slice)
+            .arg(&rows_i)
+            .arg(&dim_i)
+            .arg(&eps);
+        unsafe {
+            builder
+                .launch(LaunchConfig {
+                    grid_dim: (rows as u32, 1, 1),
+                    block_dim: (256, 1, 1),
+                    shared_mem_bytes: 0,
+                })
+                .map_err(|error| Error::Backend(format!("static layer_norm batch: {error}")))?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn kv_prefill(
+        &self,
+        k: &Tensor<CudaBackend>,
+        v: &Tensor<CudaBackend>,
+        k_cache: &mut Tensor<CudaBackend>,
+        v_cache: &mut Tensor<CudaBackend>,
+        batch: usize,
+        prefill_len: usize,
+        heads: usize,
+        head_dim: usize,
+        max_seq: usize,
+    ) -> Result<()> {
+        let total = batch * prefill_len * heads * head_dim;
+        let batch_i = i32::try_from(batch).map_err(|_| Error::invalid("tensor too large"))?;
+        let len_i = i32::try_from(prefill_len).map_err(|_| Error::invalid("tensor too large"))?;
+        let heads_i = i32::try_from(heads).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let seq_i = i32::try_from(max_seq).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let k_slice = k.storage().f32()?;
+        let v_slice = v.storage().f32()?;
+        let k_cache_slice = storage_mut(k_cache)?.f32_mut()?;
+        let v_cache_slice = storage_mut(v_cache)?.f32_mut()?;
+        let mut builder = runtime.stream.launch_builder(&runtime.kernels.kv_prefill);
+        builder
+            .arg(k_slice)
+            .arg(v_slice)
+            .arg(k_cache_slice)
+            .arg(v_cache_slice)
+            .arg(&batch_i)
+            .arg(&len_i)
+            .arg(&heads_i)
+            .arg(&dim_i)
+            .arg(&seq_i);
+        unsafe {
+            builder
+                .launch(LaunchConfig::for_num_elems(total as u32))
+                .map_err(|error| Error::Backend(format!("static kv prefill: {error}")))?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn attention_prefill(
+        &self,
+        q: &Tensor<CudaBackend>,
+        k_cache: &Tensor<CudaBackend>,
+        v_cache: &Tensor<CudaBackend>,
+        out: &mut Tensor<CudaBackend>,
+        batch: usize,
+        prefill_len: usize,
+        heads: usize,
+        max_seq: usize,
+        head_dim: usize,
+        scale: f32,
+    ) -> Result<()> {
+        let total = batch * heads * prefill_len;
+        let batch_i = i32::try_from(batch).map_err(|_| Error::invalid("tensor too large"))?;
+        let len_i = i32::try_from(prefill_len).map_err(|_| Error::invalid("tensor too large"))?;
+        let heads_i = i32::try_from(heads).map_err(|_| Error::invalid("tensor too large"))?;
+        let seq_i = i32::try_from(max_seq).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let q_slice = q.storage().f32()?;
+        let k_slice = k_cache.storage().f32()?;
+        let v_slice = v_cache.storage().f32()?;
+        let out_slice = storage_mut(out)?.f32_mut()?;
+        let mut builder = runtime
+            .stream
+            .launch_builder(&runtime.kernels.attention_prefill);
+        builder
+            .arg(q_slice)
+            .arg(k_slice)
+            .arg(v_slice)
+            .arg(out_slice)
+            .arg(&batch_i)
+            .arg(&len_i)
+            .arg(&heads_i)
+            .arg(&seq_i)
+            .arg(&dim_i)
+            .arg(&scale);
+        unsafe {
+            builder
+                .launch(LaunchConfig::for_num_elems(total as u32))
+                .map_err(|error| Error::Backend(format!("static attention prefill: {error}")))?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn kv_append_batch(
+        &self,
+        k: &Tensor<CudaBackend>,
+        v: &Tensor<CudaBackend>,
+        k_cache: &mut Tensor<CudaBackend>,
+        v_cache: &mut Tensor<CudaBackend>,
+        position: &CudaSlice<i32>,
+        batch: usize,
+        heads: usize,
+        head_dim: usize,
+        max_seq: usize,
+    ) -> Result<()> {
+        let total = batch * heads * head_dim;
+        let batch_i = i32::try_from(batch).map_err(|_| Error::invalid("tensor too large"))?;
+        let heads_i = i32::try_from(heads).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let seq_i = i32::try_from(max_seq).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let k_slice = k.storage().f32()?;
+        let v_slice = v.storage().f32()?;
+        let k_cache_slice = storage_mut(k_cache)?.f32_mut()?;
+        let v_cache_slice = storage_mut(v_cache)?.f32_mut()?;
+        let mut builder = runtime
+            .stream
+            .launch_builder(&runtime.kernels.kv_append_batch);
+        builder
+            .arg(k_slice)
+            .arg(v_slice)
+            .arg(k_cache_slice)
+            .arg(v_cache_slice)
+            .arg(position)
+            .arg(&batch_i)
+            .arg(&heads_i)
+            .arg(&dim_i)
+            .arg(&seq_i);
+        unsafe {
+            builder
+                .launch(LaunchConfig::for_num_elems(total as u32))
+                .map_err(|error| Error::Backend(format!("static kv append batch: {error}")))?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn attention_batch_decode(
+        &self,
+        q: &Tensor<CudaBackend>,
+        k_cache: &Tensor<CudaBackend>,
+        v_cache: &Tensor<CudaBackend>,
+        position: &CudaSlice<i32>,
+        out: &mut Tensor<CudaBackend>,
+        batch: usize,
+        heads: usize,
+        max_seq: usize,
+        head_dim: usize,
+        scale: f32,
+    ) -> Result<()> {
+        let total = batch * heads;
+        let batch_i = i32::try_from(batch).map_err(|_| Error::invalid("tensor too large"))?;
+        let heads_i = i32::try_from(heads).map_err(|_| Error::invalid("tensor too large"))?;
+        let seq_i = i32::try_from(max_seq).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let runtime = self.backend.runtime.clone();
+        let q_slice = q.storage().f32()?;
+        let k_slice = k_cache.storage().f32()?;
+        let v_slice = v_cache.storage().f32()?;
+        let out_slice = storage_mut(out)?.f32_mut()?;
+        let mut builder = runtime
+            .stream
+            .launch_builder(&runtime.kernels.attention_batch_decode);
+        builder
+            .arg(q_slice)
+            .arg(k_slice)
+            .arg(v_slice)
+            .arg(position)
+            .arg(out_slice)
+            .arg(&batch_i)
+            .arg(&heads_i)
+            .arg(&seq_i)
+            .arg(&dim_i)
+            .arg(&scale);
+        unsafe {
+            builder
+                .launch(LaunchConfig::for_num_elems(total as u32))
+                .map_err(|error| Error::Backend(format!("static attention batch: {error}")))?;
+        }
+        Ok(())
+    }
+
+    pub fn set_position(&self, position: &mut CudaSlice<i32>, value: i32) -> Result<()> {
+        let runtime = self.backend.runtime.clone();
+        let mut builder = runtime
+            .stream
+            .launch_builder(&runtime.kernels.set_i32_value);
+        builder.arg(position).arg(&value);
+        unsafe {
+            builder
+                .launch(LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                })
+                .map_err(|error| Error::Backend(format!("static set position: {error}")))?;
         }
         Ok(())
     }
@@ -1059,4 +1343,469 @@ impl CudaStaticStep for StaticDecoderStep {
             position: ctx.read_i32(&buffers.position)?,
         })
     }
+}
+
+struct BatchTensors {
+    x: Tensor<CudaBackend>,
+    norm: Tensor<CudaBackend>,
+    q: Tensor<CudaBackend>,
+    k: Tensor<CudaBackend>,
+    v: Tensor<CudaBackend>,
+    attn: Tensor<CudaBackend>,
+    hidden: Tensor<CudaBackend>,
+    update: Tensor<CudaBackend>,
+    logits: Tensor<CudaBackend>,
+}
+
+impl BatchTensors {
+    fn allocate(builder: &StaticBuilder, rows: usize, config: &DecoderConfig) -> Result<Self> {
+        Ok(Self {
+            x: builder.zeros([rows, config.d_model], DType::F32)?,
+            norm: builder.zeros([rows, config.d_model], DType::F32)?,
+            q: builder.zeros([rows, config.d_model], DType::F32)?,
+            k: builder.zeros([rows, config.d_model], DType::F32)?,
+            v: builder.zeros([rows, config.d_model], DType::F32)?,
+            attn: builder.zeros([rows, config.d_model], DType::F32)?,
+            hidden: builder.zeros([rows, config.d_ff], DType::F32)?,
+            update: builder.zeros([rows, config.d_model], DType::F32)?,
+            logits: builder.zeros([rows, config.vocab], DType::F32)?,
+        })
+    }
+}
+
+struct BatchedStaticDecoderBuffers {
+    weights: HashMap<String, Tensor<CudaBackend>>,
+    kv: Vec<(Tensor<CudaBackend>, Tensor<CudaBackend>)>,
+    prefill_tokens: CudaSlice<i32>,
+    decode_tokens: CudaSlice<i32>,
+    position: CudaSlice<i32>,
+    prefill: BatchTensors,
+    decode: BatchTensors,
+}
+
+/// Fixed-shape batched prefill + decode with a shared KV cache.
+///
+/// The prefill graph processes `batch * prefill_len` tokens with causal
+/// attention in one replay. The decode graph processes one token per batch
+/// element at the shared position and advances it. Both graphs are captured
+/// once and replay without allocation.
+pub struct BatchedStaticDecoder {
+    config: DecoderConfig,
+    batch: usize,
+    prefill_len: usize,
+    ctx: CudaStaticContext,
+    buffers: BatchedStaticDecoderBuffers,
+    prefill_graph: CudaGraphRunner,
+    decode_graph: CudaGraphRunner,
+    host_position: usize,
+}
+
+impl BatchedStaticDecoder {
+    pub fn new(decoder: Decoder<CudaBackend>, batch: usize, prefill_len: usize) -> Result<Self> {
+        let config = decoder.config().clone();
+        if batch == 0 || prefill_len == 0 {
+            return Err(Error::invalid("batch and prefill_len must be positive"));
+        }
+        if prefill_len > config.max_seq {
+            return Err(Error::invalid("prefill_len exceeds max_seq"));
+        }
+        let backend = decoder
+            .parameters()
+            .first()
+            .map(|(_, tensor)| tensor.backend().clone())
+            .ok_or_else(|| Error::invalid("decoder has no parameters"))?;
+        let builder = StaticBuilder::new(backend.clone());
+        let mut weights = HashMap::new();
+        for (name, tensor) in decoder.parameters() {
+            weights.insert(name, builder.from_tensor(&tensor)?);
+        }
+        let head_dim = config.head_dim();
+        let mut kv = Vec::with_capacity(config.n_layers);
+        for _ in 0..config.n_layers {
+            kv.push((
+                builder.zeros(
+                    [batch, config.n_heads, config.max_seq, head_dim],
+                    DType::F32,
+                )?,
+                builder.zeros(
+                    [batch, config.n_heads, config.max_seq, head_dim],
+                    DType::F32,
+                )?,
+            ));
+        }
+        let buffers = BatchedStaticDecoderBuffers {
+            weights,
+            kv,
+            prefill_tokens: builder.i32_zeros(batch * prefill_len)?,
+            decode_tokens: builder.i32_zeros(batch)?,
+            position: builder.i32_scalar()?,
+            prefill: BatchTensors::allocate(&builder, batch * prefill_len, &config)?,
+            decode: BatchTensors::allocate(&builder, batch, &config)?,
+        };
+        let ctx = CudaStaticContext::new(backend.clone());
+        let mut buffers = buffers;
+        let prefill_graph = backend
+            .capture(|| enqueue_batched_prefill(&config, batch, prefill_len, &ctx, &mut buffers))?;
+        let decode_graph =
+            backend.capture(|| enqueue_batched_decode(&config, batch, &ctx, &mut buffers))?;
+        Ok(Self {
+            config,
+            batch,
+            prefill_len,
+            ctx,
+            buffers,
+            prefill_graph,
+            decode_graph,
+            host_position: 0,
+        })
+    }
+
+    pub fn batch(&self) -> usize {
+        self.batch
+    }
+
+    pub fn prefill_len(&self) -> usize {
+        self.prefill_len
+    }
+
+    pub fn config(&self) -> &DecoderConfig {
+        &self.config
+    }
+
+    pub fn position(&self) -> Result<usize> {
+        let position = self.ctx.read_i32(&self.buffers.position)?;
+        usize::try_from(position).map_err(|_| Error::invalid("negative static position"))
+    }
+
+    /// Run one fixed-length prefill for every batch element and return the
+    /// last-token logits as `[batch][vocab]`.
+    pub fn prefill(&mut self, tokens: &[u32]) -> Result<Vec<Vec<f32>>> {
+        if tokens.len() != self.batch * self.prefill_len {
+            return Err(Error::invalid("prefill token count mismatch"));
+        }
+        let tokens: Vec<i32> = tokens
+            .iter()
+            .map(|&token| {
+                i32::try_from(token).map_err(|_| Error::invalid("token id does not fit i32"))
+            })
+            .collect::<Result<_>>()?;
+        self.ctx
+            .write_i32_slice(&mut self.buffers.prefill_tokens, &tokens)?;
+        self.prefill_graph.replay()?;
+        self.host_position = self.prefill_len;
+        self.last_prefill_logits()
+    }
+
+    /// Run one batched decode step and return `[batch][vocab]` logits.
+    pub fn decode(&mut self, tokens: &[u32]) -> Result<Vec<Vec<f32>>> {
+        if tokens.len() != self.batch {
+            return Err(Error::invalid("decode token count mismatch"));
+        }
+        if self.host_position >= self.config.max_seq {
+            return Err(Error::invalid("static decode position exceeds max_seq"));
+        }
+        let tokens: Vec<i32> = tokens
+            .iter()
+            .map(|&token| {
+                i32::try_from(token).map_err(|_| Error::invalid("token id does not fit i32"))
+            })
+            .collect::<Result<_>>()?;
+        self.ctx
+            .write_i32_slice(&mut self.buffers.decode_tokens, &tokens)?;
+        self.decode_graph.replay()?;
+        self.host_position += 1;
+        self.decode_logits()
+    }
+
+    pub fn last_prefill_logits(&self) -> Result<Vec<Vec<f32>>> {
+        let logits = self.ctx.read_f32_vec(&self.buffers.prefill.logits)?;
+        let vocab = self.config.vocab;
+        Ok((0..self.batch)
+            .map(|b| {
+                let row = (b + 1) * self.prefill_len - 1;
+                logits[row * vocab..(row + 1) * vocab].to_vec()
+            })
+            .collect())
+    }
+
+    pub fn decode_logits(&self) -> Result<Vec<Vec<f32>>> {
+        let logits = self.ctx.read_f32_vec(&self.buffers.decode.logits)?;
+        let vocab = self.config.vocab;
+        Ok((0..self.batch)
+            .map(|b| logits[b * vocab..(b + 1) * vocab].to_vec())
+            .collect())
+    }
+
+    pub fn synchronize(&self) -> Result<()> {
+        self.ctx.backend().synchronize()
+    }
+}
+
+fn weight<'a>(
+    weights: &'a HashMap<String, Tensor<CudaBackend>>,
+    name: &str,
+) -> Result<&'a Tensor<CudaBackend>> {
+    weights
+        .get(name)
+        .ok_or_else(|| Error::invalid(format!("missing decoder weight {name}")))
+}
+
+fn enqueue_batched_prefill(
+    config: &DecoderConfig,
+    batch: usize,
+    prefill_len: usize,
+    ctx: &CudaStaticContext,
+    buffers: &mut BatchedStaticDecoderBuffers,
+) -> Result<()> {
+    let d_model = config.d_model;
+    let head_dim = config.head_dim();
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    let rows = batch * prefill_len;
+    let BatchedStaticDecoderBuffers {
+        weights,
+        kv,
+        prefill_tokens,
+        position,
+        prefill,
+        ..
+    } = buffers;
+
+    ctx.embedding_batch(
+        prefill_tokens,
+        weight(weights, "tok_emb")?,
+        &mut prefill.x,
+        rows,
+        d_model,
+    )?;
+    for (layer, (k_cache, v_cache)) in kv.iter_mut().enumerate() {
+        let prefix = format!("layers.{layer}");
+        let name = |suffix: &str| format!("{prefix}.{suffix}");
+        ctx.layer_norm_batch(
+            &prefill.x,
+            weight(weights, &name("ln1_g"))?,
+            weight(weights, &name("ln1_b"))?,
+            &mut prefill.norm,
+            rows,
+            d_model,
+            config.eps as f32,
+        )?;
+        ctx.linear_into(
+            &prefill.norm,
+            weight(weights, &name("wq"))?,
+            Some(weight(weights, &name("bq"))?),
+            &mut prefill.q,
+        )?;
+        ctx.linear_into(
+            &prefill.norm,
+            weight(weights, &name("wk"))?,
+            Some(weight(weights, &name("bk"))?),
+            &mut prefill.k,
+        )?;
+        ctx.linear_into(
+            &prefill.norm,
+            weight(weights, &name("wv"))?,
+            Some(weight(weights, &name("bv"))?),
+            &mut prefill.v,
+        )?;
+        ctx.kv_prefill(
+            &prefill.k,
+            &prefill.v,
+            k_cache,
+            v_cache,
+            batch,
+            prefill_len,
+            config.n_heads,
+            head_dim,
+            config.max_seq,
+        )?;
+        ctx.attention_prefill(
+            &prefill.q,
+            k_cache,
+            v_cache,
+            &mut prefill.attn,
+            batch,
+            prefill_len,
+            config.n_heads,
+            config.max_seq,
+            head_dim,
+            scale,
+        )?;
+        ctx.linear_into(
+            &prefill.attn,
+            weight(weights, &name("wo"))?,
+            Some(weight(weights, &name("bo"))?),
+            &mut prefill.update,
+        )?;
+        ctx.residual_inplace(&mut prefill.x, &prefill.update, rows * d_model)?;
+
+        ctx.layer_norm_batch(
+            &prefill.x,
+            weight(weights, &name("ln2_g"))?,
+            weight(weights, &name("ln2_b"))?,
+            &mut prefill.norm,
+            rows,
+            d_model,
+            config.eps as f32,
+        )?;
+        ctx.linear_into(
+            &prefill.norm,
+            weight(weights, &name("w1"))?,
+            Some(weight(weights, &name("b1"))?),
+            &mut prefill.hidden,
+        )?;
+        ctx.gelu_inplace(&mut prefill.hidden, rows * config.d_ff)?;
+        ctx.linear_into(
+            &prefill.hidden,
+            weight(weights, &name("w2"))?,
+            Some(weight(weights, &name("b2"))?),
+            &mut prefill.update,
+        )?;
+        ctx.residual_inplace(&mut prefill.x, &prefill.update, rows * d_model)?;
+    }
+    ctx.layer_norm_batch(
+        &prefill.x,
+        weight(weights, "ln_f_g")?,
+        weight(weights, "ln_f_b")?,
+        &mut prefill.norm,
+        rows,
+        d_model,
+        config.eps as f32,
+    )?;
+    ctx.linear_into(
+        &prefill.norm,
+        weight(weights, "lm_head")?,
+        None,
+        &mut prefill.logits,
+    )?;
+    ctx.set_position(position, prefill_len as i32)?;
+    Ok(())
+}
+
+fn enqueue_batched_decode(
+    config: &DecoderConfig,
+    batch: usize,
+    ctx: &CudaStaticContext,
+    buffers: &mut BatchedStaticDecoderBuffers,
+) -> Result<()> {
+    let d_model = config.d_model;
+    let head_dim = config.head_dim();
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    let BatchedStaticDecoderBuffers {
+        weights,
+        kv,
+        decode_tokens,
+        position,
+        decode,
+        ..
+    } = buffers;
+
+    ctx.embedding_batch(
+        decode_tokens,
+        weight(weights, "tok_emb")?,
+        &mut decode.x,
+        batch,
+        d_model,
+    )?;
+    for (layer, (k_cache, v_cache)) in kv.iter_mut().enumerate() {
+        let prefix = format!("layers.{layer}");
+        let name = |suffix: &str| format!("{prefix}.{suffix}");
+        ctx.layer_norm_batch(
+            &decode.x,
+            weight(weights, &name("ln1_g"))?,
+            weight(weights, &name("ln1_b"))?,
+            &mut decode.norm,
+            batch,
+            d_model,
+            config.eps as f32,
+        )?;
+        ctx.linear_into(
+            &decode.norm,
+            weight(weights, &name("wq"))?,
+            Some(weight(weights, &name("bq"))?),
+            &mut decode.q,
+        )?;
+        ctx.linear_into(
+            &decode.norm,
+            weight(weights, &name("wk"))?,
+            Some(weight(weights, &name("bk"))?),
+            &mut decode.k,
+        )?;
+        ctx.linear_into(
+            &decode.norm,
+            weight(weights, &name("wv"))?,
+            Some(weight(weights, &name("bv"))?),
+            &mut decode.v,
+        )?;
+        ctx.kv_append_batch(
+            &decode.k,
+            &decode.v,
+            k_cache,
+            v_cache,
+            position,
+            batch,
+            config.n_heads,
+            head_dim,
+            config.max_seq,
+        )?;
+        ctx.attention_batch_decode(
+            &decode.q,
+            k_cache,
+            v_cache,
+            position,
+            &mut decode.attn,
+            batch,
+            config.n_heads,
+            config.max_seq,
+            head_dim,
+            scale,
+        )?;
+        ctx.linear_into(
+            &decode.attn,
+            weight(weights, &name("wo"))?,
+            Some(weight(weights, &name("bo"))?),
+            &mut decode.update,
+        )?;
+        ctx.residual_inplace(&mut decode.x, &decode.update, batch * d_model)?;
+
+        ctx.layer_norm_batch(
+            &decode.x,
+            weight(weights, &name("ln2_g"))?,
+            weight(weights, &name("ln2_b"))?,
+            &mut decode.norm,
+            batch,
+            d_model,
+            config.eps as f32,
+        )?;
+        ctx.linear_into(
+            &decode.norm,
+            weight(weights, &name("w1"))?,
+            Some(weight(weights, &name("b1"))?),
+            &mut decode.hidden,
+        )?;
+        ctx.gelu_inplace(&mut decode.hidden, batch * config.d_ff)?;
+        ctx.linear_into(
+            &decode.hidden,
+            weight(weights, &name("w2"))?,
+            Some(weight(weights, &name("b2"))?),
+            &mut decode.update,
+        )?;
+        ctx.residual_inplace(&mut decode.x, &decode.update, batch * d_model)?;
+    }
+    ctx.layer_norm_batch(
+        &decode.x,
+        weight(weights, "ln_f_g")?,
+        weight(weights, "ln_f_b")?,
+        &mut decode.norm,
+        batch,
+        d_model,
+        config.eps as f32,
+    )?;
+    ctx.linear_into(
+        &decode.norm,
+        weight(weights, "lm_head")?,
+        None,
+        &mut decode.logits,
+    )?;
+    ctx.bump_step(position)?;
+    Ok(())
 }
