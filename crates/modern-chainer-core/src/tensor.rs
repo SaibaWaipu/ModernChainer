@@ -86,7 +86,7 @@ impl<B: Backend> Tensor<B> {
                 bytes.len()
             )));
         }
-        let mut storage = backend.alloc(bytes.len())?;
+        let mut storage = backend.alloc_for(bytes.len(), dtype)?;
         backend.copy_from_host(&mut storage, bytes)?;
         let strides = shape.contiguous_strides();
         Self::from_storage(backend, storage, dtype, shape, strides, 0)
@@ -129,7 +129,7 @@ impl<B: Backend> Tensor<B> {
     pub fn zeros(backend: B, shape: impl Into<Shape>, dtype: DType) -> Result<Self> {
         let shape = shape.into();
         let bytes = shape.numel() * dtype.size_in_bytes();
-        let storage = backend.alloc_zeroed(bytes)?;
+        let storage = backend.alloc_zeroed_for(bytes, dtype)?;
         let strides = shape.contiguous_strides();
         Self::from_storage(backend, storage, dtype, shape, strides, 0)
     }

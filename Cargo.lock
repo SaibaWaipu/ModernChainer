@@ -59,7 +59,7 @@ version = "0.38.0+1.3.281"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bb44936d800fea8f016d7f2311c6a4f97aebd5dc86f09906139ec848cf3a46f"
 dependencies = [
- "libloading",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -275,6 +275,15 @@ name = "crunchy"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
+
+[[package]]
+name = "cudarc"
+version = "0.19.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7359bf1de037ddada72729c3acec9b040f3468400c6e9e740b01ba0cd2e89562"
+dependencies = [
+ "libloading 0.9.0",
+]
 
 [[package]]
 name = "dispatch2"
@@ -606,6 +615,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "libloading"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
+
+[[package]]
 name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -640,7 +659,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "modern-chainer"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytemuck",
  "criterion",
@@ -659,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "modern-chainer-autograd"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytemuck",
  "modern-chainer-core",
@@ -669,7 +688,7 @@ dependencies = [
 
 [[package]]
 name = "modern-chainer-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytemuck",
  "thiserror 2.0.21",
@@ -677,7 +696,7 @@ dependencies = [
 
 [[package]]
 name = "modern-chainer-cpu"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytemuck",
  "gemm",
@@ -687,18 +706,28 @@ dependencies = [
 
 [[package]]
 name = "modern-chainer-cuda"
-version = "0.4.0"
+version = "0.5.0"
+dependencies = [
+ "bytemuck",
+ "cudarc",
+ "modern-chainer-autograd",
+ "modern-chainer-core",
+ "modern-chainer-cpu",
+ "modern-chainer-nn",
+ "modern-chainer-optim",
+ "serial_test",
+]
 
 [[package]]
 name = "modern-chainer-data"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "modern-chainer-core",
 ]
 
 [[package]]
 name = "modern-chainer-llm"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "modern-chainer-core",
  "modern-chainer-cpu",
@@ -707,7 +736,7 @@ dependencies = [
 
 [[package]]
 name = "modern-chainer-nn"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "modern-chainer-autograd",
  "modern-chainer-core",
@@ -716,7 +745,7 @@ dependencies = [
 
 [[package]]
 name = "modern-chainer-optim"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "modern-chainer-autograd",
  "modern-chainer-core",
@@ -726,7 +755,7 @@ dependencies = [
 
 [[package]]
 name = "modern-chainer-python"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "modern-chainer",
  "modern-chainer-autograd",
@@ -739,7 +768,7 @@ dependencies = [
 
 [[package]]
 name = "modern-chainer-run"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "modern-chainer-autograd",
  "modern-chainer-core",
@@ -748,7 +777,7 @@ dependencies = [
 
 [[package]]
 name = "modern-chainer-serial"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "modern-chainer-core",
  "modern-chainer-cpu",
@@ -757,7 +786,7 @@ dependencies = [
 
 [[package]]
 name = "modern-chainer-vulkan"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytemuck",
  "modern-chainer-autograd",
@@ -1625,7 +1654,7 @@ dependencies = [
  "gpu-allocator",
  "hashbrown 0.17.1",
  "libc",
- "libloading",
+ "libloading 0.8.9",
  "log",
  "naga",
  "naga-types",

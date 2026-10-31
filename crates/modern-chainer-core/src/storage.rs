@@ -1,4 +1,5 @@
 use crate::device::Device;
+use crate::dtype::DType;
 use crate::error::{Error, Result};
 use crate::shape::Shape;
 use crate::tensor::Tensor;
@@ -287,6 +288,16 @@ pub trait Backend: Clone + Send + Sync + 'static {
 
     fn alloc(&self, bytes: usize) -> Result<Self::Storage>;
     fn alloc_zeroed(&self, bytes: usize) -> Result<Self::Storage>;
+
+    /// Allocate storage for a specific dtype.  Backends that need typed device
+    /// allocations override this; the host backend keeps the byte allocation.
+    fn alloc_for(&self, bytes: usize, _dtype: DType) -> Result<Self::Storage> {
+        self.alloc(bytes)
+    }
+
+    fn alloc_zeroed_for(&self, bytes: usize, _dtype: DType) -> Result<Self::Storage> {
+        self.alloc_zeroed(bytes)
+    }
 
     fn copy_from_host(&self, dst: &mut Self::Storage, src: &[u8]) -> Result<()>;
     fn copy_to_host(&self, src: &Self::Storage, dst: &mut [u8]) -> Result<()>;
