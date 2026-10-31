@@ -1,0 +1,199 @@
+use modern_chainer_autograd::Variable;
+use modern_chainer_autograd::ops as F;
+use modern_chainer_core::{Backend, DType, Ops, Shape, Tensor};
+use modern_chainer_cpu::{CpuBackend, CpuTensorExt};
+use modern_chainer_nn::{Linear, Module};
+use modern_chainer_optim::{Optimizer, SGD, zero_grad};
+use modern_chainer_vulkan::{VulkanBackend, is_available, probe};
+use serial_test::serial;
+
+fn host<B: Backend>(tensor: &Tensor<B>) -> Vec<f32> {
+    let bytes = tensor.to_bytes().unwrap();
+    bytemuck::cast_slice(&bytes).to_vec()
+}
+
+fn assert_close(actual: &[f32], expected: &[f32], tol: f32) {
+    assert_eq!(actual.len(), expected.len());
+    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+        assert!((a - e).abs() <= tol, "element {i}: actual {a} expected {e}");
+    }
+}
+
+fn vf(backend: &VulkanBackend, data: &[f32], shape: impl Into<Shape>) -> Tensor<VulkanBackend> {
+    Tensor::from_f32(backend.clone(), data, shape).unwrap()
+}
+
+fn cf(data: &[f32], shape: impl Into<Shape>) -> Tensor<CpuBackend> {
+    Tensor::from_f32(CpuBackend::new(), data, shape).unwrap()
+}
+
+#[test]
+#[serial]
+fn probe_reports_adapters() {
+    let capability = probe();
+    eprintln!("vulkan capability: {capability:?}");
+}
+
+#[test]
+#[serial]
+fn elementwise_and_matmul_match_cpu() {
+    if !is_available() {
+        eprintln!("skipping: no Vulkan adapter");
+        return;
+    }
+    let backend = VulkanBackend::new().unwrap();
+    let a_data = [0.5, -1.0, 2.0, 3.0, -0.5, 0.25];
+    let b_data = [1.5, 0.5, -2.0, 0.25, 4.0, -1.0];
+    let a = vf(&backend, &a_data, [2, 3]);
+    let b = vf(&backend, &b_data, [2, 3]);
+    let ca = cf(&a_data, [2, 3]);
+    let cb = cf(&b_data, [2, 3]);
+
+    assert_close(
+        &host(&backend.ops().add(&a, &b).unwrap()),
+        &host(&CpuBackend::new().ops().add(&ca, &cb).unwrap()),
+        1e-5,
+    );
+    assert_close(
+        &host(&backend.ops().mul(&a, &b).unwrap()),
+        &host(&CpuBackend::new().ops().mul(&ca, &cb).unwrap()),
+        1e-5,
+    );
+    assert_close(
+        &host(&backend.ops().relu(&a).unwrap()),
+        &host(&CpuBackend::new().ops().relu(&ca).unwrap()),
+        1e-5,
+    );
+    assert_close(
+        &host(&backend.ops().scale(&a, -2.5).unwrap()),
+        &host(&CpuBackend::new().ops().scale(&ca, -2.5).unwrap()),
+        1e-5,
+    );
+
+    let m_data: Vec<f32> = (0..35).map(|i| (i as f32) * 0.1 - 1.0).collect();
+    let n_data: Vec<f32> = (0..21).map(|i| 1.0 - (i as f32) * 0.07).collect();
+    let m = vf(&backend, &m_data, [5, 7]);
+    let n = vf(&backend, &n_data, [7, 3]);
+    assert_close(
+        &host(&backend.ops().matmul(&m, &n).unwrap()),
+        &host(
+            &CpuBackend::new()
+                .ops()
+                .matmul(&cf(&m_data, [5, 7]), &cf(&n_data, [7, 3]))
+                .unwrap(),
+        ),
+        1e-4,
+    );
+
+    let t_data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let t = vf(&backend, &t_data, [2, 3]);
+    assert_close(
+        &host(&backend.ops().transpose2d(&t).unwrap()),
+        &host(
+            &CpuBackend::new()
+                .ops()
+                .transpose2d(&cf(&t_data, [2, 3]))
+                .unwrap(),
+        ),
+        1e-5,
+    );
+}
+
+#[test]
+#[serial]
+fn bias_broadcast_matches_cpu() {
+    if !is_available() {
+        eprintln!("skipping: no Vulkan adapter");
+        return;
+    }
+    let backend = VulkanBackend::new().unwrap();
+    let x = vf(&backend, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3]);
+    let b = vf(&backend, &[0.5, -1.0, 2.0], [3]);
+    let expected = CpuBackend::new()
+        .ops()
+        .add(
+            &cf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3]),
+            &cf(&[0.5, -1.0, 2.0], [3]),
+        )
+        .unwrap();
+    assert_close(
+        &host(&backend.ops().add(&x, &b).unwrap()),
+        &host(&expected),
+        1e-5,
+    );
+}
+
+#[test]
+#[serial]
+fn reductions_fall_back_to_cpu() {
+    if !is_available() {
+        eprintln!("skipping: no Vulkan adapter");
+        return;
+    }
+    let backend = VulkanBackend::new().unwrap();
+    let x = vf(&backend, &[1.0, 2.0, 3.0, 4.0], [2, 2]);
+    let sum = backend.ops().sum_all(&x).unwrap();
+    assert!((backend.ops().to_scalar(&sum).unwrap() - 10.0).abs() < 1e-5);
+
+    let reduced = backend.ops().sum_to(&x, &Shape::new([2])).unwrap();
+    assert_eq!(reduced.shape().dims(), &[2]);
+    assert_close(&host(&reduced), &[4.0, 6.0], 1e-5);
+
+    let logits = vf(&backend, &[0.2, 1.3, -0.4, 0.5, -1.0, 0.8], [2, 3]);
+    let target = Tensor::from_bytes(
+        backend.clone(),
+        &[1i64.to_ne_bytes(), 2i64.to_ne_bytes()].concat(),
+        [2],
+        DType::I64,
+    )
+    .unwrap();
+    let loss = backend
+        .ops()
+        .softmax_cross_entropy(&logits, &target)
+        .unwrap();
+    let cpu_loss = CpuBackend::new()
+        .ops()
+        .softmax_cross_entropy(
+            &cf(&[0.2, 1.3, -0.4, 0.5, -1.0, 0.8], [2, 3]),
+            &Tensor::from_slice(CpuBackend::new(), &[1i64, 2], [2], DType::I64).unwrap(),
+        )
+        .unwrap();
+    assert!(
+        (backend.ops().to_scalar(&loss).unwrap() - cpu_loss.scalar_f64().unwrap()).abs() < 1e-5
+    );
+}
+
+#[test]
+#[serial]
+fn linear_training_step_reduces_loss() {
+    if !is_available() {
+        eprintln!("skipping: no Vulkan adapter");
+        return;
+    }
+    let backend = VulkanBackend::new().unwrap();
+    let weight = Variable::new(Tensor::from_f32(backend.clone(), &[0.2, -0.4], [1, 2]).unwrap());
+    let bias = Variable::new(Tensor::from_f32(backend.clone(), &[0.1], [1]).unwrap());
+    let model = Linear::from_parts(weight, Some(bias), 2, 1).unwrap();
+    let x = Variable::new(
+        Tensor::from_f32(backend.clone(), &[1.0, 2.0, 2.0, 1.0, 3.0, 1.0], [3, 2]).unwrap(),
+    );
+    let target =
+        Variable::constant(Tensor::from_f32(backend.clone(), &[3.0, 4.0, 5.0], [3, 1]).unwrap());
+    let mut optimizer = SGD::new(0.05);
+
+    let mut first = None;
+    let mut last = 0.0;
+    for _ in 0..100 {
+        let prediction = model.forward(&x).unwrap();
+        let diff = F::sub(&prediction, &target).unwrap();
+        let loss = F::mean(&F::mul(&diff, &diff).unwrap()).unwrap();
+        last = loss.data().backend().ops().to_scalar(&loss.data()).unwrap();
+        first.get_or_insert(last);
+        zero_grad(&model.parameters());
+        loss.backward().unwrap();
+        optimizer.update(&model.parameters()).unwrap();
+    }
+    let first = first.unwrap();
+    eprintln!("vulkan linear loss: {first} -> {last}");
+    assert!(last < first, "loss did not decrease: {first} -> {last}");
+}

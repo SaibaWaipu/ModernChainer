@@ -1,0 +1,15 @@
+[package]
+name = "modern-chainer-cpu"
+description = "CPU backend for Modern Chainer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+modern-chainer-core.workspace = true
+bytemuck.workspace = true
+rayon.workspace = true
+gemm = { version = "0.19", features = ["rayon", "std"] }

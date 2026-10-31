@@ -1,0 +1,12 @@
+[package]
+name = "modern-chainer-data"
+description = "Datasets, samplers and batchers for Modern Chainer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+modern-chainer-core.workspace = true

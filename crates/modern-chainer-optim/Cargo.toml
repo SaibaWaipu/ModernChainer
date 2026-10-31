@@ -1,0 +1,17 @@
+[package]
+name = "modern-chainer-optim"
+description = "Optimizers for Modern Chainer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+modern-chainer-core.workspace = true
+modern-chainer-autograd.workspace = true
+modern-chainer-nn.workspace = true
+
+[dev-dependencies]
+modern-chainer-cpu.workspace = true

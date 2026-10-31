@@ -1,0 +1,28 @@
+[package]
+name = "modern-chainer"
+description = "A modern revival of Chainer: define-by-run deep learning with a Rust core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+modern-chainer-core.workspace = true
+modern-chainer-cpu.workspace = true
+modern-chainer-autograd.workspace = true
+modern-chainer-nn.workspace = true
+modern-chainer-optim.workspace = true
+modern-chainer-data.workspace = true
+modern-chainer-serial.workspace = true
+modern-chainer-cuda.workspace = true
+modern-chainer-vulkan.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+bytemuck.workspace = true
+
+[[bench]]
+name = "cpu_ops"
+harness = false

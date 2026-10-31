@@ -1,0 +1,27 @@
+[package]
+name = "modern-chainer-vulkan"
+description = "Vulkan compute backend for Modern Chainer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["wgpu"]
+wgpu = ["dep:wgpu", "dep:pollster"]
+
+[dependencies]
+modern-chainer-core.workspace = true
+modern-chainer-cpu.workspace = true
+bytemuck.workspace = true
+thiserror.workspace = true
+wgpu = { version = "30", optional = true, default-features = false, features = ["vulkan", "wgsl", "std"] }
+pollster = { version = "1.0", optional = true }
+
+[dev-dependencies]
+modern-chainer-autograd.workspace = true
+modern-chainer-nn.workspace = true
+modern-chainer-optim.workspace = true
+serial_test = "4.0"

@@ -1,0 +1,26 @@
+[package]
+name = "modern-chainer-python"
+description = "Python bindings for Modern Chainer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "_chainer"
+crate-type = ["cdylib"]
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+pyo3.workspace = true
+modern-chainer.workspace = true
+modern-chainer-core.workspace = true
+modern-chainer-autograd.workspace = true
+modern-chainer-nn.workspace = true
+modern-chainer-optim.workspace = true
+modern-chainer-cpu.workspace = true
