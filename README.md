@@ -26,7 +26,7 @@ class MLP(chainer.Chain):
         return self.l2(F.relu(self.l1(x)))
 ```
 
-## ステータス（v0.5.0）
+## ステータス（v0.6.0）
 
 | 領域 | 状態 |
 |---|---|
@@ -37,7 +37,7 @@ class MLP(chainer.Chain):
 | Batched decode | 動作: `PagedBatchRunner` + batched paged attention |
 | Continuous batching | 動作: `RequestTable` / `BatchPlan`（論理バッチ） |
 | Speculative decoding | 動作: greedy の fork/verify/commit 参照実装 |
-| CUDA バックエンド | 動作: NVRTC + cuBLAS / cuBLASLt（F32/TF32/F16/BF16 compute type、bias+GELU 融合）、メモリプール、CUDA Graph、wide paged attention |
+| CUDA バックエンド | 動作: NVRTC + cuBLAS / cuBLASLt、F32/TF32/F16/BF16 compute type、**AMP（autocast + GradScaler）**、メモリプール、CUDA Graph、wide paged attention |
 | Python バインディング | コアサブセット: `Tensor`、`Variable`、`F.*`、`L.Linear`、`SGD`/`Adam`、`Chain` |
 | シリアライズ | ネイティブ `.mcn`、Chainer `.npz` は計画中 |
 | Trainer / Updater / Extensions | 計画中 |
@@ -82,7 +82,18 @@ cargo run --release --example cuda_matmul
 ```rust
 let gpu = CudaBackend::new(0)?;
 gpu.set_compute_type(ComputeType::F16); // F32 / Tf32 / F16 / Bf16
+
+// AMP: GEMM は f16/bf16、LayerNorm / Softmax / 損失は f32
+let loss = autocast(DType::F16, || {
+    let y = model.forward(&x)?;
+    F::mean(&F::mul(&F::sub(&y, &target)?, &F::sub(&y, &target)?)?)
+})??;
+let scaled = scaler.scale_loss(&loss)?;
+scaled.backward()?;
+scaler.step(&mut optimizer, &params)?;
 ```
+
+`GradScaler` が loss scaling、grad の unscale、inf/nan 検出、scale の増減を担当します。autocast は GEMM 系のみ低精度化し、LayerNorm / Softmax / reduction は f32 のままです。
 
 ## クイックスタート — Python
 
@@ -263,7 +274,7 @@ Vulkan テストは利用可能なアダプタ（NVIDIA / AMD / Intel / Mesa lav
 
 - CUDA のネイティブ実装は elementwise / reduction / matmul / linear / Adam / softmax CE / embedding / layer_norm / attention / paged attention まで。汎用 `sum_to`（bias 以外）のみ CPU フォールバックです。
 - CUDA Graph は preallocated バッファ前提です（`graph_matmul` / `graph_adam`）。メモリプールは実装済みですが、任意の `Run` をキャプチャするには in-place な状態更新経路が必要で、未対応です。
-- F16/BF16 は **linear/matmul の compute type** として対応しています。モデル全体の dtype 切替や AMP（loss scaling 含む）は未対応で、呼び出しごとに f32 ↔ f16/bf16 をキャストします。
+- F16/BF16 は **compute type** と **autocast AMP** に対応しています。autocast は GEMM 系（linear / matmul）を低精度化し、LayerNorm / Softmax / reduction は f32 のままです。モデル全体を f16/bf16 dtype にする経路は未対応です。
 - wide paged attention は block-per-query の CUDA カーネルです。
 - Python の CUDA テンソル API、`Run` / `PagedBatchRunner` / `Trainer` は未公開（Rust ファースト）。
 - Paged COW はテンソル単位。ブロック単位の in-place COW と CUDA paged-attention カーネルは今後。

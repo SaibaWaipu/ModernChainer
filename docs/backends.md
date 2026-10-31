@@ -147,7 +147,17 @@ steps.
 | F16 | cast x/w/bias to f16, cuBLASLt f16 GEMM, cast output to f32 |
 | BF16 | same with bf16 |
 
-F16/BF16 are compute types for linear/matmul, not a full-model dtype or AMP.
+### AMP (autocast + GradScaler)
+
+`autocast(F16 | BF16, || ...)` is a thread-local policy. CUDA lowers
+`linear`, `linear_activation` and `matmul` to mixed f16/bf16 cuBLASLt
+(tensor-core friendly on supported hardware); layer_norm, softmax, attention,
+reductions and the loss stay f32.
+
+`GradScaler` scales the loss before backward, unscales gradients before the
+optimizer step, skips the step on inf/nan, and grows/backs off the scale. The
+current policy is GEMM-focused mixed precision; a full-model f16/bf16 dtype is
+not implemented.
 
 ### CUDA Graph
 
@@ -178,7 +188,7 @@ Tests skip when no CUDA driver/runtime is available.
 
 ### Next
 
-- Full-model f16/bf16 dtype and AMP (loss scaling, master weights).
+- Full-model f16/bf16 dtype (all ops) and master-weight optimizer state.
 - Run-level graph capture with an in-place state path.
 - Further paged-attention/flash-decode tuning and TTFT/tokens/s benchmarks.
 - Run-level CUDA Graph capture with a memory pool.

@@ -33,7 +33,7 @@ class MLP(chainer.Chain):
         return self.l2(F.relu(self.l1(x)))
 ```
 
-## Status (v0.5.0)
+## Status (v0.6.0)
 
 | Area | Status |
 |---|---|
@@ -44,7 +44,7 @@ class MLP(chainer.Chain):
 | Batched decode | Working: `PagedBatchRunner` + batched paged attention |
 | Continuous batching | Working: `RequestTable` / `BatchPlan` (logical batching) |
 | Speculative decoding | Working: greedy fork/verify/commit reference |
-| CUDA backend | Working: NVRTC + cuBLAS/cuBLASLt (F32/TF32/F16/BF16 compute types, bias+GELU fusion), memory pool, CUDA Graph, wide paged attention |
+| CUDA backend | Working: NVRTC + cuBLAS/cuBLASLt, F32/TF32/F16/BF16 compute types, **AMP (autocast + GradScaler)**, memory pool, CUDA Graph, wide paged attention |
 | Python bindings | Core subset: `Tensor`, `Variable`, `F.*`, `L.Linear`, `SGD`/`Adam`, `Chain` |
 | Serialization | Native `.mcn`; Chainer `.npz` reader planned |
 | Trainer / Updater / Extensions | Planned |
@@ -95,7 +95,20 @@ the GEMM precision.
 ```rust
 let gpu = CudaBackend::new(0)?;
 gpu.set_compute_type(ComputeType::F16); // F32 / Tf32 / F16 / Bf16
+
+// AMP: GEMMs run in f16/bf16; LayerNorm/Softmax/loss stay f32.
+let loss = autocast(DType::F16, || {
+    let y = model.forward(&x)?;
+    F::mean(&F::mul(&F::sub(&y, &target)?, &F::sub(&y, &target)?)?)
+})??;
+let scaled = scaler.scale_loss(&loss)?;
+scaled.backward()?;
+scaler.step(&mut optimizer, &params)?;
 ```
+
+`GradScaler` handles loss scaling, gradient unscaling, inf/nan detection and
+scale growth/backoff. Autocast lowers GEMM-heavy ops only; LayerNorm, Softmax
+and reductions remain f32.
 
 ## Quick start — Python
 
@@ -300,8 +313,9 @@ lavapipe) and skip cleanly when no Vulkan loader is present.
 - CUDA Graph requires preallocated buffers (`graph_matmul` / `graph_adam`);
   the memory pool exists, but arbitrary `Run` capture needs an in-place state
   path, not yet done.
-- F16/BF16 are supported as linear/matmul compute types, not as a full model
-  dtype or AMP; each call casts f32 to f16/bf16 and back.
+- F16/BF16 are supported as compute types and via autocast AMP. Autocast lowers
+  GEMM-heavy ops; LayerNorm/Softmax/reductions stay f32. A full-model
+  f16/bf16 dtype path is not implemented.
 - Wide paged attention uses a block-per-query CUDA kernel.
 - Python does not expose CUDA tensors, `Run`, `PagedBatchRunner` or `Trainer`
   yet (Rust-first).

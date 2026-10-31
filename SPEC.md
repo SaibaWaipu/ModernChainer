@@ -1,6 +1,6 @@
 # Modern Chainer — Specification
 
-Status: v0.5.0 implementation. This document records the product intent, the
+Status: v0.6.0 implementation. This document records the product intent, the
 implemented surface, and the deliberately deferred work.
 
 ## 1. Vision
@@ -211,6 +211,10 @@ sampling.
 - `ComputeType` F32/TF32/F16/BF16. F32 uses cuBLAS+bias; TF32 uses cuBLASLt;
   F16/BF16 cast f32 inputs, run cuBLASLt mixed GEMM and cast back.
 - A per-runtime CUDA memory pool reuses f32/i64/u8/f16/bf16 buffers.
+- AMP: `autocast(F16/BF16)` lowers linear/matmul/linear_activation while
+  LayerNorm, Softmax, reductions and the loss stay f32. `GradScaler` provides
+  loss scaling, gradient unscaling, inf/nan detection and dynamic scale
+  growth/backoff.
 - CUDA Graph capture/replay for preallocated matmul (`graph_matmul`) and Adam
   (`graph_adam`).
 - Wide paged attention: block-per-query kernels for single and batched decode.
@@ -359,6 +363,8 @@ docs/                      architecture, backends, API, benchmarks, roadmap
   training loop against CPU. Graph replay is checked against eager matmul/Adam.
 - F16/BF16 compute types compared against F32 linear/matmul within tolerance;
   a BF16 decoder logit comparison covers the mixed path.
+- Autocast decoder parity and an AMP training loop with `GradScaler` on CUDA;
+  scaler unscale/growth/backoff and inf/nan skipping are tested on CPU.
 - Memory-pool reuse and zeroed reuse are tested.
 - `cargo fmt`, `cargo clippy -D warnings`, `cargo test` in CI.
 
