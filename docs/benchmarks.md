@@ -122,36 +122,49 @@ Method:
 
 ### Batched static prefill / decode
 
-Fixed-shape batched decoder, F32, B=8, prompt length 16, 32 decoded tokens,
-context 16→48, random weights, 4 layers / d_model 64 / 4 heads. Both sides copy
-the `[batch, vocab]` logits to the host and run argmax every decode step, then
-copy the next tokens back. TTFT is the batched prefill; decode throughput
-includes that host loop.
+Fixed-shape batched decoder, F32, B=8, 32 decoded tokens, random weights,
+4 layers / d_model 64 / 4 heads, RTX 2070 SUPER. PyTorch is 2.11.0+cu128 eager
+with explicit matmul/softmax attention. Both sides copy `[batch, vocab]` logits
+to the host and run argmax each decode step, then copy tokens back; decode
+throughput includes that host loop.
 
-| Metric | Modern Chainer | PyTorch 2.11 eager | Ratio |
+| Metric | Modern Chainer | PyTorch eager | Ratio |
 |---|---:|---:|---:|
-| TTFT (B=8 prefill) | 0.84–0.97 ms | 1.43 ms | 1.5–1.7× |
-| prefill throughput | 132k–152k tok/s | 89k tok/s | 1.5–1.7× |
-| decode throughput (B=8) | 12.8k tok/s | 5.5k–7.0k tok/s | 1.8–2.3× |
-| per-sequence decode | ~1.6k tok/s | ~0.7k–0.9k tok/s | 1.8–2.3× |
+| TTFT, prefill 16 | 0.26 ms | 1.45 ms | 5.5× |
+| prefill throughput, 16 | 487k tok/s | 88k tok/s | 5.5× |
+| decode, context 16→48 | 40.9k tok/s | 6.3k tok/s | 6.5× |
+| TTFT, prefill 512 | 3.04 ms | 5.46 ms | 1.8× |
+| prefill throughput, 512 | 1.35M tok/s | 750k tok/s | 1.8× |
+| decode, context 512→544 | 36.2k tok/s | 6.9k tok/s | 5.3× |
+
+KV cache element type (B=8, max_seq=560, 4 layers):
+
+| KV dtype | Cache | TTFT, prefill 512 | Decode, context 512→544 |
+|---|---:|---:|---:|
+| F32 | 8 MiB | 3.04 ms | 36.2k tok/s |
+| F16 | 4 MiB | 3.46 ms | 24.8k–33.8k tok/s |
+| BF16 | 4 MiB | 3.08 ms | 26.8k–33.8k tok/s |
 
 Method:
 
 - Modern Chainer: `cargo run --release --example static_batched_decoder`.
-  Prefill is one captured graph replay over `[8, 16]` tokens; decode is one
-  captured graph replay per step. The KV cache, position and all activations
-  are preallocated; no allocation occurs in the timed loop.
-- PyTorch: `scripts/bench_static_batched_vs_pytorch.py`, eager
-  `F.linear`/`F.layer_norm`/`F.gelu`, explicit KV cache and Python per-step
-  dispatch. TF32 matmul is enabled.
+  Env: `BATCH`, `PREFILL_LEN`, `DECODE_TOKENS`, `MAX_SEQ`, `KV_DTYPE`.
+  Prefill is one captured graph replay: row-batched linear/LayerNorm/MLP,
+  cuBLAS strided-batched QK and PV, warp causal softmax, then LM head only on
+  the last token per batch. Decode is one captured graph replay per step:
+  per-sequence append/attention with batched GEMMs and a per-sequence softmax
+  mask.
+- PyTorch: `scripts/bench_static_batched_vs_pytorch.py`, same env variables,
+  eager `F.linear`/`F.layer_norm`/`F.gelu`, explicit KV cache and Python
+  per-step dispatch.
 - The PyTorch side is eager, not `torch.compile` or a captured graph. The
-  comparison measures the graph-replay advantage for this shape, not a
+  comparison measures graph replay plus the kernel layout for this shape, not a
   like-for-like compiler comparison.
 
-The prefill attention kernel is intentionally simple (one thread per
-batch/head/query, three passes over `0..=q`). It is fast enough for short
-prompts but is the next optimization target for longer contexts, alongside
-f16/bf16 KV and batched decode with per-sequence positions.
+Prefill is GEMM-bound rather than the earlier scalar kernel. Decode still scans
+the full `max_seq` GEMM for every step, and F16/BF16 KV is upcast to F32 before
+attention. Native low-precision attention for decode and fused flash-attention
+prefill are the next targets.
 
 Matmul is near parity; linear and Adam show the benefit of fused epilogues and
 fewer launches. Graph replay helps both, but our Adam graph has one kernel

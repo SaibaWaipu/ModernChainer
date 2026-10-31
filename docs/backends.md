@@ -185,17 +185,24 @@ graph.  It matches a dense CPU decoder token-by-token.
 `BatchedStaticDecoder` captures two graphs over one shared KV cache:
 
 - **Prefill** processes `[batch, prefill_len]` tokens. Embedding, LayerNorm and
-  Q/K/V projections run as row-batched GEMMs. A prefill kernel writes all K/V
-  rows for the prompt, and causal prefill attention computes each query against
-  `0..=q`. The graph then sets the device position to `prefill_len`.
-- **Decode** processes one token per batch element at the shared position. A
-  batched append kernel writes each sequence's K/V, batched decode attention
-  reads `0..=position`, and the graph increments the position.
+  Q/K/V projections run as row-batched GEMMs. K/V rows are written to the cache,
+  Q is split head-major, and attention uses cuBLAS strided-batched GEMMs for
+  QK and PV with a warp-per-row causal softmax. Only the last token per batch
+  goes through the final LayerNorm and LM head. The graph sets the device
+  positions to `prefill_len`.
+- **Decode** processes one token per batch element at its own position. A
+  batched append kernel writes each sequence's K/V, batched GEMM attention
+  computes scores for `0..=position` and masks longer positions per sequence,
+  and the graph increments every position. Positions can be changed with
+  `set_positions`.
 
-Both graphs are replay-only: buffers never reallocate. Batched prefill and
-decode logits match the dense CPU decoder per batch element. The current
-limitation is synchronized positions and fixed prompt length; per-sequence
-positions and variable-length prefill are future work.
+KV cache storage is selectable (`KvDType::F32`, `F16`, `Bf16`); weights and
+activations stay F32. F16/BF16 caches are upcast into an F32 workspace for the
+prefill/decode GEMMs. Both graphs are replay-only: buffers never reallocate.
+Batched prefill and decode logits match the dense CPU decoder per batch element,
+including low-precision caches. The current limitation is fixed batch/prompt
+length and no variable-length/continuous admission; native low-precision
+attention and flash-attention prefill are future work.
 
 The step/position counters are device scalars advanced by kernels inside the
 graph, so replay performs a complete step without host arguments.
@@ -226,8 +233,8 @@ Tests skip when no CUDA driver/runtime is available.
 ### Next
 
 - Full-model f16/bf16 dtype (all ops) and master-weight optimizer state.
-- Per-sequence positions and variable-length / continuous static batching.
-- Longer-context prefill attention, f16/bf16 KV, and TTFT/tok/s tuning.
+- Variable-length / continuous static batching and request admission.
+- Native low-precision attention and fused flash-attention prefill.
 - Backend-agnostic Static Step trait (currently CUDA-specific).
 - Further paged-attention/flash-decode tuning and TTFT/tokens/s benchmarks.
 - Run-level CUDA Graph capture with a memory pool.
