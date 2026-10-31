@@ -80,6 +80,10 @@ suite; the harness is checked in so improvements are measurable.
 6. Bias-specific broadcast path and bias-specific `sum_to`.
 7. Explicit GEMM thread count; fixed a `Rayon(0)` scheduler hang.
 8. Naive fallback for small GEMMs; fixed a small-shape `gemm` stack overflow.
+9. Fused scalar fill for `sum`/`mean` backward (one allocation instead of
+   `ones_like` + `scale`).
+10. Sequential reductions below 1M elements; rayon scheduling overhead dominated
+    small `sum` calls.
 
 ## Reproducing the Vulkan numbers
 
