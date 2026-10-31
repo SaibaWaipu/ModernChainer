@@ -95,6 +95,11 @@ impl Ops<CpuBackend> for CpuOps {
         make_f32(a, out, a.shape().clone())
     }
 
+    fn full_like(&self, a: &Tensor<CpuBackend>, value: f64) -> Result<Tensor<CpuBackend>> {
+        let out = vec![value as f32; a.numel()];
+        make_f32(a, out, a.shape().clone())
+    }
+
     fn to_scalar(&self, a: &Tensor<CpuBackend>) -> Result<f64> {
         a.scalar_f64()
     }

@@ -4,6 +4,7 @@ use rayon::prelude::*;
 use crate::backend::{CpuBackend, CpuTensorExt, f32_slice, make_f32};
 
 pub(crate) const PAR_THRESHOLD: usize = 1 << 15;
+pub(crate) const REDUCE_PAR_THRESHOLD: usize = 1 << 20;
 
 fn gemm_parallelism() -> gemm::Parallelism {
     match std::env::var("MC_GEMM_THREADS")
@@ -330,7 +331,7 @@ pub(crate) fn transpose2d(a: &Tensor<CpuBackend>) -> Result<Tensor<CpuBackend>> 
 
 pub(crate) fn sum_all(a: &Tensor<CpuBackend>) -> Result<Tensor<CpuBackend>> {
     let av = f32_slice(a)?;
-    let sum: f64 = if av.len() >= PAR_THRESHOLD {
+    let sum: f64 = if av.len() >= REDUCE_PAR_THRESHOLD {
         av.par_iter().map(|&x| x as f64).sum()
     } else {
         av.iter().map(|&x| x as f64).sum()

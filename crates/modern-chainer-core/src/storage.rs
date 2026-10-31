@@ -141,6 +141,12 @@ pub trait Ops<B: Backend>: Send + Sync + 'static {
         Err(Error::unsupported("zeros_like"))
     }
 
+    /// A tensor with the same shape, dtype and device as `a`, filled with `value`.
+    fn full_like(&self, a: &Tensor<B>, value: f64) -> Result<Tensor<B>> {
+        let ones = self.ones_like(a)?;
+        self.scale(&ones, value)
+    }
+
     /// Copy a single-element tensor to the host.
     fn to_scalar(&self, _a: &Tensor<B>) -> Result<f64> {
         Err(Error::unsupported("to_scalar"))
