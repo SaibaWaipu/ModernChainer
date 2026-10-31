@@ -22,4 +22,6 @@ cudarc = { version = "0.19", optional = true, features = ["cublas", "nvrtc", "dy
 modern-chainer-autograd.workspace = true
 modern-chainer-nn.workspace = true
 modern-chainer-optim.workspace = true
+modern-chainer-run.workspace = true
+modern-chainer-llm.workspace = true
 serial_test = "4.0"

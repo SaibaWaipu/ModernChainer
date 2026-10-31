@@ -121,6 +121,13 @@ impl CudaBackend {
         &self.runtime.name
     }
 
+    pub fn synchronize(&self) -> Result<()> {
+        self.runtime
+            .stream
+            .synchronize()
+            .map_err(|error| Error::Backend(format!("cuda synchronize: {error}")))
+    }
+
     pub fn device_count() -> Result<usize> {
         let count = DriverContext::device_count()
             .map_err(|error| Error::Backend(format!("cuda device count: {error}")))?;

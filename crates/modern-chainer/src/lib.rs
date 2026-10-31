@@ -17,7 +17,7 @@ pub use modern_chainer_autograd::{
     NoGradGuard, Op, Variable, apply, gradcheck, is_grad_enabled, no_grad, set_grad_enabled,
 };
 pub use modern_chainer_core::{
-    Backend, DType, Device, Error, Ops, Result, Shape, Strides, Tensor, he_normal,
+    AdamConfig, Backend, DType, Device, Error, Ops, Result, Shape, Strides, Tensor, he_normal,
 };
 pub use modern_chainer_cpu::{CpuBackend, CpuOps, CpuStorage};
 pub use modern_chainer_cuda::{CudaBackend, CudaOps, CudaStorage};
@@ -81,11 +81,11 @@ pub mod prelude {
     pub use crate::F as functional;
     pub use crate::L;
     pub use crate::{
-        Adam, Backend, BatchPlan, BlockAllocator, ContinuousBatcher, CpuBackend, CudaBackend,
-        DType, Decoder, DecoderConfig, Device, Error, Linear, Module, MomentumSGD, Ops, Optimizer,
-        PagedBatchRunner, Parameter, RequestId, Result, Run, RunMode, SGD, Sampler, Shape, StateId,
-        StateKey, StateSpec, StateStore, Step, Tensor, Variable, ZeroGrad, generate, no_grad,
-        speculative_generate, zero_grad,
+        Adam, AdamConfig, Backend, BatchPlan, BlockAllocator, ContinuousBatcher, CpuBackend,
+        CudaBackend, DType, Decoder, DecoderConfig, Device, Error, Linear, Module, MomentumSGD,
+        Ops, Optimizer, PagedBatchRunner, Parameter, RequestId, Result, Run, RunMode, SGD, Sampler,
+        Shape, StateId, StateKey, StateSpec, StateStore, Step, Tensor, Variable, ZeroGrad,
+        generate, no_grad, speculative_generate, zero_grad,
     };
 }
 

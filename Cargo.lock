@@ -713,8 +713,10 @@ dependencies = [
  "modern-chainer-autograd",
  "modern-chainer-core",
  "modern-chainer-cpu",
+ "modern-chainer-llm",
  "modern-chainer-nn",
  "modern-chainer-optim",
+ "modern-chainer-run",
  "serial_test",
 ]
 

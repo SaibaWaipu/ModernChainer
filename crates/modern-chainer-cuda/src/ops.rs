@@ -35,6 +35,28 @@ impl CudaOps {
         tensor.storage().f32()
     }
 
+    fn i64<'a>(&self, tensor: &'a Tensor<CudaBackend>) -> Result<&'a CudaSlice<i64>> {
+        if tensor.dtype() != DType::I64 {
+            return Err(Error::UnsupportedDType(tensor.dtype()));
+        }
+        if !tensor.is_contiguous() {
+            return Err(Error::invalid("cuda kernel requires a contiguous tensor"));
+        }
+        tensor.storage().i64()
+    }
+
+    fn row_config(rows: usize) -> Result<LaunchConfig> {
+        if rows == 0 {
+            return Err(Error::invalid("empty tensor for row kernel"));
+        }
+        let grid = u32::try_from(rows).map_err(|_| Error::invalid("tensor too large"))?;
+        Ok(LaunchConfig {
+            grid_dim: (grid, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        })
+    }
+
     fn out_f32(&self, shape: &Shape) -> Result<(CudaBackend, CudaStorage)> {
         let backend = self.backend();
         let storage = backend.alloc_zeroed_for(shape.numel() * 4, DType::F32)?;
@@ -365,11 +387,49 @@ impl Ops<CudaBackend> for CudaOps {
     }
 
     fn sum_all(&self, a: &Tensor<CudaBackend>) -> Result<Tensor<CudaBackend>> {
-        let result = CpuBackend::new().ops().sum_all(&self.to_cpu(a)?)?;
-        self.upload(&result)
+        let a_slice = self.f32(a)?;
+        let n = a.numel();
+        let (backend, mut storage) = self.out_f32(&Shape::scalar())?;
+        if n > 0 {
+            let out = storage.f32_mut()?;
+            let n_i = i32::try_from(n).map_err(|_| Error::invalid("tensor too large"))?;
+            let mut builder = self
+                .runtime
+                .stream
+                .launch_builder(&self.runtime.kernels.sum_all);
+            builder.arg(a_slice).arg(out).arg(&n_i);
+            unsafe {
+                builder
+                    .launch(LaunchConfig::for_num_elems(n as u32))
+                    .map_err(|error| cuda_error("launch", error))?;
+            }
+        }
+        self.tensor_from_storage(backend, storage, &Shape::scalar())
     }
 
     fn sum_to(&self, a: &Tensor<CudaBackend>, shape: &Shape) -> Result<Tensor<CudaBackend>> {
+        if a.rank() == 2 && shape.rank() == 1 && shape.dims()[0] == a.shape().dims()[1] {
+            let rows = a.shape().dims()[0];
+            let cols = a.shape().dims()[1];
+            let a_slice = self.f32(a)?;
+            let (backend, mut storage) = self.out_f32(shape)?;
+            if cols > 0 {
+                let out = storage.f32_mut()?;
+                let rows_i = i32::try_from(rows).map_err(|_| Error::invalid("tensor too large"))?;
+                let cols_i = i32::try_from(cols).map_err(|_| Error::invalid("tensor too large"))?;
+                let mut builder = self
+                    .runtime
+                    .stream
+                    .launch_builder(&self.runtime.kernels.sum_to_bias);
+                builder.arg(a_slice).arg(out).arg(&rows_i).arg(&cols_i);
+                unsafe {
+                    builder
+                        .launch(LaunchConfig::for_num_elems(cols as u32))
+                        .map_err(|error| cuda_error("launch", error))?;
+                }
+            }
+            return self.tensor_from_storage(backend, storage, shape);
+        }
         let result = CpuBackend::new().ops().sum_to(&self.to_cpu(a)?, shape)?;
         self.upload(&result)
     }
@@ -498,10 +558,40 @@ impl Ops<CudaBackend> for CudaOps {
         logits: &Tensor<CudaBackend>,
         target: &Tensor<CudaBackend>,
     ) -> Result<Tensor<CudaBackend>> {
-        let result = CpuBackend::new()
-            .ops()
-            .softmax_cross_entropy(&self.to_cpu(logits)?, &self.to_cpu(target)?)?;
-        self.upload(&result)
+        if logits.rank() != 2 {
+            return Err(Error::invalid(
+                "cuda softmax_cross_entropy expects [rows, cols]",
+            ));
+        }
+        let rows = logits.shape().dims()[0];
+        let cols = logits.shape().dims()[1];
+        if target.numel() != rows {
+            return Err(Error::invalid("softmax_cross_entropy target size mismatch"));
+        }
+        let logits_slice = self.f32(logits)?;
+        let target_slice = self.i64(target)?;
+        let (backend, mut storage) = self.out_f32(&Shape::scalar())?;
+        if rows > 0 {
+            let out = storage.f32_mut()?;
+            let rows_i = i32::try_from(rows).map_err(|_| Error::invalid("tensor too large"))?;
+            let cols_i = i32::try_from(cols).map_err(|_| Error::invalid("tensor too large"))?;
+            let mut builder = self
+                .runtime
+                .stream
+                .launch_builder(&self.runtime.kernels.softmax_ce);
+            builder
+                .arg(logits_slice)
+                .arg(target_slice)
+                .arg(out)
+                .arg(&rows_i)
+                .arg(&cols_i);
+            unsafe {
+                builder
+                    .launch(Self::row_config(rows)?)
+                    .map_err(|error| cuda_error("launch", error))?;
+            }
+        }
+        self.tensor_from_storage(backend, storage, &Shape::scalar())
     }
 
     fn softmax_cross_entropy_backward(
@@ -509,10 +599,40 @@ impl Ops<CudaBackend> for CudaOps {
         logits: &Tensor<CudaBackend>,
         target: &Tensor<CudaBackend>,
     ) -> Result<Tensor<CudaBackend>> {
-        let result = CpuBackend::new()
-            .ops()
-            .softmax_cross_entropy_backward(&self.to_cpu(logits)?, &self.to_cpu(target)?)?;
-        self.upload(&result)
+        if logits.rank() != 2 {
+            return Err(Error::invalid(
+                "cuda softmax_cross_entropy expects [rows, cols]",
+            ));
+        }
+        let rows = logits.shape().dims()[0];
+        let cols = logits.shape().dims()[1];
+        if target.numel() != rows {
+            return Err(Error::invalid("softmax_cross_entropy target size mismatch"));
+        }
+        let logits_slice = self.f32(logits)?;
+        let target_slice = self.i64(target)?;
+        let (backend, mut storage) = self.out_f32(logits.shape())?;
+        if rows > 0 {
+            let out = storage.f32_mut()?;
+            let rows_i = i32::try_from(rows).map_err(|_| Error::invalid("tensor too large"))?;
+            let cols_i = i32::try_from(cols).map_err(|_| Error::invalid("tensor too large"))?;
+            let mut builder = self
+                .runtime
+                .stream
+                .launch_builder(&self.runtime.kernels.softmax_ce_backward);
+            builder
+                .arg(logits_slice)
+                .arg(target_slice)
+                .arg(out)
+                .arg(&rows_i)
+                .arg(&cols_i);
+            unsafe {
+                builder
+                    .launch(Self::row_config(rows)?)
+                    .map_err(|error| cuda_error("launch", error))?;
+            }
+        }
+        self.tensor_from_storage(backend, storage, logits.shape())
     }
 
     fn embedding(
@@ -520,10 +640,41 @@ impl Ops<CudaBackend> for CudaOps {
         ids: &Tensor<CudaBackend>,
         weight: &Tensor<CudaBackend>,
     ) -> Result<Tensor<CudaBackend>> {
-        let result = CpuBackend::new()
-            .ops()
-            .embedding(&self.to_cpu(ids)?, &self.to_cpu(weight)?)?;
-        self.upload(&result)
+        if weight.rank() != 2 || ids.rank() == 0 || ids.rank() > 2 {
+            return Err(Error::invalid(
+                "cuda embedding expects [.., id] and [vocab, dim]",
+            ));
+        }
+        let rows = ids.numel();
+        let dim = weight.shape().dims()[1];
+        let ids_slice = self.i64(ids)?;
+        let weight_slice = self.f32(weight)?;
+        let mut dims = ids.shape().dims().to_vec();
+        dims.push(dim);
+        let shape = Shape::new(dims);
+        let (backend, mut storage) = self.out_f32(&shape)?;
+        let total = rows * dim;
+        if total > 0 {
+            let out = storage.f32_mut()?;
+            let rows_i = i32::try_from(rows).map_err(|_| Error::invalid("tensor too large"))?;
+            let dim_i = i32::try_from(dim).map_err(|_| Error::invalid("tensor too large"))?;
+            let mut builder = self
+                .runtime
+                .stream
+                .launch_builder(&self.runtime.kernels.embedding);
+            builder
+                .arg(ids_slice)
+                .arg(weight_slice)
+                .arg(out)
+                .arg(&rows_i)
+                .arg(&dim_i);
+            unsafe {
+                builder
+                    .launch(LaunchConfig::for_num_elems(total as u32))
+                    .map_err(|error| cuda_error("launch", error))?;
+            }
+        }
+        self.tensor_from_storage(backend, storage, &shape)
     }
 
     fn layer_norm(
@@ -533,18 +684,68 @@ impl Ops<CudaBackend> for CudaOps {
         beta: &Tensor<CudaBackend>,
         eps: f64,
     ) -> Result<Tensor<CudaBackend>> {
-        let result = CpuBackend::new().ops().layer_norm(
-            &self.to_cpu(x)?,
-            &self.to_cpu(gamma)?,
-            &self.to_cpu(beta)?,
-            eps,
-        )?;
-        self.upload(&result)
+        if x.rank() < 2 {
+            return Err(Error::invalid("cuda layer_norm expects rank >= 2"));
+        }
+        let dim = *x.shape().dims().last().unwrap();
+        if gamma.numel() != dim || beta.numel() != dim {
+            return Err(Error::invalid("layer_norm gamma/beta size mismatch"));
+        }
+        let rows = x.numel() / dim;
+        let x_slice = self.f32(x)?;
+        let gamma_slice = self.f32(gamma)?;
+        let beta_slice = self.f32(beta)?;
+        let (backend, mut storage) = self.out_f32(x.shape())?;
+        if rows > 0 && dim > 0 {
+            let out = storage.f32_mut()?;
+            let rows_i = i32::try_from(rows).map_err(|_| Error::invalid("tensor too large"))?;
+            let dim_i = i32::try_from(dim).map_err(|_| Error::invalid("tensor too large"))?;
+            let eps = eps as f32;
+            let mut builder = self
+                .runtime
+                .stream
+                .launch_builder(&self.runtime.kernels.layer_norm);
+            builder
+                .arg(x_slice)
+                .arg(gamma_slice)
+                .arg(beta_slice)
+                .arg(out)
+                .arg(&rows_i)
+                .arg(&dim_i)
+                .arg(&eps);
+            unsafe {
+                builder
+                    .launch(Self::row_config(rows)?)
+                    .map_err(|error| cuda_error("launch", error))?;
+            }
+        }
+        self.tensor_from_storage(backend, storage, x.shape())
     }
 
     fn softmax_last_dim(&self, x: &Tensor<CudaBackend>) -> Result<Tensor<CudaBackend>> {
-        let result = CpuBackend::new().ops().softmax_last_dim(&self.to_cpu(x)?)?;
-        self.upload(&result)
+        if x.rank() != 2 {
+            return Err(Error::invalid("cuda softmax_last_dim expects a 2-D tensor"));
+        }
+        let rows = x.shape().dims()[0];
+        let cols = x.shape().dims()[1];
+        let x_slice = self.f32(x)?;
+        let (backend, mut storage) = self.out_f32(x.shape())?;
+        if rows > 0 {
+            let out = storage.f32_mut()?;
+            let rows_i = i32::try_from(rows).map_err(|_| Error::invalid("tensor too large"))?;
+            let cols_i = i32::try_from(cols).map_err(|_| Error::invalid("tensor too large"))?;
+            let mut builder = self
+                .runtime
+                .stream
+                .launch_builder(&self.runtime.kernels.softmax_last_dim);
+            builder.arg(x_slice).arg(out).arg(&rows_i).arg(&cols_i);
+            unsafe {
+                builder
+                    .launch(Self::row_config(rows)?)
+                    .map_err(|error| cuda_error("launch", error))?;
+            }
+        }
+        self.tensor_from_storage(backend, storage, x.shape())
     }
 
     fn split_heads(
@@ -553,17 +754,70 @@ impl Ops<CudaBackend> for CudaOps {
         heads: usize,
         head_dim: usize,
     ) -> Result<Tensor<CudaBackend>> {
-        let result = CpuBackend::new()
-            .ops()
-            .split_heads(&self.to_cpu(x)?, heads, head_dim)?;
-        self.upload(&result)
+        if x.rank() != 2 || x.shape().dims()[1] != heads * head_dim {
+            return Err(Error::invalid("cuda split_heads shape mismatch"));
+        }
+        let seq = x.shape().dims()[0];
+        let x_slice = self.f32(x)?;
+        let shape = Shape::new([heads, seq, head_dim]);
+        let (backend, mut storage) = self.out_f32(&shape)?;
+        let total = seq * heads * head_dim;
+        if total > 0 {
+            let out = storage.f32_mut()?;
+            let seq_i = i32::try_from(seq).map_err(|_| Error::invalid("tensor too large"))?;
+            let heads_i = i32::try_from(heads).map_err(|_| Error::invalid("tensor too large"))?;
+            let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+            let mut builder = self
+                .runtime
+                .stream
+                .launch_builder(&self.runtime.kernels.split_heads);
+            builder
+                .arg(x_slice)
+                .arg(out)
+                .arg(&seq_i)
+                .arg(&heads_i)
+                .arg(&dim_i);
+            unsafe {
+                builder
+                    .launch(LaunchConfig::for_num_elems(total as u32))
+                    .map_err(|error| cuda_error("launch", error))?;
+            }
+        }
+        self.tensor_from_storage(backend, storage, &shape)
     }
 
     fn merge_heads(&self, x: &Tensor<CudaBackend>, heads: usize) -> Result<Tensor<CudaBackend>> {
-        let result = CpuBackend::new()
-            .ops()
-            .merge_heads(&self.to_cpu(x)?, heads)?;
-        self.upload(&result)
+        if x.rank() != 3 || x.shape().dims()[0] != heads {
+            return Err(Error::invalid("cuda merge_heads shape mismatch"));
+        }
+        let seq = x.shape().dims()[1];
+        let head_dim = x.shape().dims()[2];
+        let x_slice = self.f32(x)?;
+        let shape = Shape::new([seq, heads * head_dim]);
+        let (backend, mut storage) = self.out_f32(&shape)?;
+        let total = heads * seq * head_dim;
+        if total > 0 {
+            let out = storage.f32_mut()?;
+            let heads_i = i32::try_from(heads).map_err(|_| Error::invalid("tensor too large"))?;
+            let seq_i = i32::try_from(seq).map_err(|_| Error::invalid("tensor too large"))?;
+            let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+            let mut builder = self
+                .runtime
+                .stream
+                .launch_builder(&self.runtime.kernels.merge_heads);
+            builder
+                .arg(x_slice)
+                .arg(out)
+                .arg(&heads_i)
+                .arg(&seq_i)
+                .arg(&dim_i);
+            unsafe {
+                builder
+                    .launch(LaunchConfig::for_num_elems(total as u32))
+                    .map_err(|error| cuda_error("launch", error))?;
+            }
+        }
+        self.tensor_from_storage(backend, storage, &shape)
     }
 
     fn attention(
@@ -574,14 +828,60 @@ impl Ops<CudaBackend> for CudaOps {
         scale: f64,
         causal: bool,
     ) -> Result<Tensor<CudaBackend>> {
-        let result = CpuBackend::new().ops().attention(
-            &self.to_cpu(q)?,
-            &self.to_cpu(k)?,
-            &self.to_cpu(v)?,
-            scale,
-            causal,
-        )?;
-        self.upload(&result)
+        if q.rank() != 3 || k.rank() != 3 || v.rank() != 3 {
+            return Err(Error::invalid(
+                "cuda attention expects [heads, seq, head_dim]",
+            ));
+        }
+        let (heads, q_seq, head_dim) = (
+            q.shape().dims()[0],
+            q.shape().dims()[1],
+            q.shape().dims()[2],
+        );
+        let kv_seq = k.shape().dims()[1];
+        if k.shape().dims()[0] != heads
+            || v.shape().dims()[0] != heads
+            || k.shape().dims()[2] != head_dim
+            || v.shape().dims()[2] != head_dim
+            || v.shape().dims()[1] != kv_seq
+        {
+            return Err(Error::invalid("cuda attention dimension mismatch"));
+        }
+        let q_slice = self.f32(q)?;
+        let k_slice = self.f32(k)?;
+        let v_slice = self.f32(v)?;
+        let (backend, mut storage) = self.out_f32(q.shape())?;
+        let total = heads * q_seq;
+        if total > 0 {
+            let out = storage.f32_mut()?;
+            let heads_i = i32::try_from(heads).map_err(|_| Error::invalid("tensor too large"))?;
+            let q_seq_i = i32::try_from(q_seq).map_err(|_| Error::invalid("tensor too large"))?;
+            let kv_seq_i = i32::try_from(kv_seq).map_err(|_| Error::invalid("tensor too large"))?;
+            let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+            let scale = scale as f32;
+            let causal = i32::from(causal);
+            let mut builder = self
+                .runtime
+                .stream
+                .launch_builder(&self.runtime.kernels.attention);
+            builder
+                .arg(q_slice)
+                .arg(k_slice)
+                .arg(v_slice)
+                .arg(out)
+                .arg(&heads_i)
+                .arg(&q_seq_i)
+                .arg(&kv_seq_i)
+                .arg(&dim_i)
+                .arg(&scale)
+                .arg(&causal);
+            unsafe {
+                builder
+                    .launch(LaunchConfig::for_num_elems(total as u32))
+                    .map_err(|error| cuda_error("launch", error))?;
+            }
+        }
+        self.tensor_from_storage(backend, storage, q.shape())
     }
 
     fn concat_seq(
@@ -589,17 +889,81 @@ impl Ops<CudaBackend> for CudaOps {
         a: &Tensor<CudaBackend>,
         b: &Tensor<CudaBackend>,
     ) -> Result<Tensor<CudaBackend>> {
-        let result = CpuBackend::new()
-            .ops()
-            .concat_seq(&self.to_cpu(a)?, &self.to_cpu(b)?)?;
-        self.upload(&result)
+        if a.rank() != 3 || b.rank() != 3 {
+            return Err(Error::invalid(
+                "cuda concat_seq expects [heads, seq, head_dim]",
+            ));
+        }
+        let heads = a.shape().dims()[0];
+        let s1 = a.shape().dims()[1];
+        let head_dim = a.shape().dims()[2];
+        let s2 = b.shape().dims()[1];
+        if b.shape().dims()[0] != heads || b.shape().dims()[2] != head_dim {
+            return Err(Error::invalid("cuda concat_seq dimension mismatch"));
+        }
+        let a_slice = self.f32(a)?;
+        let b_slice = self.f32(b)?;
+        let shape = Shape::new([heads, s1 + s2, head_dim]);
+        let (backend, mut storage) = self.out_f32(&shape)?;
+        let total = heads * (s1 + s2) * head_dim;
+        if total > 0 {
+            let out = storage.f32_mut()?;
+            let heads_i = i32::try_from(heads).map_err(|_| Error::invalid("tensor too large"))?;
+            let s1_i = i32::try_from(s1).map_err(|_| Error::invalid("tensor too large"))?;
+            let s2_i = i32::try_from(s2).map_err(|_| Error::invalid("tensor too large"))?;
+            let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+            let mut builder = self
+                .runtime
+                .stream
+                .launch_builder(&self.runtime.kernels.concat_seq);
+            builder
+                .arg(a_slice)
+                .arg(b_slice)
+                .arg(out)
+                .arg(&heads_i)
+                .arg(&s1_i)
+                .arg(&s2_i)
+                .arg(&dim_i);
+            unsafe {
+                builder
+                    .launch(LaunchConfig::for_num_elems(total as u32))
+                    .map_err(|error| cuda_error("launch", error))?;
+            }
+        }
+        self.tensor_from_storage(backend, storage, &shape)
     }
 
     fn last_row(&self, x: &Tensor<CudaBackend>) -> Result<Tensor<CudaBackend>> {
-        let result = CpuBackend::new().ops().last_row(&self.to_cpu(x)?)?;
-        self.upload(&result)
+        if x.rank() != 2 {
+            return Err(Error::invalid("cuda last_row expects a 2-D tensor"));
+        }
+        let rows = x.shape().dims()[0];
+        let cols = x.shape().dims()[1];
+        if rows == 0 {
+            return Err(Error::invalid("cuda last_row on an empty tensor"));
+        }
+        let x_slice = self.f32(x)?;
+        let shape = Shape::new([cols]);
+        let (backend, mut storage) = self.out_f32(&shape)?;
+        if cols > 0 {
+            let out = storage.f32_mut()?;
+            let rows_i = i32::try_from(rows).map_err(|_| Error::invalid("tensor too large"))?;
+            let cols_i = i32::try_from(cols).map_err(|_| Error::invalid("tensor too large"))?;
+            let mut builder = self
+                .runtime
+                .stream
+                .launch_builder(&self.runtime.kernels.last_row);
+            builder.arg(x_slice).arg(out).arg(&rows_i).arg(&cols_i);
+            unsafe {
+                builder
+                    .launch(LaunchConfig::for_num_elems(cols as u32))
+                    .map_err(|error| cuda_error("launch", error))?;
+            }
+        }
+        self.tensor_from_storage(backend, storage, &shape)
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     fn paged_attention(
         &self,
@@ -611,18 +975,75 @@ impl Ops<CudaBackend> for CudaOps {
         scale: f64,
         causal: bool,
     ) -> Result<Tensor<CudaBackend>> {
-        let result = CpuBackend::new().ops().paged_attention(
-            &self.to_cpu(q)?,
-            &self.to_cpu(k_blocks)?,
-            &self.to_cpu(v_blocks)?,
-            &self.to_cpu(block_table)?,
-            seq_len,
-            scale,
-            causal,
-        )?;
-        self.upload(&result)
+        if q.rank() != 3 || k_blocks.rank() != 4 || v_blocks.rank() != 4 {
+            return Err(Error::invalid("cuda paged_attention shape mismatch"));
+        }
+        let (heads, q_seq, head_dim) = (
+            q.shape().dims()[0],
+            q.shape().dims()[1],
+            q.shape().dims()[2],
+        );
+        let (num_blocks, block_size, block_heads, block_dim) = (
+            k_blocks.shape().dims()[0],
+            k_blocks.shape().dims()[1],
+            k_blocks.shape().dims()[2],
+            k_blocks.shape().dims()[3],
+        );
+        if block_heads != heads
+            || block_dim != head_dim
+            || v_blocks.shape().dims() != k_blocks.shape().dims()
+        {
+            return Err(Error::invalid("cuda paged_attention dimension mismatch"));
+        }
+        if seq_len == 0 || block_table.numel() * block_size < seq_len {
+            return Err(Error::invalid("cuda paged_attention block table too small"));
+        }
+        let q_slice = self.f32(q)?;
+        let k_slice = self.f32(k_blocks)?;
+        let v_slice = self.f32(v_blocks)?;
+        let table = self.i64(block_table)?;
+        let (backend, mut storage) = self.out_f32(q.shape())?;
+        let total = heads * q_seq;
+        if total > 0 {
+            let out = storage.f32_mut()?;
+            let heads_i = i32::try_from(heads).map_err(|_| Error::invalid("tensor too large"))?;
+            let q_seq_i = i32::try_from(q_seq).map_err(|_| Error::invalid("tensor too large"))?;
+            let seq_i = i32::try_from(seq_len).map_err(|_| Error::invalid("tensor too large"))?;
+            let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+            let block_i =
+                i32::try_from(block_size).map_err(|_| Error::invalid("tensor too large"))?;
+            let blocks_i =
+                i32::try_from(num_blocks).map_err(|_| Error::invalid("tensor too large"))?;
+            let scale = scale as f32;
+            let causal = i32::from(causal);
+            let mut builder = self
+                .runtime
+                .stream
+                .launch_builder(&self.runtime.kernels.paged_attention);
+            builder
+                .arg(q_slice)
+                .arg(k_slice)
+                .arg(v_slice)
+                .arg(table)
+                .arg(out)
+                .arg(&heads_i)
+                .arg(&q_seq_i)
+                .arg(&seq_i)
+                .arg(&dim_i)
+                .arg(&block_i)
+                .arg(&blocks_i)
+                .arg(&scale)
+                .arg(&causal);
+            unsafe {
+                builder
+                    .launch(LaunchConfig::for_num_elems(total as u32))
+                    .map_err(|error| cuda_error("launch", error))?;
+            }
+        }
+        self.tensor_from_storage(backend, storage, q.shape())
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     fn paged_append(
         &self,
@@ -633,17 +1054,85 @@ impl Ops<CudaBackend> for CudaOps {
         k_new: &Tensor<CudaBackend>,
         v_new: &Tensor<CudaBackend>,
     ) -> Result<(Tensor<CudaBackend>, Tensor<CudaBackend>)> {
-        let (k, v) = CpuBackend::new().ops().paged_append(
-            &self.to_cpu(k_blocks)?,
-            &self.to_cpu(v_blocks)?,
-            &self.to_cpu(block_table)?,
-            len,
-            &self.to_cpu(k_new)?,
-            &self.to_cpu(v_new)?,
-        )?;
-        Ok((self.upload(&k)?, self.upload(&v)?))
+        if k_blocks.rank() != 4 || v_blocks.rank() != 4 || k_new.rank() != 3 || v_new.rank() != 3 {
+            return Err(Error::invalid("cuda paged_append shape mismatch"));
+        }
+        let (num_blocks, block_size, heads, head_dim) = (
+            k_blocks.shape().dims()[0],
+            k_blocks.shape().dims()[1],
+            k_blocks.shape().dims()[2],
+            k_blocks.shape().dims()[3],
+        );
+        let n = k_new.shape().dims()[1];
+        if k_new.shape().dims()[0] != heads
+            || k_new.shape().dims()[2] != head_dim
+            || v_new.shape().dims() != k_new.shape().dims()
+            || v_blocks.shape().dims() != k_blocks.shape().dims()
+        {
+            return Err(Error::invalid("cuda paged_append dimension mismatch"));
+        }
+        let old_k = self.f32(k_blocks)?;
+        let old_v = self.f32(v_blocks)?;
+        let new_k = self.f32(k_new)?;
+        let new_v = self.f32(v_new)?;
+        let table = self.i64(block_table)?;
+        let (backend, mut k_storage) = self.out_f32(k_blocks.shape())?;
+        let (_, mut v_storage) = self.out_f32(v_blocks.shape())?;
+        {
+            let dst = k_storage.f32_mut()?;
+            self.runtime
+                .stream
+                .memcpy_dtod(old_k, dst)
+                .map_err(|error| cuda_error("dtod", error))?;
+        }
+        {
+            let dst = v_storage.f32_mut()?;
+            self.runtime
+                .stream
+                .memcpy_dtod(old_v, dst)
+                .map_err(|error| cuda_error("dtod", error))?;
+        }
+        let total = n * heads * head_dim;
+        if total > 0 {
+            let k_out = k_storage.f32_mut()?;
+            let v_out = v_storage.f32_mut()?;
+            let len_i = i32::try_from(len).map_err(|_| Error::invalid("tensor too large"))?;
+            let n_i = i32::try_from(n).map_err(|_| Error::invalid("tensor too large"))?;
+            let heads_i = i32::try_from(heads).map_err(|_| Error::invalid("tensor too large"))?;
+            let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+            let block_i =
+                i32::try_from(block_size).map_err(|_| Error::invalid("tensor too large"))?;
+            let blocks_i =
+                i32::try_from(num_blocks).map_err(|_| Error::invalid("tensor too large"))?;
+            let mut builder = self
+                .runtime
+                .stream
+                .launch_builder(&self.runtime.kernels.paged_append);
+            builder
+                .arg(new_k)
+                .arg(new_v)
+                .arg(table)
+                .arg(k_out)
+                .arg(v_out)
+                .arg(&len_i)
+                .arg(&n_i)
+                .arg(&heads_i)
+                .arg(&dim_i)
+                .arg(&block_i)
+                .arg(&blocks_i);
+            unsafe {
+                builder
+                    .launch(LaunchConfig::for_num_elems(total as u32))
+                    .map_err(|error| cuda_error("launch", error))?;
+            }
+        }
+        Ok((
+            self.tensor_from_storage(backend.clone(), k_storage, k_blocks.shape())?,
+            self.tensor_from_storage(backend, v_storage, v_blocks.shape())?,
+        ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     fn paged_attention_batch(
         &self,
@@ -655,15 +1144,84 @@ impl Ops<CudaBackend> for CudaOps {
         scale: f64,
         causal: bool,
     ) -> Result<Tensor<CudaBackend>> {
-        let result = CpuBackend::new().ops().paged_attention_batch(
-            &self.to_cpu(q)?,
-            &self.to_cpu(k_blocks)?,
-            &self.to_cpu(v_blocks)?,
-            &self.to_cpu(block_tables)?,
-            &self.to_cpu(seq_lens)?,
-            scale,
-            causal,
-        )?;
-        self.upload(&result)
+        if q.rank() != 4
+            || k_blocks.rank() != 4
+            || v_blocks.rank() != 4
+            || block_tables.rank() != 2
+            || seq_lens.rank() != 1
+        {
+            return Err(Error::invalid("cuda paged_attention_batch shape mismatch"));
+        }
+        let (batch, heads, q_seq, head_dim) = (
+            q.shape().dims()[0],
+            q.shape().dims()[1],
+            q.shape().dims()[2],
+            q.shape().dims()[3],
+        );
+        let (num_blocks, block_size, block_heads, block_dim) = (
+            k_blocks.shape().dims()[0],
+            k_blocks.shape().dims()[1],
+            k_blocks.shape().dims()[2],
+            k_blocks.shape().dims()[3],
+        );
+        let max_blocks = block_tables.shape().dims()[1];
+        if block_heads != heads
+            || block_dim != head_dim
+            || v_blocks.shape().dims() != k_blocks.shape().dims()
+            || block_tables.shape().dims()[0] != batch
+            || seq_lens.numel() != batch
+        {
+            return Err(Error::invalid(
+                "cuda paged_attention_batch dimension mismatch",
+            ));
+        }
+        let q_slice = self.f32(q)?;
+        let k_slice = self.f32(k_blocks)?;
+        let v_slice = self.f32(v_blocks)?;
+        let tables = self.i64(block_tables)?;
+        let lens = self.i64(seq_lens)?;
+        let (backend, mut storage) = self.out_f32(q.shape())?;
+        let total = batch * heads * q_seq;
+        if total > 0 {
+            let out = storage.f32_mut()?;
+            let batch_i = i32::try_from(batch).map_err(|_| Error::invalid("tensor too large"))?;
+            let heads_i = i32::try_from(heads).map_err(|_| Error::invalid("tensor too large"))?;
+            let q_seq_i = i32::try_from(q_seq).map_err(|_| Error::invalid("tensor too large"))?;
+            let dim_i = i32::try_from(head_dim).map_err(|_| Error::invalid("tensor too large"))?;
+            let block_i =
+                i32::try_from(block_size).map_err(|_| Error::invalid("tensor too large"))?;
+            let blocks_i =
+                i32::try_from(num_blocks).map_err(|_| Error::invalid("tensor too large"))?;
+            let max_i =
+                i32::try_from(max_blocks).map_err(|_| Error::invalid("tensor too large"))?;
+            let scale = scale as f32;
+            let causal = i32::from(causal);
+            let mut builder = self
+                .runtime
+                .stream
+                .launch_builder(&self.runtime.kernels.paged_attention_batch);
+            builder
+                .arg(q_slice)
+                .arg(k_slice)
+                .arg(v_slice)
+                .arg(tables)
+                .arg(lens)
+                .arg(out)
+                .arg(&batch_i)
+                .arg(&heads_i)
+                .arg(&q_seq_i)
+                .arg(&dim_i)
+                .arg(&block_i)
+                .arg(&blocks_i)
+                .arg(&max_i)
+                .arg(&scale)
+                .arg(&causal);
+            unsafe {
+                builder
+                    .launch(LaunchConfig::for_num_elems(total as u32))
+                    .map_err(|error| cuda_error("launch", error))?;
+            }
+        }
+        self.tensor_from_storage(backend, storage, q.shape())
     }
 }
