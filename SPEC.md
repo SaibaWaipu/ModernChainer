@@ -1,6 +1,6 @@
 # Modern Chainer — Specification
 
-Status: v0.1.0 implementation. This document records the product intent, the
+Status: v0.2.0 implementation. This document records the product intent, the
 implemented surface, and the deliberately deferred work.
 
 ## 1. Vision
@@ -28,6 +28,8 @@ distributed training, and a complete model zoo.
    Chainer-shaped façade.
 5. **Numerical correctness is testable.** Every differentiable op is covered by
    central-difference `gradcheck`; GPU backends are compared against CPU.
+6. **State is explicit.** Anything that survives a step is owned by a `Run` and
+   visible through the state plan; modules do not hide caches.
 
 ## 3. Public API
 
@@ -59,6 +61,12 @@ Implemented:
 - Data: `Dataset`, `VecDataset`, `BatchIterator`
 - Serialization: native `.mcn` save/load
 - Backend probes: `cuda::probe`, `vulkan::probe`
+- State by Run: `Run`, `Step`, `RunContext`, `RunMode`, `StateStore`,
+  `StateSpec`, `StateId`, `StateKey`, `StatePlan`, `Transaction`
+- Dense LLM state: `Decoder`, `DecoderConfig`, `KvCacheHandles`,
+  `Sampler`, `generate`
+- LLM kernels: embedding, layer_norm, softmax, SiLU, split/merge heads,
+  dense causal attention, sequence concat, last-row extraction
 
 ### Python
 
@@ -82,11 +90,82 @@ Implemented: `Tensor`, `Variable`, `Chain`, `L.Linear`, `F` functions listed
 above, `O.SGD`, `O.Adam`, NumPy interop (`Tensor.from_numpy`, `Tensor.numpy`,
 `Variable.array`).
 
-Not yet implemented in Python: `Trainer`, `Updater`, `Iterator` wrappers,
-`Extension`, `chainer.config`, `FunctionNode` subclassing, `.npz` serialization,
-`chainer.cuda`/`chainer.backends`.
+Not yet implemented in Python: `Run`/state APIs, `Trainer`, `Updater`,
+`Iterator` wrappers, `Extension`, `chainer.config`, `FunctionNode` subclassing,
+`.npz` serialization, `chainer.cuda`/`chainer.backends`. The State-by-Run layer
+is Rust-first in v0.2.
 
-## 4. Autograd semantics
+## 4. State by Run
+
+Define-by-Run builds the graph. **State by Run** declares persistent state while
+a step executes, but the `Run` owns it. The formal contract is a Mealy machine:
+
+```
+step: (params, input, state) -> (output, state')
+```
+
+### State taxonomy
+
+- Graph / activations: transient, owned by the autograd graph.
+- Model state: KV cache, recurrent hidden state, memory.
+- Optimization state: parameters, grads, Adam m/v, EMA, scaler (v0.3).
+- Execution state: request table, batch plan, block table, position, RNG.
+- Environment state: data cursor, metrics.
+
+Only the last four categories enter `StateStore` or typed run fields.
+Activations never do.
+
+### Core API
+
+```rust
+pub trait Step<B: Backend>: Send + Sync {
+    type Input;
+    type Output;
+    type Handles: Clone + Send + Sync;
+    fn declare_state(&self, builder: &mut StateBuilder<'_, B>) -> Result<Self::Handles>;
+    fn step(
+        &self,
+        ctx: &mut RunContext<'_, B>,
+        handles: &Self::Handles,
+        input: Self::Input,
+    ) -> Result<Self::Output>;
+}
+```
+
+- `StateKey` is a namespaced identity; `StateId` is a generational arena handle.
+- `StateSpec` declares layout, dtype, gradient policy, fork policy and
+  persistence policy.
+- `StateValue` is a tensor, variable, scalar, or paged state (paged reserved for
+  v0.3).
+- `StateStore` owns values; `StatePlan` is the sorted introspection view.
+- Module-specific `Handles` carry `StateId`s so hot paths avoid string lookup.
+- `Run` owns the model, handles, store, plan, mode, RNG and step counter.
+- `Run::fork` clones the store cheaply (immutable `Arc`-backed dense tensors),
+  `snapshot`/`restore` and `transaction` provide rollback. `Transaction` also
+  rolls back on drop.
+
+### v0.2 dense KV decoder
+
+`modern-chainer-llm` implements a 2-layer reference decoder with explicit dense
+KV state:
+
+```
+layers.{i}.kv.k  [heads, 0, head_dim]
+layers.{i}.kv.v  [heads, 0, head_dim]
+kv.position      i64
+```
+
+Prefill and decode use one path; only the sequence length differs. The
+acceptance test is that prefill logits equal token-by-token decode logits.
+
+Implemented: embedding, layer_norm, softmax, SiLU, split/merge heads, causal
+attention, sequence concat, last-row extraction, greedy/temperature/top-k
+sampling.
+
+Deferred: PagedAttention, continuous batching, speculative decoding driver,
+CUDA kernels, optimizer-state migration, Training-By-Run, Python bindings.
+
+## 5. Autograd semantics
 
 - `Variable::new` is differentiable by default; `Variable::constant` is not.
 - A node is created when at least one input requires grad and gradients are
@@ -102,7 +181,7 @@ Not yet implemented in Python: `Trainer`, `Updater`, `Iterator` wrappers,
 Known limitation: the Python binding does not expose `FunctionNode`
 subclassing; custom ops must currently be written in Rust.
 
-## 5. Backends
+## 6. Backends
 
 ### CPU (stable)
 
@@ -132,7 +211,7 @@ subclassing; custom ops must currently be written in Rust.
   (no `nvcc` at build time), cuBLAS/cuBLASLt for GEMM, and im2col/Winograd for
   convolution. cuDNN is not a requirement. See `docs/backends.md`.
 
-## 6. Performance
+## 7. Performance
 
 Acceptance gates proposed in the design phase:
 
@@ -150,7 +229,7 @@ Current CPU result on the checked-in micro-suite is a ~0.87–0.91× geometric m
 blocked on the CUDA backend. See `docs/benchmarks.md` for the full table and
 caveats.
 
-## 7. Repository layout
+## 8. Repository layout
 
 ```
 crates/
@@ -164,13 +243,15 @@ crates/
   modern-chainer-cpu/      CPU kernels
   modern-chainer-vulkan/   wgpu/Vulkan backend and WGSL shaders
   modern-chainer-cuda/     CUDA scaffold
+  modern-chainer-run/      StateStore, Run, Step, transactions
+  modern-chainer-llm/      dense KV decoder, attention helpers, sampling
   modern-chainer-python/   PyO3 extension
 python/                    maturin project and Python package
 scripts/                   benchmark harness
 docs/                      architecture, backends, API, benchmarks, roadmap
 ```
 
-## 8. Testing strategy
+## 9. Testing strategy
 
 - Numerical `gradcheck` for every differentiable op, including fused Linear.
 - Known-value tests for kernels (Linear, matmul, bias broadcast, Adam update).
@@ -180,9 +261,14 @@ docs/                      architecture, backends, API, benchmarks, roadmap
 - Dataset permutation tests, serializer round-trip tests.
 - Python tests for import, forward/backward, optimizer updates, Chain and NumPy
   interop.
+- State lifecycle: declaration, reuse, shape growth, fork isolation,
+  snapshot/restore, transaction commit/rollback/drop.
+- KV parity: prefill vs incremental decode logits, position and shape checks,
+  max-sequence enforcement.
+- Generation determinism and sampler range checks.
 - `cargo fmt`, `cargo clippy -D warnings`, `cargo test` in CI.
 
-## 9. Risks and mitigations
+## 10. Risks and mitigations
 
 | Risk | Mitigation |
 |---|---|
@@ -192,3 +278,7 @@ docs/                      architecture, backends, API, benchmarks, roadmap
 | cuDNN-free convolution performance | im2col + cuBLASLt, Winograd; optional cuDNN later |
 | Python compatibility expectations | Documented subset; no `Trainer` yet |
 | GPU absence in CI | Tests skip; lavapipe job in CI |
+| State becomes an untyped god-object | Five-category taxonomy, typed `StateSpec`, namespaced keys |
+| String lookup in hot loops | `StateId` handles compiled at first step |
+| Fork/rollback bugs | Immutable dense values in v0.2; COW property tests in v0.3 |
+| Training/inference state semantics diverge | `GradPolicy` and `RunMode` on every state declaration |

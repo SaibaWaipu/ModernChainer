@@ -31,6 +31,18 @@ cd python && .venv/bin/pytest
    default composition and override it in the CPU (and GPU) backend.
 5. Expose it through `modern-chainer/src/lib.rs` (`F` / `L`).
 
+## Adding stateful models
+
+- Implement `Step<B>` and declare every persistent buffer in `declare_state`.
+  The model must not keep a cache in its own fields across steps.
+- Return typed handles (`StateId`s); do not look state up by string in `step`.
+- Use `ctx.state()` for read-only introspection and `ctx.set_*` for explicit
+  updates.
+- Add tests for fork isolation, transaction rollback, and prefill-vs-incremental
+  parity where applicable.
+- Mark differentiable state with `GradPolicy::Differentiable`; otherwise keep it
+  detached.
+
 ## Adding a backend
 
 See `docs/backends.md`. Keep the CPU backend as the reference and add parity

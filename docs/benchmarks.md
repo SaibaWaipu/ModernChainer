@@ -85,6 +85,13 @@ suite; the harness is checked in so improvements are measurable.
 10. Sequential reductions below 1M elements; rayon scheduling overhead dominated
     small `sum` calls.
 
+## State-by-Run and the decoder
+
+The v0.2 decoder is a correctness reference (2 layers, `d_model=8`) used to
+verify explicit KV state, prefill/decode parity and fork/rollback. It is not a
+performance target. TTFT, inter-token latency and tokens/s benchmarks arrive
+with paged attention and the CUDA kernels.
+
 ## Reproducing the Vulkan numbers
 
 Vulkan correctness is covered by `cargo test -p modern-chainer-vulkan`. The

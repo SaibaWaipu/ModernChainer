@@ -1,13 +1,18 @@
 # Modern Chainer
 
-Define-by-run deep learning with a Rust core — a modern revival of
-[Chainer](https://github.com/chainer/chainer)'s ideas.
+Define-by-run deep learning with explicit run state and a Rust core — a modern
+revival of [Chainer](https://github.com/chainer/chainer)'s ideas.
 
 Chainer pioneered the *define-by-run* execution model: the computational graph
 is built while `forward` runs, so ordinary Python control flow is the model
 definition. Modern Chainer keeps that mental model and the vocabulary
 (`Variable`, `F.*`, `L.*`, `Chain`, `Optimizer`) while moving the engine into
 Rust so the same core can serve Rust and Python, with CPU and GPU backends.
+
+The second principle is **State by Run**: persistent execution state (KV caches,
+recurrent state, sampler RNG, scheduler-visible buffers) is declared while a
+step executes but owned by an explicit `Run`. Nothing that survives a step is
+hidden inside a module.
 
 ```python
 import chainer
@@ -26,11 +31,15 @@ class MLP(chainer.Chain):
         return self.l2(F.relu(self.l1(x)))
 ```
 
-## Status (v0.1.0)
+## Status (v0.2.0)
 
 | Area | Status |
 |---|---|
 | Define-by-run autograd (Rust) | Stable |
+| State by Run (`Run`, `Step`, `StateStore`) | Stable: fork, snapshot/rollback, transactions |
+| Dense KV decoder | Working: 2-layer reference decoder, prefill/decode, sampling |
+| Paged state / continuous batching / speculative decoding | Planned (state types reserved) |
+| Training-By-Run | Planned |
 | CPU backend | Stable, fused Linear + fused Adam, `gemm` + rayon |
 | Vulkan backend | Working (wgpu/Vulkan), core kernels + CPU fallbacks |
 | CUDA backend | Scaffold: capability probe only (see roadmap) |
@@ -47,6 +56,7 @@ cleaning up the parts that no longer make sense on modern Python.
 
 ```bash
 cargo run --release --example mlp_regression
+cargo run --release --example state_decoder
 cargo run --release --example vulkan_matmul   # requires a Vulkan loader/ICD
 ```
 
@@ -83,6 +93,29 @@ loss.backward()
 print(model.W.grad.array)
 ```
 
+## State by Run
+
+```rust
+use modern_chainer::prelude::*;
+
+let decoder = Decoder::new(CpuBackend::new(), config, 42)?;
+let mut run = Run::new(decoder, CpuBackend::new(), RunMode::Inference, 7)?;
+
+let mut logits = run.step(prompt.clone())?;   // prefill
+for (key, id) in run.plan().iter() {          // state is visible
+    println!("{key} -> {id}");
+}
+let mut draft = run.fork();                   // branch the KV cache
+draft.step(vec![next_token])?;                // parent is untouched
+```
+
+`StateStore` owns tensors, variables and scalars under namespaced `StateKey`s.
+`Run` owns the store, RNG and step counter; `Step` declares state once and gets
+typed `StateId` handles, so the hot path has no string lookup. Dense state uses
+immutable `Arc`-backed tensors, which makes `fork` cheap and rollback trivial.
+
+See [`docs/state-by-run.md`](docs/state-by-run.md).
+
 ## Architecture
 
 ```
@@ -101,6 +134,11 @@ print(model.W.grad.array)
         └───────┬───────┘ └────┬────┘ └──────┬───────┘
                 │              │             │
         ┌───────▼──────────────▼─────────────▼───────┐
+        │  modern-chainer-run: Run, Step, StateStore  │
+        │  modern-chainer-llm: dense KV decoder       │
+        └───────┬─────────────────────────────────────┘
+                │
+        ┌───────▼─────────────────────────────────────┐
         │  core: Tensor, Shape, DType, Device,        │
         │        Storage, Backend, Ops                │
         └───────┬──────────────────────┬──────────────┘
@@ -155,6 +193,7 @@ lavapipe) and skip cleanly when no Vulkan loader is present.
 ## Documentation
 
 - [`SPEC.md`](SPEC.md) — product and technical specification
+- [`docs/state-by-run.md`](docs/state-by-run.md) — explicit state, Run/Step, KV cache, transactions
 - [`docs/architecture.md`](docs/architecture.md) — crate graph, autograd, kernel ABI
 - [`docs/backends.md`](docs/backends.md) — CPU, Vulkan and the CUDA plan
 - [`docs/python-api.md`](docs/python-api.md) — Python surface and differences from Chainer 7

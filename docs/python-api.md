@@ -106,6 +106,9 @@ for x_np, t_np in batches:
 - **No `.npz` serialization yet.** Use the Rust `modern-chainer-serial` API.
 - **CPU execution only in Python.** The Rust API exposes the Vulkan backend;
   a Python device selector is planned.
+- **No State-by-Run API yet.** `Run`, `StateStore`, the dense KV decoder and
+  fork/rollback are available from Rust (`modern_chainer::run` /
+  `modern_chainer::llm`). A Python `Run` wrapper is the v0.6 milestone.
 - **Partial dtype support.** Kernels are f32; integer dtypes are used for
   labels.
 

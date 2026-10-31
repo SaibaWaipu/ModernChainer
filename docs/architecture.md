@@ -10,6 +10,8 @@ modern-chainer (facade)
  ├── modern-chainer-optim ───── modern-chainer-nn
  ├── modern-chainer-data ────── modern-chainer-core
  ├── modern-chainer-serial ──── modern-chainer-core
+ ├── modern-chainer-run ─────── modern-chainer-core + autograd
+ ├── modern-chainer-llm ─────── modern-chainer-run
  ├── modern-chainer-cpu ─────── modern-chainer-core
  ├── modern-chainer-vulkan ──── modern-chainer-core + cpu (fallbacks)
  └── modern-chainer-cuda ────── (probe only)
@@ -90,6 +92,29 @@ drops the node, which truncates the graph without touching data. The gradient
 enable flag is thread-local; `NoGradGuard` restores it on drop, including
 during unwinding.
 
+## Explicit run state
+
+`modern-chainer-run` adds a second execution model alongside the autograd graph:
+
+- `StateStore` is an arena of typed slots (`Tensor`, `Variable`, `Scalar`,
+  `Paged`). Slots are declared with `StateSpec` (layout, dtype, gradient policy,
+  fork policy, persistence).
+- `StateKey` is the namespaced identity; `StateId` is a generational handle.
+- `StatePlan` is the sorted introspection view. Model-specific `Handles` hold
+  `StateId`s, so the hot path never hashes strings.
+- `Step` is the model contract: `declare_state` once, then `step(&mut RunContext,
+  &Handles, input)`.
+- `Run` owns the model (`Arc`), handles, store, plan, mode, RNG and step counter.
+- Dense values are immutable `Arc`-backed tensors, so `fork` is a shallow store
+  clone and a child cannot mutate its parent.
+- `snapshot`/`restore` and `transaction` (with rollback on drop) make speculative
+  and failure-recovery flows explicit.
+
+`modern-chainer-llm` builds a dense KV decoder on this layer. Each layer owns a
+`k`/`v` slot and a shared `position` scalar. Prefill and decode use the same
+`embedding -> layer_norm -> q/k/v -> attention -> MLP` path; the KV cache grows
+by `concat_seq`. See `docs/state-by-run.md`.
+
 ## Modules and optimizers
 
 `Module<B>` exposes `forward` and `parameters`. `Linear` stores `[out, in]`
@@ -106,6 +131,8 @@ parameter.
 - `Tensor` handles are `Send + Sync` when the backend is.
 - Gradients are behind a `Mutex`; parameter data behind an `RwLock`. Kernel
   hot paths read data once per op and do not lock per element.
+- Run state is single-writer: a `Step` receives `&mut RunContext`, so state
+  mutation is explicit and does not need per-slot locks.
 - CPU kernels use rayon; GEMM uses the `gemm` crate with an explicit thread
   count (see `docs/backends.md` for the `Rayon(0)` caveat).
 - Vulkan uses a single `wgpu::Device`/`Queue` per backend; commands are
@@ -130,4 +157,5 @@ functional API as module functions. NumPy interop goes through host bytes:
 
 The binding is thin on purpose: the engine, graph and optimizer state stay in
 Rust. Python-only convenience (`Chain`, `init_scope`) lives in
-`python/chainer/__init__.py`.
+`python/chainer/__init__.py`. The State-by-Run layer (`Run`, `StateStore`,
+decoder) is Rust-first in v0.2; the Python wrapper is planned.
