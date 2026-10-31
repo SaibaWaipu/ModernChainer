@@ -1,18 +1,11 @@
 # Modern Chainer
 
-Define-by-run deep learning with explicit run state and a Rust core — a modern
-revival of [Chainer](https://github.com/chainer/chainer)'s ideas.
+Define-by-Run と State-by-Run を備えた、Rust コアの深層学習フレームワーク。
+[Chainer](https://github.com/chainer/chainer) の思想を現代に復興させるプロジェクトです。
 
-Chainer pioneered the *define-by-run* execution model: the computational graph
-is built while `forward` runs, so ordinary Python control flow is the model
-definition. Modern Chainer keeps that mental model and the vocabulary
-(`Variable`, `F.*`, `L.*`, `Chain`, `Optimizer`) while moving the engine into
-Rust so the same core can serve Rust and Python, with CPU and GPU backends.
+Chainer が広めた **Define-by-Run** は「forward を実行しながら計算グラフを構築する」モデルです。Modern Chainer はその感覚と語彙（`Variable`、`F.*`、`L.*`、`Chain`、`Optimizer`）を保ちながら、エンジンを Rust に移しました。同じコアを Rust と Python の両方から使い、CPU と GPU バックエンドを選べます。
 
-The second principle is **State by Run**: persistent execution state (KV caches,
-recurrent state, sampler RNG, scheduler-visible buffers) is declared while a
-step executes but owned by an explicit `Run`. Nothing that survives a step is
-hidden inside a module.
+第二の原則が **State by Run** です。KV キャッシュ、RNN の隠れ状態、サンプラ RNG、スケジューラが見るバッファといった「ステップを跨いで残る状態」を、モジュールの中に隠さず `Run` が明示的に所有します。状態は step の実行中に宣言されますが、所有・可視化・fork・rollback は Run の責務です。
 
 ```python
 import chainer
@@ -31,37 +24,34 @@ class MLP(chainer.Chain):
         return self.l2(F.relu(self.l1(x)))
 ```
 
-## Status (v0.3.0)
+## ステータス（v0.4.0）
 
-| Area | Status |
+| 領域 | 状態 |
 |---|---|
-| Define-by-run autograd (Rust) | Stable |
-| State by Run (`Run`, `Step`, `StateStore`) | Stable: fork, snapshot/rollback, transactions |
-| Dense KV decoder | Working: 2-layer reference decoder, prefill/decode, sampling |
-| Paged state + CPU paged attention | Working: block table, paged attention parity |
-| Continuous batching | Working: `RequestTable` / `BatchPlan`; per-request execution |
-| Speculative decoding | Working: greedy fork/verify/commit reference |
-| Training-By-Run | Planned |
-| CPU backend | Stable, fused Linear + fused Adam, `gemm` + rayon |
-| Vulkan backend | Working (wgpu/Vulkan), core kernels + CPU fallbacks |
-| CUDA backend | Scaffold: capability probe only (see roadmap) |
-| Python bindings | Core subset: `Tensor`, `Variable`, `F.*`, `L.Linear`, `SGD`/`Adam`, `Chain` |
-| Serialization | Native `.mcn`; Chainer `.npz` reader planned |
-| Trainer / Updater / Extensions | Planned |
-| Docs | This README, `SPEC.md`, `docs/` |
+| Define-by-Run autograd（Rust） | 安定 |
+| State by Run（`Run` / `Step` / `StateStore`） | 安定: fork、snapshot/rollback、transaction |
+| Dense KV decoder | 動作: 2層リファレンス、prefill/decode、sampling |
+| Paged state + CPU paged attention | 動作: block allocator、block table、append/truncate、COW |
+| Batched decode | 動作: `PagedBatchRunner` + batched paged attention |
+| Continuous batching | 動作: `RequestTable` / `BatchPlan`（論理バッチ） |
+| Speculative decoding | 動作: greedy の fork/verify/commit 参照実装 |
+| CUDA バックエンド | スキャフォールド（能力検出のみ） |
+| Python バインディング | コアサブセット: `Tensor`、`Variable`、`F.*`、`L.Linear`、`SGD`/`Adam`、`Chain` |
+| シリアライズ | ネイティブ `.mcn`、Chainer `.npz` は計画中 |
+| Trainer / Updater / Extensions | 計画中 |
+| ドキュメント | README（日本語）、SPEC / docs（英語） |
 
-The Python package is intentionally not a byte-for-byte reimplementation of
-Chainer 7. It keeps the shape of the API and the define-by-run feel while
-cleaning up the parts that no longer make sense on modern Python.
+Python パッケージは Chainer 7 の完全互換ではありません。API の形と Define-by-Run の感触を残しつつ、現代の Python に合わない部分は整理しています。State by Run は v0.4 時点では Rust ファーストです。
 
-## Quick start — Rust
+## クイックスタート — Rust
 
 ```bash
 cargo run --release --example mlp_regression
 cargo run --release --example state_decoder
 cargo run --release --example continuous_batching
+cargo run --release --example paged_batching
 cargo run --release --example speculative
-cargo run --release --example vulkan_matmul   # requires a Vulkan loader/ICD
+cargo run --release --example vulkan_matmul   # Vulkan ローダ/ICD が必要
 ```
 
 ```rust
@@ -74,7 +64,7 @@ let loss = F::sum(&y)?;
 loss.backward()?;
 ```
 
-## Quick start — Python
+## クイックスタート — Python
 
 ```bash
 cd python
@@ -88,7 +78,6 @@ VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release
 import chainer
 import chainer.functions as F
 import chainer.links as L
-import chainer.optimizers as O
 
 model = L.Linear(4, 2)
 x = chainer.Variable(chainer.Tensor.from_list([1.0, 2.0, 3.0, 4.0], [1, 4]))
@@ -106,31 +95,52 @@ let decoder = Decoder::new(CpuBackend::new(), config, 42)?;
 let mut run = Run::new(decoder, CpuBackend::new(), RunMode::Inference, 7)?;
 
 let mut logits = run.step(prompt.clone())?;   // prefill
-for (key, id) in run.plan().iter() {          // state is visible
+for (key, id) in run.plan().iter() {          // 状態が明示的に見える
     println!("{key} -> {id}");
 }
-let mut draft = run.fork();                   // branch the KV cache
-draft.step(vec![next_token])?;                // parent is untouched
+let mut draft = run.fork();                   // KV キャッシュを分岐
+draft.step(vec![next_token])?;                // 親は変更されない
 ```
 
-`StateStore` owns tensors, variables and scalars under namespaced `StateKey`s.
-`Run` owns the store, RNG and step counter; `Step` declares state once and gets
-typed `StateId` handles, so the hot path has no string lookup. Dense state uses
-immutable `Arc`-backed tensors, which makes `fork` cheap and rollback trivial.
+- `StateStore` がテンソル / 変数 / スカラー / paged state を名前空間付き `StateKey` で所有します。
+- `Run` がストア、RNG、step カウンタを所有します。
+- `Step` は初回に状態を宣言し、型付き `StateId` ハンドルを受け取ります。ホットパスに文字列検索は入りません。
+- Dense 状態は `Arc` ベースの不変テンソルなので、`fork` は軽量で rollback も単純です。
+- `snapshot` / `restore` / `transaction`（drop 時自動 rollback）を提供します。
 
-Continuous batching and speculative decoding are drivers over the same
-contract: a `BatchPlan` lists requests, and speculative decoding uses
-`fork`/`snapshot`/verify/commit instead of hidden cache surgery.
+### Paged KV と batched decode
 
 ```rust
-let mut batcher = ContinuousBatcher::new(decoder, CpuBackend::new(), 7);
-batcher.add_request(vec![1, 2, 3], 5, Sampler::Greedy)?;
-let output = batcher.step()?;              // prefill/decode plan is visible
+let mut runner = PagedBatchRunner::new(decoder, CpuBackend::new(), 2, 16, 7)?;
+runner.add_request(vec![1, 2, 3], 5, Sampler::Greedy)?;
+let output = runner.step()?;   // 全リクエストを 1 回の paged attention で decode
 ```
 
-See [`docs/state-by-run.md`](docs/state-by-run.md).
+- `BlockAllocator` がフリーブロックと参照カウントを管理します。
+- `PagedKvCache` は `append` / `truncate` / `fork` を持ち、テンソル単位の COW で fork を分離します。
+- `Ops::paged_attention_batch` はリクエストごとの block table と系列長を受け取り、バッチ全体を 1 カーネルで処理します。
+- prefill は dense な `Run` で行い、その KV を paged cache に変換してから batched decode に移ります。
+- v0.4 の CPU 実装は参照実装です。ブロック append はコピーを伴い、attention はスカラー実装です。
 
-## Architecture
+### Continuous batching と Speculative decoding
+
+```rust
+// 論理バッチ（リクエスト単位の Run、prefill/decode の計画が見える）
+let mut batcher = ContinuousBatcher::new(decoder, CpuBackend::new(), 7);
+batcher.add_request(vec![1, 2, 3], 5, Sampler::Greedy)?;
+let output = batcher.step()?;
+```
+
+```rust
+// greedy な speculative decoding。target の greedy 出力と完全一致する
+let tokens = speculative_generate(&mut target, &mut draft, prompt, 8, 3)?;
+```
+
+- `ContinuousBatcher` は `RequestTable` と `BatchPlan { prefill, decode }` を持ち、途中でリクエストを追加できます。
+- `PagedBatchRunner` は paged KV を使った本物の batched decode を行います。
+- speculative decoding は draft 提案 → `target.fork()` で検証 → 受理分だけ commit → draft を snapshot/restore で再同期、という流れです。
+
+## アーキテクチャ
 
 ```
                  ┌────────────────────────────┐
@@ -149,7 +159,8 @@ See [`docs/state-by-run.md`](docs/state-by-run.md).
                 │              │             │
         ┌───────▼──────────────▼─────────────▼───────┐
         │  modern-chainer-run: Run, Step, StateStore  │
-        │  modern-chainer-llm: dense KV decoder       │
+        │  modern-chainer-llm: decoder, paged KV,     │
+        │                      batching, speculation  │
         └───────┬─────────────────────────────────────┘
                 │
         ┌───────▼─────────────────────────────────────┐
@@ -163,32 +174,26 @@ See [`docs/state-by-run.md`](docs/state-by-run.md).
         └──────────────┘       └──────────────┘
 ```
 
-The `Backend`/`Ops` traits are the kernel ABI. `Tensor<B>` is generic over the
-backend, so CPU code monomorphises while the Python layer wraps a `DynTensor`
-enum. See [`docs/architecture.md`](docs/architecture.md).
+`Backend` / `Ops` がカーネル ABI です。`Tensor<B>` はバックエンドに対してジェネリックで、CPU はモノモルフィズされ、Python 層は `DynTensor` enum で包みます。詳細は [`docs/architecture.md`](docs/architecture.md)（英語）を参照してください。
 
-## Performance
+## 性能
 
-Measured on 2026-10-31, AMD Ryzen 5 5600G (6 cores / 12 threads), 12 threads for
-both implementations, PyTorch 2.15.0+cpu. Median of repeated runs; lower is
-better. These are micro-benchmarks, not a claim about every workload.
+2026-10-31、AMD Ryzen 5 5600G（6 コア / 12 スレッド）、両実装とも 12 スレッド、PyTorch 2.15.0+cpu で測定。複数回の中央値で、小さいほど高速です。これはマイクロベンチマークであり、あらゆるワークロードに対する主張ではありません。
 
-| Workload | Modern Chainer | PyTorch | Ratio |
+| ワークロード | Modern Chainer | PyTorch | 比 |
 |---|---:|---:|---:|
 | matmul 512×512×512 | 0.43–0.52 ms | 0.42 ms | 0.81–0.98× |
-| elementwise add (4M f32) | 2.23–2.30 ms | 1.95–2.16 ms | 0.85–0.97× |
-| linear fwd+bwd 128×784×256 | 0.54–0.61 ms | 0.32 ms | 0.52–0.60× |
+| elementwise add（4M f32） | 2.23–2.30 ms | 1.95–2.16 ms | 0.85–0.97× |
+| Linear fwd+bwd 128×784×256 | 0.54–0.61 ms | 0.32 ms | 0.52–0.60× |
 | Adam step 1024×1024 | 3.38–3.81 ms | 4.02–4.98 ms | 1.19–1.40× |
-| **geometric mean** | **~1.20 ms** | **~1.04 ms** | **~0.87–0.91×** |
+| **幾何平均** | **~1.20 ms** | **~1.04 ms** | **~0.87–0.91×** |
 
-The original acceptance target was a 1.2× geometric mean. The current engine
-wins on fused Adam and is close on matmul/elementwise, but loses on
-`Linear` backward, where cuBLAS-class GEMM transposes are still faster. The
-benchmark harness is checked in so the number can be defended and improved:
-[`scripts/bench_vs_pytorch.py`](scripts/bench_vs_pytorch.py),
-[`docs/benchmarks.md`](docs/benchmarks.md).
+Adam は勝利、matmul / elementwise はほぼ互角、Linear backward が課題です。目標だった幾何平均 1.2× は未達ですが、ベンチマークハーネスをリポジトリに含めているので改善を測定できます。Paged / batched decode は CPU 参照実装のため、まだ性能評価の対象外です。
 
-## Build and test
+- [`scripts/bench_vs_pytorch.py`](scripts/bench_vs_pytorch.py)
+- [`docs/benchmarks.md`](docs/benchmarks.md)（英語）
+
+## ビルドとテスト
 
 ```bash
 cargo fmt --all -- --check
@@ -201,19 +206,26 @@ VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release
 .venv/bin/pytest
 ```
 
-Vulkan tests use the first available adapter (NVIDIA/AMD/Intel or Mesa
-lavapipe) and skip cleanly when no Vulkan loader is present.
+Vulkan テストは利用可能なアダプタ（NVIDIA / AMD / Intel / Mesa lavapipe）を使い、Vulkan ローダがない環境ではスキップします。
 
-## Documentation
+## ドキュメント
 
-- [`SPEC.md`](SPEC.md) — product and technical specification
-- [`docs/state-by-run.md`](docs/state-by-run.md) — explicit state, Run/Step, KV cache, transactions
-- [`docs/architecture.md`](docs/architecture.md) — crate graph, autograd, kernel ABI
-- [`docs/backends.md`](docs/backends.md) — CPU, Vulkan and the CUDA plan
-- [`docs/python-api.md`](docs/python-api.md) — Python surface and differences from Chainer 7
-- [`docs/benchmarks.md`](docs/benchmarks.md) — methodology and results
-- [`docs/roadmap.md`](docs/roadmap.md) — next milestones
+- [`SPEC.md`](SPEC.md) — 仕様（英語）
+- [`docs/state-by-run.md`](docs/state-by-run.md) — State by Run、Run/Step、paged KV、batching、speculation（英語）
+- [`docs/architecture.md`](docs/architecture.md) — クレート構成、autograd、カーネル ABI（英語）
+- [`docs/backends.md`](docs/backends.md) — CPU / Vulkan / CUDA 計画（英語）
+- [`docs/python-api.md`](docs/python-api.md) — Python API と Chainer 7 との差分（英語）
+- [`docs/benchmarks.md`](docs/benchmarks.md) — 計測方法と結果（英語）
+- [`docs/roadmap.md`](docs/roadmap.md) — ロードマップ（英語）
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — 開発手順（英語）
 
-## License
+## 主な制約
 
-Apache-2.0. See [`LICENSE`](LICENSE).
+- CUDA は能力検出のみ。`cudarc` / NVRTC / cuBLAS の実装は次のマイルストーン。
+- Python の `Run` / `PagedBatchRunner` / `Trainer` は未公開（Rust ファースト）。
+- Paged COW はテンソル単位。ブロック単位の in-place COW と CUDA カーネルは今後。
+- リリースはまだ行っていません。
+
+## ライセンス
+
+Apache-2.0。詳細は [`LICENSE`](LICENSE) を参照してください。

@@ -1,6 +1,6 @@
 # Modern Chainer — Specification
 
-Status: v0.3.0 implementation. This document records the product intent, the
+Status: v0.4.0 implementation. This document records the product intent, the
 implemented surface, and the deliberately deferred work.
 
 ## 1. Vision
@@ -65,8 +65,11 @@ Implemented:
   `StateSpec`, `StateId`, `StateKey`, `StatePlan`, `Transaction`
 - Dense LLM state: `Decoder`, `DecoderConfig`, `KvCacheHandles`,
   `Sampler`, `generate`
-- Paged state: `StateLayout::Paged`, `PagedState`, `Ops::paged_attention`
-- Batching: `RequestId`, `BatchPlan`, `ContinuousBatcher`, `BatchOutput`
+- Paged state: `StateLayout::Paged`, `PagedState`, `BlockAllocator`,
+  `PagedKvCache`, `Ops::paged_attention`, `Ops::paged_append`,
+  `Ops::paged_attention_batch`
+- Batching: `RequestId`, `BatchPlan`, `ContinuousBatcher`, `BatchOutput`,
+  `PagedBatchRunner` (real batched decode)
 - Speculation: `speculative_generate`, `argmax_token`
 - LLM kernels: embedding, layer_norm, softmax, SiLU, split/merge heads,
   dense causal attention, paged attention, sequence concat, last-row extraction
@@ -179,8 +182,21 @@ sampling.
   state is discarded with `snapshot`/`restore`. The result is identical to
   target-only greedy decoding, which is the acceptance test.
 
-Deferred: block allocator + refcount COW, vectorised paged attention, CUDA
-kernels, optimizer-state migration, Training-By-Run, Python bindings.
+### v0.4 paged allocator, COW and batched decode
+
+- `BlockAllocator` with reference counts and free-list reuse.
+- `PagedKvCache` wraps block tensors + a block table, supports `append`,
+  `truncate`, `fork` and `from_dense_with_capacity`. Appends copy block storage
+  (tensor-granularity COW), so a fork cannot observe child writes.
+- `Ops::paged_append` writes new K/V through the block table.
+- `Ops::paged_attention_batch` runs one kernel over a batch with per-request
+  block tables and sequence lengths.
+- `PagedBatchRunner` prefills each request through the dense `Run` path,
+  converts KV into paged caches, then performs a single batched decode step over
+  all active requests. Generated tokens match dense greedy decoding.
+
+Deferred: block-level in-place COW, CUDA kernels, optimizer-state migration,
+Training-By-Run, Python bindings.
 
 ## 5. Autograd semantics
 
@@ -283,6 +299,10 @@ docs/                      architecture, backends, API, benchmarks, roadmap
 - KV parity: prefill vs incremental decode logits, position and shape checks,
   max-sequence enforcement.
 - Paged attention parity against dense attention for prefill and decode.
+- Block allocator reuse and refcount invariants.
+- Paged KV append/truncate/fork isolation.
+- Batched paged attention parity against per-request dense attention.
+- Paged batched decode parity against dense greedy generation.
 - Continuous batching equivalence against independent per-request generation.
 - Speculative decoding equality against target-only greedy generation, including
   target/draft position synchronisation.
@@ -305,3 +325,5 @@ docs/                      architecture, backends, API, benchmarks, roadmap
 | Training/inference state semantics diverge | `GradPolicy` and `RunMode` on every state declaration |
 | Logical batching hides a throughput gap | Per-request execution in v0.3; vectorised paged kernels and throughput gates in v0.4 |
 | Paged block-table bugs | Dense-vs-paged parity tests and bounds checks on every table lookup |
+| Batched decode drifts from dense decoding | Token-level parity test against dense greedy generation |
+| Tensor-granularity COW costs bandwidth | Correctness first; block-level in-place COW and vectorised kernels in the CUDA milestone |

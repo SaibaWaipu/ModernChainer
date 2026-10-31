@@ -28,16 +28,26 @@ come before backends.
 Remaining for v0.4: block allocator with refcounts and block-level COW,
 vectorised paged attention, vectorised batched step.
 
-## v0.4 — Vectorised paging and CUDA
+## v0.4 — Paged allocator and batched decode (done, reference)
 
-- Block allocator, refcounts, block-level COW, wide/vectorised paged attention.
-- Vectorised continuous batching over `BatchPlan`.
+- `BlockAllocator` with free list and refcounts.
+- `PagedKvCache` append/truncate/fork with tensor-granularity COW.
+- `Ops::paged_append` and batched paged attention.
+- `PagedBatchRunner`: dense prefill converted to paged KV, then one batched
+  decode step over all active requests.
+- Tests: allocator reuse, KV append/truncate, paged-vs-dense attention,
+  batched decode vs dense greedy generation.
+
+Remaining: block-level in-place COW, wider kernels, CUDA.
+
+## v0.5 — CUDA and throughput
+
 - `cudarc` dynamic loading, NVRTC compute kernels, cuBLAS/cuBLASLt.
 - Paged-attention / flash-decode kernels.
 - CUDA Graph capture for static-shape training loops.
 - Benchmarks: TTFT, inter-token latency, tokens/s, block utilisation.
 
-## v0.5 — Training-By-Run
+## v0.6 — Training-By-Run
 
 - Move optimizer state into `StateStore` namespaces (`optim.*`).
 - `TrainingRun`: params, grads, optimizer, RNG, data cursor, metrics.
@@ -45,7 +55,7 @@ vectorised paged attention, vectorised batched step.
 - Truncated BPTT with `GradPolicy::Differentiable` state.
 - RL rollouts via `fork` + `no_grad`.
 
-## v0.6 — Python and ecosystem
+## v0.7 — Python and ecosystem
 
 - Python `chainer.Run`, `run.state` (read-only views), `run.prefill/decode`,
   `run.fork`, and a `Trainer` built on the same `Step` contract.

@@ -114,8 +114,11 @@ during unwinding.
 slot and a shared `position` scalar. Prefill and decode use the same
 `embedding -> layer_norm -> q/k/v -> attention -> MLP` path; the KV cache grows
 by `concat_seq`. `StateLayout::Paged` and `Ops::paged_attention` provide the
-block-table path, `ContinuousBatcher` adds a request table / `BatchPlan`, and
-`speculative_generate` uses fork/verify/commit. See `docs/state-by-run.md`.
+block-table path. `BlockAllocator` / `PagedKvCache` manage paged KV with
+append/truncate/fork; `ContinuousBatcher` adds a request table / `BatchPlan`;
+`PagedBatchRunner` performs a real batched decode step with
+`Ops::paged_attention_batch`; `speculative_generate` uses fork/verify/commit.
+See `docs/state-by-run.md`.
 
 ## Modules and optimizers
 

@@ -1,7 +1,7 @@
 # State by Run
 
-Status: v0.3 implementation (dense + paged state primitives, decoder, continuous
-batching, greedy speculative decoding).
+Status: v0.4 implementation (dense + paged state, block allocator, batched
+decode, continuous batching, greedy speculative decoding).
 
 ## Motivation
 
@@ -141,9 +141,17 @@ table and `seq_len`, and performs the same causal attention as the dense path
 without materialising a gathered KV tensor. The CPU reference matches dense
 attention for both prefill and decode, including a shuffled block table.
 
-`PagedState` values are still immutable in v0.3: updates replace the block
-tensors, so a fork is isolated. A block allocator, refcounts and block-level COW
-land with the vectorised paged kernel.
+v0.4 adds `BlockAllocator` (free list + refcounts) and `PagedKvCache`
+(`append`, `truncate`, `fork`, `from_dense_with_capacity`). Block storage is
+still immutable: appends copy the block tensors, so a fork is isolated at
+tensor granularity. `Ops::paged_append` writes new K/V through the block table.
+Block-level in-place COW is the next optimisation, not a semantic change.
+
+`Ops::paged_attention_batch` takes per-request block tables and sequence lengths
+and runs one kernel for the whole decode batch. `PagedBatchRunner` prefills each
+request on the dense `Run` path, converts the KV into paged caches, and then
+performs one batched decode step for all active requests. Its token output is
+tested against dense greedy generation.
 
 ## Continuous batching
 
@@ -157,10 +165,11 @@ let output = batcher.step()?;    // BatchPlan { prefill, decode }
   `Run` and therefore its own KV cache and RNG.
 - `BatchPlan` separates newly added requests (`prefill`) from ongoing ones
   (`decode`). Requests can be added or removed between steps.
-- v0.3 executes a plan sequentially. State layout and the `BatchPlan` boundary
-  are the ones a vectorised paged-attention kernel will consume; the acceptance
-  test is that every request's generated tokens equal independent greedy
-  decoding.
+- `ContinuousBatcher` executes a plan sequentially; `PagedBatchRunner` is the
+  real batched decode path. It batches every active request into one paged
+  attention call after converting prefilled KV into blocks.
+- Acceptance tests cover both logical batching equivalence and paged batched
+  decode parity with dense greedy generation.
 
 ## Speculative decoding
 

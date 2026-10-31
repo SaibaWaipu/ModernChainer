@@ -89,10 +89,10 @@ suite; the harness is checked in so improvements are measurable.
 
 The decoder is a correctness reference (2 layers, `d_model=8`) used to verify
 explicit KV state, prefill/decode parity, paged-vs-dense attention, batching
-equivalence and speculative equality. v0.3 batching is logically batched but
-executed per request. It is not a performance target; TTFT, inter-token latency,
-tokens/s and block utilisation benchmarks arrive with the vectorised/CUDA
-kernels.
+equivalence and speculative equality. `PagedBatchRunner` performs a real batched
+decode step over paged KV, but the CPU reference is not performance-tuned: block
+appends copy storage and the attention kernel is scalar. TTFT, inter-token
+latency, tokens/s and block utilisation benchmarks arrive with the CUDA kernels.
 
 ## Reproducing the Vulkan numbers
 
