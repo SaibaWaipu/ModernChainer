@@ -111,7 +111,7 @@ and dynamic library loading, so a build does not require the CUDA toolkit or
 | bias add | row-bias kernel |
 | transpose2d | NVRTC kernel |
 | matmul | cuBLAS sgemm (row-major via the standard swap) |
-| linear | cuBLASLt fused bias epilogue (cuBLAS without bias) |
+| linear | cuBLASLt fused bias / GELU epilogue (cuBLAS without epilogue) |
 | linear_backward | cuBLAS + transpose |
 | adam_update | fused NVRTC kernel |
 | sum_all / 2-D bias sum_to | NVRTC reductions |
@@ -119,6 +119,7 @@ and dynamic library loading, so a build does not require the CUDA toolkit or
 | embedding / layer_norm / softmax | NVRTC row kernels |
 | split/merge heads / concat / last-row | NVRTC index kernels |
 | dense attention | NVRTC per-query kernel |
+| wide paged attention | block-per-query kernels for single and batched decode |
 | paged append / attention / batched attention | NVRTC block-table kernels |
 | to_scalar | device-to-host readback |
 | graph matmul / graph Adam | CUDA Graph capture/replay over preallocated buffers |
@@ -158,8 +159,8 @@ Tests skip when no CUDA driver/runtime is available.
 
 ### Next
 
-- Fused GEMM+bias+activation for the decoder MLP and fp16/bf16.
-- Wider/fused paged-attention and flash-decode kernels.
+- fp16/bf16 kernels and mixed precision.
+- Further paged-attention/flash-decode tuning and TTFT/tokens/s benchmarks.
 - Run-level CUDA Graph capture with a memory pool.
 - TTFT/tokens/s and larger transformer benchmarks.
 

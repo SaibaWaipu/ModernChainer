@@ -207,9 +207,10 @@ sampling.
   paged-attention kernels at runtime for the device's compute capability.
 - cuBLAS handles `matmul`, fused `linear`, and `linear_backward`.
 - Native paged KV: `paged_append`, `paged_attention`, `paged_attention_batch`.
-- cuBLASLt fuses bias into the linear GEMM epilogue.
+- cuBLASLt fuses bias and GELU into the linear GEMM epilogue.
 - CUDA Graph capture/replay for preallocated matmul (`graph_matmul`) and Adam
   (`graph_adam`).
+- Wide paged attention: block-per-query kernels for single and batched decode.
 - Only generic `sum_to` (non-bias) falls back to CPU.
 - Verified against CPU for elementwise, matmul, linear, softmax CE, LLM
   kernels, dense decoder logits, paged attention and paged batched decode; a
@@ -267,7 +268,8 @@ subclassing; custom ops must currently be written in Rust.
 - Native attention, paged append/attention/batch, reductions, softmax CE,
   embedding, layer_norm, split/merge heads, concat and last-row.
 - Only generic `sum_to` (non-bias) falls back to CPU.
-- cuBLASLt fused bias for `linear`; CUDA Graph for fixed-shape matmul/Adam.
+- cuBLASLt fused bias / GELU for `linear`; CUDA Graph for fixed-shape
+  matmul/Adam; block-per-query wide paged attention.
 - CUDA Graph capture requires preallocated buffers and a non-default stream;
   arbitrary `Run` capture is deferred.
 - Tested on RTX 2070 SUPER (sm_75) and compiled for the detected compute
@@ -295,10 +297,11 @@ Current CPU result on the checked-in micro-suite is a ~0.87–0.91× geometric m
 | Workload | Modern Chainer | PyTorch | torch/ours |
 |---|---:|---:|---:|
 | matmul eager 512³ | 0.048 ms | 0.046 ms | 0.95× |
-| matmul graph 512³ | 0.043 ms | 0.045 ms | 1.04× |
-| linear 128×784×256 | 0.023 ms | 0.038 ms | 1.62× |
-| Adam eager 1M | 0.146 ms | 0.214 ms | 1.46× |
-| Adam graph 1M | 0.078 ms | 0.231 ms | 2.97× |
+| matmul graph 512³ | 0.043 ms | 0.044 ms | 1.02× |
+| linear 128×784×256 | 0.023 ms | 0.038 ms | 1.61× |
+| linear+gelu 128×784×256 | 0.023 ms | 0.040 ms | 1.70× |
+| Adam eager 1M | 0.156 ms | 0.212 ms | 1.36× |
+| Adam graph 1M | 0.077 ms | 0.231 ms | 3.01× |
 
 See `docs/benchmarks.md` for methodology and caveats.
 

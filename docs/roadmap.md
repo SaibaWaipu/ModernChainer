@@ -55,8 +55,10 @@ Remaining: block-level in-place COW, wider kernels, CUDA.
 - Done: native reductions / softmax CE / layer_norm / embedding,
   dense and paged attention, cuBLASLt fused linear, CUDA Graph matmul/Adam,
   PyTorch CUDA comparison.
-- Next: fused GEMM+bias+activation for the decoder MLP, fp16/bf16,
-  wider paged-attention kernels, run-level graph capture, TTFT/tokens/s.
+- Done: fused bias+GELU linear for the decoder MLP, wide block-per-query
+  paged attention.
+- Next: fp16/bf16 and mixed precision, run-level graph capture with a memory
+  pool, TTFT/tokens/s.
 
 ## v0.7 — Training-By-Run
 

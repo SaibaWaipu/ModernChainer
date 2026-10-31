@@ -102,9 +102,10 @@ RTX 2070 SUPER, PyTorch 2.11.0+cu128, 20 iterations after 3 warmups (Adam:
 |---|---:|---:|---:|
 | matmul eager 512³ | 0.048 ms | 0.046 ms | 0.95× |
 | matmul graph 512³ | 0.043 ms | 0.045 ms | 1.04× |
-| linear 128×784×256 | 0.023 ms | 0.038 ms | 1.62× |
-| Adam eager 1M | 0.146 ms | 0.214 ms | 1.46× |
-| Adam graph 1M | 0.078 ms | 0.231 ms | 2.97× |
+| linear 128×784×256 | 0.023 ms | 0.038 ms | 1.61× |
+| linear+gelu 128×784×256 | 0.023 ms | 0.040 ms | 1.70× |
+| Adam eager 1M | 0.156 ms | 0.212 ms | 1.36× |
+| Adam graph 1M | 0.077 ms | 0.231 ms | 3.01× |
 
 Method:
 
@@ -112,8 +113,9 @@ Method:
   calls with a non-default stream and explicit synchronization.
 - PyTorch: `scripts/bench_cuda_vs_pytorch.py`; `torch.matmul`,
   `F.linear`, `torch.optim.Adam(capturable=True)`, and `torch.cuda.CUDAGraph`.
-- Our linear uses the cuBLASLt bias epilogue. Our Adam graph replays the fused
-  single-kernel update into preallocated buffers.
+- Our linear uses the cuBLASLt bias/GELU epilogue; the decoder MLP uses
+  bias+GELU. Our Adam graph replays the fused single-kernel update into
+  preallocated buffers.
 - CUDA 12.8 wheels; the GTX 1080 (sm_61) is not supported by this PyTorch
   build, so both sides run on the RTX 2070 SUPER (sm_75).
 

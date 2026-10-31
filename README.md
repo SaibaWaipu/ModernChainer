@@ -37,7 +37,7 @@ class MLP(chainer.Chain):
 | Batched decode | 動作: `PagedBatchRunner` + batched paged attention |
 | Continuous batching | 動作: `RequestTable` / `BatchPlan`（論理バッチ） |
 | Speculative decoding | 動作: greedy の fork/verify/commit 参照実装 |
-| CUDA バックエンド | 動作: NVRTC + cuBLAS / cuBLASLt 融合、CUDA Graph、LLM / paged attention までネイティブ |
+| CUDA バックエンド | 動作: NVRTC + cuBLAS / cuBLASLt（bias+GELU 融合）、CUDA Graph、wide paged attention までネイティブ |
 | Python バインディング | コアサブセット: `Tensor`、`Variable`、`F.*`、`L.Linear`、`SGD`/`Adam`、`Chain` |
 | シリアライズ | ネイティブ `.mcn`、Chainer `.npz` は計画中 |
 | Trainer / Updater / Extensions | 計画中 |
@@ -210,10 +210,11 @@ CUDA（RTX 2070 SUPER）対 PyTorch 2.11.0+cu128（同じ GPU）。`torch/ours` 
 | 処理 | Modern Chainer | PyTorch | torch/ours |
 |---|---:|---:|---:|
 | matmul eager 512³ | 0.048 ms | 0.046 ms | 0.95× |
-| matmul graph 512³ | 0.043 ms | 0.045 ms | 1.04× |
-| linear 128×784×256 | 0.023 ms | 0.038 ms | 1.62× |
-| Adam eager 1M | 0.146 ms | 0.214 ms | 1.46× |
-| Adam graph 1M | 0.078 ms | 0.231 ms | 2.97× |
+| matmul graph 512³ | 0.043 ms | 0.044 ms | 1.02× |
+| linear 128×784×256 | 0.023 ms | 0.038 ms | 1.61× |
+| linear+gelu 128×784×256 | 0.023 ms | 0.040 ms | 1.70× |
+| Adam eager 1M | 0.156 ms | 0.212 ms | 1.36× |
+| Adam graph 1M | 0.077 ms | 0.231 ms | 3.01× |
 
 ```bash
 cargo run --release --example cuda_bench
@@ -222,7 +223,7 @@ CUDA_VISIBLE_DEVICES=<RTX 2070S の UUID> \
   /tmp/opencode/torch-venv/bin/python scripts/bench_cuda_vs_pytorch.py
 ```
 
-cuBLASLt は bias を GEMM エピローグで融合し、CUDA Graph は固定 shape の matmul / Adam 更新を再再生します。PyTorch 側の Adam Graph は `capturable=True` で測定しています。
+cuBLASLt は bias、および GELU を GEMM エピローグで融合します。decoder の MLP は GELU に切り替え、bias+GELU を 1 カーネルで実行します。CUDA Graph は固定 shape の matmul / Adam 更新を再再生します。PyTorch 側の Adam Graph は `capturable=True` で測定しています。
 
 - [`scripts/bench_vs_pytorch.py`](scripts/bench_vs_pytorch.py)
 - [`docs/benchmarks.md`](docs/benchmarks.md)（英語）
@@ -256,8 +257,9 @@ Vulkan テストは利用可能なアダプタ（NVIDIA / AMD / Intel / Mesa lav
 ## 主な制約
 
 - CUDA のネイティブ実装は elementwise / reduction / matmul / linear / Adam / softmax CE / embedding / layer_norm / attention / paged attention まで。汎用 `sum_to`（bias 以外）のみ CPU フォールバックです。
-- CUDA Graph は preallocated バッファ前提です（`graph_matmul` / `graph_adam`）。任意の `Run` をそのままキャプチャすることはまだできません。
+- CUDA Graph は preallocated バッファ前提です（`graph_matmul` / `graph_adam`）。任意の `Run` をそのままキャプチャするにはメモリプールと in-place 経路が必要で、未対応です。
 - CUDA の reduction / attention / paged attention はネイティブですが、fp16/bf16 は未対応です。
+- wide paged attention は block-per-query の CUDA カーネルです。
 - Python の CUDA テンソル API、`Run` / `PagedBatchRunner` / `Trainer` は未公開（Rust ファースト）。
 - Paged COW はテンソル単位。ブロック単位の in-place COW と CUDA paged-attention カーネルは今後。
 - リリースはまだ行っていません。
