@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use modern_chainer_core::{Error, Result};
 
@@ -6,22 +7,31 @@ pub(crate) struct GpuContext {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub info: wgpu::AdapterInfo,
+    pub adapter_index: usize,
+    pub pipelines: Mutex<HashMap<String, (wgpu::ComputePipeline, wgpu::BindGroupLayout)>>,
 }
 
 impl GpuContext {
     pub fn new() -> Result<Arc<Self>> {
+        Self::with_adapter(0)
+    }
+
+    pub fn with_adapter(index: usize) -> Result<Arc<Self>> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
-            compatible_surface: None,
-            ..Default::default()
-        }))
-        .map_err(|e| Error::Backend(format!("no Vulkan adapter: {e}")))?;
+        let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN));
+        let adapter = adapters.get(index).cloned().ok_or_else(|| {
+            Error::Backend(format!(
+                "Vulkan adapter index {index} out of range (found {})",
+                adapters.len()
+            ))
+        })?;
+        Self::from_adapter(adapter, index)
+    }
 
+    fn from_adapter(adapter: wgpu::Adapter, adapter_index: usize) -> Result<Arc<Self>> {
         let info = adapter.get_info();
         let limits = wgpu::Limits::downlevel_defaults();
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -36,6 +46,8 @@ impl GpuContext {
             device,
             queue,
             info,
+            adapter_index,
+            pipelines: Mutex::new(HashMap::new()),
         }))
     }
 }

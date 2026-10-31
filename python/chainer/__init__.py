@@ -28,7 +28,9 @@ from ._chainer import (
     Variable,
     __version__,
     cuda_available,
+    synchronize,
     vulkan_available,
+    vulkan_devices,
 )
 from . import functions, links, optimizers
 
@@ -81,7 +83,9 @@ __all__ = [
     "Variable",
     "__version__",
     "cuda_available",
+    "synchronize",
     "vulkan_available",
+    "vulkan_devices",
     "functions",
     "links",
     "optimizers",

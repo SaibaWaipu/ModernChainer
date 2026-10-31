@@ -36,6 +36,11 @@ impl VulkanBackend {
         Ok(Self::from_context(ctx))
     }
 
+    pub fn with_adapter(index: usize) -> Result<Self> {
+        let ctx = GpuContext::with_adapter(index)?;
+        Ok(Self::from_context(ctx))
+    }
+
     pub(crate) fn from_context(ctx: Arc<GpuContext>) -> Self {
         Self {
             ops: VulkanOps {
@@ -47,6 +52,18 @@ impl VulkanBackend {
 
     pub fn adapter_name(&self) -> &str {
         &self.ctx.info.name
+    }
+
+    pub fn adapter_index(&self) -> usize {
+        self.ctx.adapter_index
+    }
+
+    pub fn synchronize(&self) -> Result<()> {
+        self.ctx
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| Error::Backend(format!("poll failed: {e}")))?;
+        Ok(())
     }
 
     pub(crate) fn create_buffer(&self, bytes: usize) -> Result<wgpu::Buffer> {
@@ -108,7 +125,7 @@ impl Backend for VulkanBackend {
     type Ops = VulkanOps;
 
     fn device(&self) -> Device {
-        Device::Vulkan(0)
+        Device::Vulkan(self.ctx.adapter_index as u32)
     }
 
     fn ops(&self) -> &Self::Ops {

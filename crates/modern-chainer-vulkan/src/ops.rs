@@ -50,6 +50,15 @@ impl VulkanOps {
         code: &str,
         entries: &[wgpu::BindGroupLayoutEntry],
     ) -> (wgpu::ComputePipeline, wgpu::BindGroupLayout) {
+        if let Some((pipeline, layout)) = self
+            .ctx
+            .pipelines
+            .lock()
+            .expect("vulkan pipeline cache poisoned")
+            .get(label)
+        {
+            return (pipeline.clone(), layout.clone());
+        }
         let device = &self.ctx.device;
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(label),

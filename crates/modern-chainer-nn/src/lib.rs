@@ -53,6 +53,26 @@ impl Linear<CpuBackend> {
 }
 
 impl<B: Backend> Linear<B> {
+    pub fn with_backend(
+        backend: B,
+        in_features: usize,
+        out_features: usize,
+        seed: u64,
+    ) -> Result<Self> {
+        let weight = Tensor::from_f32(
+            backend.clone(),
+            &he_normal([out_features, in_features], in_features, seed),
+            [out_features, in_features],
+        )?;
+        let bias = Tensor::from_f32(backend, &vec![0.0; out_features], [out_features])?;
+        Ok(Self {
+            weight: Variable::new(weight),
+            bias: Some(Variable::new(bias)),
+            in_features,
+            out_features,
+        })
+    }
+
     pub fn from_parts(
         weight: Variable<B>,
         bias: Option<Variable<B>>,
