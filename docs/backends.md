@@ -111,7 +111,7 @@ and dynamic library loading, so a build does not require the CUDA toolkit or
 | bias add | row-bias kernel |
 | transpose2d | NVRTC kernel |
 | matmul | cuBLAS sgemm (row-major via the standard swap) |
-| linear | cuBLASLt fused bias / GELU epilogue (cuBLAS without epilogue) |
+| linear | ComputeType F32 (cuBLAS+bias), TF32 (cuBLASLt bias/GELU), F16/BF16 (mixed cuBLASLt) |
 | linear_backward | cuBLAS + transpose |
 | adam_update | fused NVRTC kernel |
 | sum_all / 2-D bias sum_to | NVRTC reductions |
@@ -129,6 +129,25 @@ and dynamic library loading, so a build does not require the CUDA toolkit or
 Only generic `sum_to` (shapes other than a 2-D tensor reduced to its trailing
 1-D bias) copies to the CPU backend. Everything on the training and decoder
 paths — including dense and paged attention — is native.
+
+### Memory pool and compute types
+
+`CudaPool` caches f32/i64/u8/f16/bf16 `CudaSlice` allocations and returns them
+on drop. Exact-size matching keeps storage lengths consistent; `alloc_zeroed_for`
+memsets reused buffers. The pool removes most `cudaMalloc`/`cudaFree` traffic
+from the hot path and is the prerequisite for future graph capture of dynamic
+steps.
+
+`CudaBackend::set_compute_type` selects:
+
+| Compute type | Path |
+|---|---|
+| F32 | cuBLAS GEMM + bias kernel (strict f32) |
+| TF32 | cuBLASLt (FAST_TF32; hardware dependent) |
+| F16 | cast x/w/bias to f16, cuBLASLt f16 GEMM, cast output to f32 |
+| BF16 | same with bf16 |
+
+F16/BF16 are compute types for linear/matmul, not a full-model dtype or AMP.
 
 ### CUDA Graph
 
@@ -159,7 +178,8 @@ Tests skip when no CUDA driver/runtime is available.
 
 ### Next
 
-- fp16/bf16 kernels and mixed precision.
+- Full-model f16/bf16 dtype and AMP (loss scaling, master weights).
+- Run-level graph capture with an in-place state path.
 - Further paged-attention/flash-decode tuning and TTFT/tokens/s benchmarks.
 - Run-level CUDA Graph capture with a memory pool.
 - TTFT/tokens/s and larger transformer benchmarks.

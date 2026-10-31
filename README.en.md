@@ -44,7 +44,7 @@ class MLP(chainer.Chain):
 | Batched decode | Working: `PagedBatchRunner` + batched paged attention |
 | Continuous batching | Working: `RequestTable` / `BatchPlan` (logical batching) |
 | Speculative decoding | Working: greedy fork/verify/commit reference |
-| CUDA backend | Working: NVRTC + cuBLAS/cuBLASLt (bias+GELU fusion), CUDA Graph, native wide paged attention |
+| CUDA backend | Working: NVRTC + cuBLAS/cuBLASLt (F32/TF32/F16/BF16 compute types, bias+GELU fusion), memory pool, CUDA Graph, wide paged attention |
 | Python bindings | Core subset: `Tensor`, `Variable`, `F.*`, `L.Linear`, `SGD`/`Adam`, `Chain` |
 | Serialization | Native `.mcn`; Chainer `.npz` reader planned |
 | Trainer / Updater / Extensions | Planned |
@@ -89,7 +89,13 @@ cargo run --release --example cuda_matmul
 
 `cudarc` uses dynamic loading, so no CUDA toolkit or `nvcc` is required at
 build time. NVRTC compiles kernels at runtime for the device's compute
-capability.
+capability. A memory pool reuses device allocations, and `ComputeType` selects
+the GEMM precision.
+
+```rust
+let gpu = CudaBackend::new(0)?;
+gpu.set_compute_type(ComputeType::F16); // F32 / Tf32 / F16 / Bf16
+```
 
 ## Quick start — Python
 
@@ -236,12 +242,12 @@ checked in so improvements are measurable. CUDA (RTX 2070 SUPER) versus PyTorch 
 
 | Workload | Modern Chainer | PyTorch | torch/ours |
 |---|---:|---:|---:|
-| matmul eager 512³ | 0.048 ms | 0.046 ms | 0.95× |
-| matmul graph 512³ | 0.043 ms | 0.044 ms | 1.02× |
-| linear 128×784×256 | 0.023 ms | 0.038 ms | 1.61× |
-| linear+gelu 128×784×256 | 0.023 ms | 0.040 ms | 1.70× |
-| Adam eager 1M | 0.156 ms | 0.212 ms | 1.36× |
-| Adam graph 1M | 0.077 ms | 0.231 ms | 3.01× |
+| matmul eager 512³ | 0.046 ms | 0.045 ms | 0.99× |
+| matmul graph 512³ | 0.043 ms | 0.044 ms | 1.03× |
+| linear 128×784×256 | 0.021 ms | 0.038 ms | 1.82× |
+| linear+gelu 128×784×256 | 0.021 ms | 0.041 ms | 1.91× |
+| Adam eager 1M | 0.112 ms | 0.216 ms | 1.93× |
+| Adam graph 1M | 0.077 ms | 0.229 ms | 2.99× |
 
 ```bash
 cargo run --release --example cuda_bench
@@ -251,8 +257,10 @@ CUDA_VISIBLE_DEVICES=<RTX 2070S UUID> \
 ```
 
 cuBLASLt fuses bias and GELU into the GEMM epilogue; the decoder MLP uses
-bias+GELU in one kernel. CUDA Graph replays fixed-shape matmul/Adam updates.
-The PyTorch Adam graph is measured with `capturable=True`.
+bias+GELU in one kernel. `ComputeType` selects F32 / TF32 / F16 / BF16. A CUDA
+memory pool reuses device allocations. CUDA Graph replays fixed-shape
+matmul/Adam updates; the PyTorch Adam graph is measured with
+`capturable=True`.
 
 - [`scripts/bench_vs_pytorch.py`](scripts/bench_vs_pytorch.py)
 - [`docs/benchmarks.md`](docs/benchmarks.md)
@@ -290,8 +298,10 @@ lavapipe) and skip cleanly when no Vulkan loader is present.
   softmax cross entropy, embedding, layer_norm, attention and paged attention.
   Only generic `sum_to` (non-bias) falls back to CPU.
 - CUDA Graph requires preallocated buffers (`graph_matmul` / `graph_adam`);
-  arbitrary `Run` capture needs a memory pool and in-place path, not yet done.
-- CUDA covers fp32 only; fp16/bf16 are not implemented.
+  the memory pool exists, but arbitrary `Run` capture needs an in-place state
+  path, not yet done.
+- F16/BF16 are supported as linear/matmul compute types, not as a full model
+  dtype or AMP; each call casts f32 to f16/bf16 and back.
 - Wide paged attention uses a block-per-query CUDA kernel.
 - Python does not expose CUDA tensors, `Run`, `PagedBatchRunner` or `Trainer`
   yet (Rust-first).

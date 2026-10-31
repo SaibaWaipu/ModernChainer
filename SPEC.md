@@ -208,6 +208,9 @@ sampling.
 - cuBLAS handles `matmul`, fused `linear`, and `linear_backward`.
 - Native paged KV: `paged_append`, `paged_attention`, `paged_attention_batch`.
 - cuBLASLt fuses bias and GELU into the linear GEMM epilogue.
+- `ComputeType` F32/TF32/F16/BF16. F32 uses cuBLAS+bias; TF32 uses cuBLASLt;
+  F16/BF16 cast f32 inputs, run cuBLASLt mixed GEMM and cast back.
+- A per-runtime CUDA memory pool reuses f32/i64/u8/f16/bf16 buffers.
 - CUDA Graph capture/replay for preallocated matmul (`graph_matmul`) and Adam
   (`graph_adam`).
 - Wide paged attention: block-per-query kernels for single and batched decode.
@@ -268,8 +271,9 @@ subclassing; custom ops must currently be written in Rust.
 - Native attention, paged append/attention/batch, reductions, softmax CE,
   embedding, layer_norm, split/merge heads, concat and last-row.
 - Only generic `sum_to` (non-bias) falls back to CPU.
-- cuBLASLt fused bias / GELU for `linear`; CUDA Graph for fixed-shape
-  matmul/Adam; block-per-query wide paged attention.
+- cuBLASLt fused bias / GELU for `linear`; `ComputeType` F32/TF32/F16/BF16;
+  memory pool; CUDA Graph for fixed-shape matmul/Adam; block-per-query wide
+  paged attention.
 - CUDA Graph capture requires preallocated buffers and a non-default stream;
   arbitrary `Run` capture is deferred.
 - Tested on RTX 2070 SUPER (sm_75) and compiled for the detected compute
@@ -296,12 +300,12 @@ Current CPU result on the checked-in micro-suite is a ~0.87–0.91× geometric m
 
 | Workload | Modern Chainer | PyTorch | torch/ours |
 |---|---:|---:|---:|
-| matmul eager 512³ | 0.048 ms | 0.046 ms | 0.95× |
-| matmul graph 512³ | 0.043 ms | 0.044 ms | 1.02× |
-| linear 128×784×256 | 0.023 ms | 0.038 ms | 1.61× |
-| linear+gelu 128×784×256 | 0.023 ms | 0.040 ms | 1.70× |
-| Adam eager 1M | 0.156 ms | 0.212 ms | 1.36× |
-| Adam graph 1M | 0.077 ms | 0.231 ms | 3.01× |
+| matmul eager 512³ | 0.046 ms | 0.045 ms | 0.99× |
+| matmul graph 512³ | 0.043 ms | 0.044 ms | 1.03× |
+| linear 128×784×256 | 0.021 ms | 0.038 ms | 1.82× |
+| linear+gelu 128×784×256 | 0.021 ms | 0.041 ms | 1.91× |
+| Adam eager 1M | 0.112 ms | 0.216 ms | 1.93× |
+| Adam graph 1M | 0.077 ms | 0.229 ms | 2.99× |
 
 See `docs/benchmarks.md` for methodology and caveats.
 
@@ -353,6 +357,9 @@ docs/                      architecture, backends, API, benchmarks, roadmap
 - CUDA parity: elementwise, matmul, linear, softmax CE, reduction, LLM kernels,
   dense decoder logits, paged attention, paged batched decode and an Adam
   training loop against CPU. Graph replay is checked against eager matmul/Adam.
+- F16/BF16 compute types compared against F32 linear/matmul within tolerance;
+  a BF16 decoder logit comparison covers the mixed path.
+- Memory-pool reuse and zeroed reuse are tested.
 - `cargo fmt`, `cargo clippy -D warnings`, `cargo test` in CI.
 
 ## 10. Risks and mitigations

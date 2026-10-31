@@ -114,8 +114,8 @@ Method:
 - PyTorch: `scripts/bench_cuda_vs_pytorch.py`; `torch.matmul`,
   `F.linear`, `torch.optim.Adam(capturable=True)`, and `torch.cuda.CUDAGraph`.
 - Our linear uses the cuBLASLt bias/GELU epilogue; the decoder MLP uses
-  bias+GELU. Our Adam graph replays the fused single-kernel update into
-  preallocated buffers.
+  bias+GELU. The CUDA memory pool is active for all measurements. Our Adam
+  graph replays the fused single-kernel update into preallocated buffers.
 - CUDA 12.8 wheels; the GTX 1080 (sm_61) is not supported by this PyTorch
   build, so both sides run on the RTX 2070 SUPER (sm_75).
 
