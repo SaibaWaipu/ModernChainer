@@ -1,6 +1,6 @@
 # Modern Chainer — Specification
 
-Status: v0.8.0 implementation. This document records the product intent, the
+Status: v0.9.0 implementation. This document records the product intent, the
 implemented surface, and the deliberately deferred work.
 
 ## 1. Vision
@@ -218,16 +218,18 @@ sampling.
 - CUDA Graph capture/replay for preallocated matmul (`graph_matmul`), Adam
   (`graph_adam`), and the generalized Static Step API: `CudaStaticStep`,
   `StaticBuilder`, `CudaStaticContext`, `StaticRun`. `LinearMseAdamStep`,
-  `LinearForwardStep` and `StaticDecoderStep` cover training, forward and
-  one-token decode over fixed buffers with device-resident state.
+  `LinearForwardStep`, `StaticDecoderStep` and `BatchedStaticDecoder` cover
+  training, forward, one-token decode and fixed-shape batched prefill/decode
+  over fixed buffers with device-resident state.
 - Wide paged attention: block-per-query kernels for single and batched decode.
 - Only generic `sum_to` (non-bias) falls back to CPU.
 - Verified against CPU for elementwise, matmul, linear, softmax CE, LLM
   kernels, dense decoder logits, paged attention and paged batched decode; a
   40-step Adam loop runs on an RTX 2070 SUPER.
 
-Deferred: CUDA reduction/attention/paged-attention kernels, block-level
-in-place COW, optimizer-state migration, Training-By-Run, Python bindings.
+Deferred: per-sequence static decode positions, variable-length/continuous
+static batching, block-level in-place COW, optimizer-state migration,
+Training-By-Run, Python bindings for Run/static APIs.
 
 ## 5. Autograd semantics
 
@@ -372,6 +374,9 @@ docs/                      architecture, backends, API, benchmarks, roadmap
   device step counter in sync; `LinearForwardStep` replays with changed inputs;
   `StaticDecoderStep` matches a dense CPU decoder token-by-token over a prompt
   and then generates from the replayed graph.
+- `BatchedStaticDecoder` runs fixed-shape batched prefill and decode over a
+  shared KV cache in separate captured graphs; batched prefill and decode logits
+  match the dense CPU decoder per batch element.
 - Memory-pool reuse and zeroed reuse are tested.
 - `cargo fmt`, `cargo clippy -D warnings`, `cargo test` in CI.
 

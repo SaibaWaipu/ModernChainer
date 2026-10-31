@@ -175,12 +175,27 @@ The **Static Step API** generalizes run-level graphs:
 - `StaticRun` owns the buffers, captures the step once and replays it with a
   new input.
 
-`LinearMseAdamStep` (Linear + MSE + Adam), `LinearForwardStep`, and
-`StaticDecoderStep` are included.  The static decoder keeps weights, per-layer
-K/V caches, activations and a position counter in fixed buffers; each replay
-appends one token at the device position, runs causal attention over the cache,
-and advances the position inside the graph.  It matches a dense CPU decoder
-token-by-token.
+`LinearMseAdamStep` (Linear + MSE + Adam), `LinearForwardStep`,
+`StaticDecoderStep`, and `BatchedStaticDecoder` are included.  The single
+static decoder keeps weights, per-layer K/V caches, activations and a position
+counter in fixed buffers; each replay appends one token at the device position,
+runs causal attention over the cache, and advances the position inside the
+graph.  It matches a dense CPU decoder token-by-token.
+
+`BatchedStaticDecoder` captures two graphs over one shared KV cache:
+
+- **Prefill** processes `[batch, prefill_len]` tokens. Embedding, LayerNorm and
+  Q/K/V projections run as row-batched GEMMs. A prefill kernel writes all K/V
+  rows for the prompt, and causal prefill attention computes each query against
+  `0..=q`. The graph then sets the device position to `prefill_len`.
+- **Decode** processes one token per batch element at the shared position. A
+  batched append kernel writes each sequence's K/V, batched decode attention
+  reads `0..=position`, and the graph increments the position.
+
+Both graphs are replay-only: buffers never reallocate. Batched prefill and
+decode logits match the dense CPU decoder per batch element. The current
+limitation is synchronized positions and fixed prompt length; per-sequence
+positions and variable-length prefill are future work.
 
 The step/position counters are device scalars advanced by kernels inside the
 graph, so replay performs a complete step without host arguments.
@@ -211,8 +226,8 @@ Tests skip when no CUDA driver/runtime is available.
 ### Next
 
 - Full-model f16/bf16 dtype (all ops) and master-weight optimizer state.
-- Batched static prefill and batched static decode.
-- Throughput benchmarks for static decoder vs eager/PyTorch.
+- Per-sequence positions and variable-length / continuous static batching.
+- Longer-context prefill attention, f16/bf16 KV, and TTFT/tok/s tuning.
 - Backend-agnostic Static Step trait (currently CUDA-specific).
 - Further paged-attention/flash-decode tuning and TTFT/tokens/s benchmarks.
 - Run-level CUDA Graph capture with a memory pool.

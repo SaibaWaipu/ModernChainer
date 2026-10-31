@@ -26,7 +26,7 @@ class MLP(chainer.Chain):
         return self.l2(F.relu(self.l1(x)))
 ```
 
-## ステータス（v0.8.0）
+## ステータス（v0.9.0）
 
 | 領域 | 状態 |
 |---|---|
@@ -38,7 +38,8 @@ class MLP(chainer.Chain):
 | Continuous batching | 動作: `RequestTable` / `BatchPlan`（論理バッチ） |
 | Speculative decoding | 動作: greedy の fork/verify/commit 参照実装 |
 | CUDA バックエンド | 動作: NVRTC + cuBLAS / cuBLASLt、F32/TF32/F16/BF16 compute type、AMP、メモリプール、CUDA Graph、wide paged attention |
-| Static Step API / Run-level CUDA Graph | 動作: `CudaStaticStep` + `StaticRun`。`LinearMseAdamStep` / `LinearForwardStep` / **`StaticDecoderStep`** を同梱 |
+| Static Step API / Run-level CUDA Graph | 動作: `CudaStaticStep` + `StaticRun`。`LinearMseAdamStep` / `LinearForwardStep` / `StaticDecoderStep` を同梱 |
+| Batched static prefill / decode | 動作: `BatchedStaticDecoder`。固定 shape の batched prefill と batched decode を CUDA Graph で replay |
 | Python バインディング | コアサブセット: `Tensor`、`Variable`、`F.*`、`L.Linear`、`SGD`/`Adam`、`Chain` |
 | シリアライズ | ネイティブ `.mcn`、Chainer `.npz` は計画中 |
 | Trainer / Updater / Extensions | 計画中 |
@@ -59,6 +60,7 @@ cargo run --release --example cuda_bench
 cargo run --release --example graph_trainer
 cargo run --release --example static_step
 cargo run --release --example static_decoder
+cargo run --release --example static_batched_decoder
 cargo run --release --example vulkan_matmul   # Vulkan ローダ/ICD が必要
 ```
 
@@ -236,19 +238,33 @@ CUDA（RTX 2070 SUPER）対 PyTorch 2.11.0+cu128（同じ GPU）。`torch/ours` 
 | Adam eager 1M | 0.112 ms | 0.216 ms | 1.93× |
 | Adam graph 1M | 0.077 ms | 0.229 ms | 2.99× |
 
+Batched static decoder（RTX 2070 SUPER、F32、B=8、prompt=16、decode=32、context 16→48、ランダム重み）。TTFT は batched prefill の中央値、decode は 1 step ごとに logits を CPU にコピーして argmax するホストループ込みです。
+
+| 指標 | Modern Chainer（static graph） | PyTorch 2.11 eager | 比 |
+|---|---:|---:|---:|
+| TTFT（B=8 prefill） | 0.84–0.97 ms | 1.43 ms | 1.5–1.7× |
+| prefill throughput | 132k–152k tok/s | 89k tok/s | 1.5–1.7× |
+| decode throughput（B=8） | 12.8k tok/s | 5.5k–7.0k tok/s | 1.8–2.3× |
+| per-sequence decode | ~1.6k tok/s | ~0.7k–0.9k tok/s | 1.8–2.3× |
+
 ```bash
 cargo run --release --example cuda_bench
 cargo run --release --example graph_trainer
 cargo run --release --example static_step
 cargo run --release --example static_decoder
+cargo run --release --example static_batched_decoder
 # PyTorch 比較（CUDA 版 PyTorch の venv を使用）
 CUDA_VISIBLE_DEVICES=<RTX 2070S の UUID> \
   /tmp/opencode/torch-venv/bin/python scripts/bench_cuda_vs_pytorch.py
+CUDA_VISIBLE_DEVICES=<RTX 2070S の UUID> \
+  /tmp/opencode/torch-venv/bin/python scripts/bench_static_batched_vs_pytorch.py
 ```
 
 cuBLASLt は bias、および GELU を GEMM エピローグで融合します。decoder の MLP は GELU に切り替え、bias+GELU を 1 カーネルで実行します。`ComputeType` で F32 / TF32 / F16 / BF16 を選べます。メモリプールがデバイス割り当てを再利用します。
 
 `CudaStaticStep` は固定バッファを宣言し、in-place で 1 step を enqueue する汎用 trait です。`StaticRun` がバッファを所有して CUDA Graph をキャプチャし、入力だけ差し替えて replay します。`LinearMseAdamStep`（Linear + MSE + Adam）、`LinearForwardStep`（Linear forward）、`StaticDecoderStep`（KV キャッシュ + position をデバイス常駐にした 1 トークン decode）を同梱しています。step / position はデバイス上で進むため、同じ graph を繰り返し replay できます。
+
+`BatchedStaticDecoder` は固定 shape の batched prefill と batched decode を別々の CUDA Graph としてキャプチャし、同じ KV キャッシュを共有します。prefill は `[batch, prefill_len]` のトークンを causal attention で一括処理し、decode は batch ごとに 1 トークンずつ処理して position を graph 内で進めます。TTFT と tok/s は `examples/static_batched_decoder.rs` で計測できます。
 
 - [`scripts/bench_vs_pytorch.py`](scripts/bench_vs_pytorch.py)
 - [`docs/benchmarks.md`](docs/benchmarks.md)（英語）
@@ -282,7 +298,7 @@ Vulkan テストは利用可能なアダプタ（NVIDIA / AMD / Intel / Mesa lav
 ## 主な制約
 
 - CUDA のネイティブ実装は elementwise / reduction / matmul / linear / Adam / softmax CE / embedding / layer_norm / attention / paged attention まで。汎用 `sum_to`（bias 以外）のみ CPU フォールバックです。
-- static decoder は **1 トークン decode** 用です。prompt の一括 prefill や batched static decode はまだありません。
+- static decoder の batched prefill / decode は **固定 batch / 固定 prompt 長 / 同期 position** です。可変長 prompt、連続 batching、batch ごとに異なる position は未対応です。
 - `CudaStaticStep` は CUDA 固有です。任意の `Run` をそのままキャプチャする汎用 static step はまだありません。
 - static decoder の max_seq は固定バッファ長で制限されます。
 - F16/BF16 は **compute type** と **autocast AMP** に対応しています。autocast は GEMM 系（linear / matmul）を低精度化し、LayerNorm / Softmax / reduction は f32 のままです。モデル全体を f16/bf16 dtype にする経路は未対応です。

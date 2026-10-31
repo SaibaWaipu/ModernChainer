@@ -59,10 +59,13 @@ Remaining: block-level in-place COW, wider kernels, CUDA.
   paged attention, CUDA memory pool, F32/TF32/F16/BF16 compute types,
   autocast AMP + GradScaler.
 - Done: generalized Static Step API (`CudaStaticStep` / `StaticBuilder` /
-  `CudaStaticContext` / `StaticRun`), Linear+MSE+Adam, Linear forward, and
-  `StaticDecoderStep` with device-resident KV/position and token replay.
-- Next: batched static prefill/decode, backend-agnostic Static Step trait,
-  full-model f16/bf16 dtype, TTFT/tokens/s.
+  `CudaStaticContext` / `StaticRun`), Linear+MSE+Adam, Linear forward,
+  `StaticDecoderStep`, and `BatchedStaticDecoder` with captured batched
+  prefill/decode over a shared KV cache.
+- Done: TTFT and tokens/s benchmarks against PyTorch eager.
+- Next: per-sequence positions, variable-length / continuous static batching,
+  longer-context prefill attention, backend-agnostic Static Step trait,
+  full-model f16/bf16 dtype.
 
 ## v0.7 — Training-By-Run
 

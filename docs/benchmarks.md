@@ -91,8 +91,9 @@ The decoder is a correctness reference (2 layers, `d_model=8`) used to verify
 explicit KV state, prefill/decode parity, paged-vs-dense attention, batching
 equivalence and speculative equality. `PagedBatchRunner` performs a real batched
 decode step over paged KV, but the CPU reference is not performance-tuned: block
-appends copy storage and the attention kernel is scalar. TTFT, inter-token
-latency, tokens/s and block utilisation benchmarks arrive with the CUDA kernels.
+appends copy storage and the attention kernel is scalar. CUDA static prefill and
+decode are benchmarked below; CPU paged block utilisation and continuous
+batching latency are still open.
 ### CUDA vs PyTorch CUDA
 
 RTX 2070 SUPER, PyTorch 2.11.0+cu128, 20 iterations after 3 warmups (Adam:
@@ -118,6 +119,39 @@ Method:
   graph replays the fused single-kernel update into preallocated buffers.
 - CUDA 12.8 wheels; the GTX 1080 (sm_61) is not supported by this PyTorch
   build, so both sides run on the RTX 2070 SUPER (sm_75).
+
+### Batched static prefill / decode
+
+Fixed-shape batched decoder, F32, B=8, prompt length 16, 32 decoded tokens,
+context 16→48, random weights, 4 layers / d_model 64 / 4 heads. Both sides copy
+the `[batch, vocab]` logits to the host and run argmax every decode step, then
+copy the next tokens back. TTFT is the batched prefill; decode throughput
+includes that host loop.
+
+| Metric | Modern Chainer | PyTorch 2.11 eager | Ratio |
+|---|---:|---:|---:|
+| TTFT (B=8 prefill) | 0.84–0.97 ms | 1.43 ms | 1.5–1.7× |
+| prefill throughput | 132k–152k tok/s | 89k tok/s | 1.5–1.7× |
+| decode throughput (B=8) | 12.8k tok/s | 5.5k–7.0k tok/s | 1.8–2.3× |
+| per-sequence decode | ~1.6k tok/s | ~0.7k–0.9k tok/s | 1.8–2.3× |
+
+Method:
+
+- Modern Chainer: `cargo run --release --example static_batched_decoder`.
+  Prefill is one captured graph replay over `[8, 16]` tokens; decode is one
+  captured graph replay per step. The KV cache, position and all activations
+  are preallocated; no allocation occurs in the timed loop.
+- PyTorch: `scripts/bench_static_batched_vs_pytorch.py`, eager
+  `F.linear`/`F.layer_norm`/`F.gelu`, explicit KV cache and Python per-step
+  dispatch. TF32 matmul is enabled.
+- The PyTorch side is eager, not `torch.compile` or a captured graph. The
+  comparison measures the graph-replay advantage for this shape, not a
+  like-for-like compiler comparison.
+
+The prefill attention kernel is intentionally simple (one thread per
+batch/head/query, three passes over `0..=q`). It is fast enough for short
+prompts but is the next optimization target for longer contexts, alongside
+f16/bf16 KV and batched decode with per-sequence positions.
 
 Matmul is near parity; linear and Adam show the benefit of fused epilogues and
 fewer launches. Graph replay helps both, but our Adam graph has one kernel

@@ -33,7 +33,7 @@ class MLP(chainer.Chain):
         return self.l2(F.relu(self.l1(x)))
 ```
 
-## Status (v0.8.0)
+## Status (v0.9.0)
 
 | Area | Status |
 |---|---|
@@ -46,6 +46,7 @@ class MLP(chainer.Chain):
 | Speculative decoding | Working: greedy fork/verify/commit reference |
 | CUDA backend | Working: NVRTC + cuBLAS/cuBLASLt, F32/TF32/F16/BF16 compute types, AMP, memory pool, CUDA Graph, wide paged attention |
 | Static Step API / Run-level CUDA Graph | Working: `CudaStaticStep` + `StaticRun`; includes `LinearMseAdamStep`, `LinearForwardStep` and `StaticDecoderStep` |
+| Batched static prefill / decode | Working: `BatchedStaticDecoder`; fixed-shape batched prefill and decode replayed as CUDA Graphs |
 | Python bindings | Core subset: `Tensor`, `Variable`, `F.*`, `L.Linear`, `SGD`/`Adam`, `Chain` |
 | Serialization | Native `.mcn`; Chainer `.npz` reader planned |
 | Trainer / Updater / Extensions | Planned |
@@ -69,6 +70,7 @@ cargo run --release --example cuda_bench
 cargo run --release --example graph_trainer
 cargo run --release --example static_step
 cargo run --release --example static_decoder
+cargo run --release --example static_batched_decoder
 cargo run --release --example vulkan_matmul   # requires a Vulkan loader/ICD
 ```
 
@@ -120,6 +122,12 @@ Graph, and replays it with a new input. Included models: `LinearMseAdamStep`
 (Linear + MSE + Adam), `LinearForwardStep`, and `StaticDecoderStep` (one-token
 decode with device-resident KV cache and position). Counters live on the
 device, so the same graph replays without host arguments.
+
+`BatchedStaticDecoder` captures fixed-shape batched prefill and decode as two
+CUDA Graphs over one shared KV cache. Prefill processes `[batch, prefill_len]`
+tokens with causal attention in one replay; decode processes one token per
+batch element and advances the position inside the graph. TTFT and tok/s are
+measured by `examples/static_batched_decoder.rs`.
 
 ## Quick start — Python
 
@@ -273,14 +281,28 @@ checked in so improvements are measurable. CUDA (RTX 2070 SUPER) versus PyTorch 
 | Adam eager 1M | 0.112 ms | 0.216 ms | 1.93× |
 | Adam graph 1M | 0.077 ms | 0.229 ms | 2.99× |
 
+Batched static decoder (RTX 2070 SUPER, F32, B=8, prompt=16, decode=32,
+context 16→48, random weights). TTFT is the median batched prefill; decode
+includes a host loop that copies logits to CPU and runs argmax each step.
+
+| Metric | Modern Chainer (static graph) | PyTorch 2.11 eager | Ratio |
+|---|---:|---:|---:|
+| TTFT (B=8 prefill) | 0.84–0.97 ms | 1.43 ms | 1.5–1.7× |
+| prefill throughput | 132k–152k tok/s | 89k tok/s | 1.5–1.7× |
+| decode throughput (B=8) | 12.8k tok/s | 5.5k–7.0k tok/s | 1.8–2.3× |
+| per-sequence decode | ~1.6k tok/s | ~0.7k–0.9k tok/s | 1.8–2.3× |
+
 ```bash
 cargo run --release --example cuda_bench
 cargo run --release --example graph_trainer
 cargo run --release --example static_step
 cargo run --release --example static_decoder
+cargo run --release --example static_batched_decoder
 # PyTorch comparison (CUDA-enabled torch venv)
 CUDA_VISIBLE_DEVICES=<RTX 2070S UUID> \
   /tmp/opencode/torch-venv/bin/python scripts/bench_cuda_vs_pytorch.py
+CUDA_VISIBLE_DEVICES=<RTX 2070S UUID> \
+  /tmp/opencode/torch-venv/bin/python scripts/bench_static_batched_vs_pytorch.py
 ```
 
 cuBLASLt fuses bias and GELU into the GEMM epilogue; the decoder MLP uses
@@ -324,8 +346,9 @@ lavapipe) and skip cleanly when no Vulkan loader is present.
 - CUDA native coverage is elementwise, reductions, matmul, linear, Adam,
   softmax cross entropy, embedding, layer_norm, attention and paged attention.
   Only generic `sum_to` (non-bias) falls back to CPU.
-- The static decoder is decode-only (one token per replay); batched prefill and
-  batched static decode are not implemented.
+- Batched static prefill/decode uses fixed batch, fixed prompt length and a
+  synchronized position. Variable-length prompts, continuous batching, and
+  per-sequence positions are not implemented.
 - `CudaStaticStep` is CUDA-specific; a generic static step for arbitrary `Run`
   is still future work.
 - The static decoder is bounded by its fixed `max_seq` buffer.
