@@ -48,14 +48,14 @@ fn main() -> modern_chainer::Result<()> {
     let cb = Tensor::from_f32(cpu, &b_data, [n, n])?;
     let ga = Tensor::from_f32(gpu.clone(), &a_data, [n, n])?;
     let gb = Tensor::from_f32(gpu.clone(), &b_data, [n, n])?;
-    let cpu_ms = bench_cpu(
+    let matmul_cpu = bench_cpu(
         || {
             let _ = cpu.ops().matmul(&ca, &cb).unwrap();
         },
         3,
         20,
     );
-    let gpu_ms = bench_cuda(
+    let matmul_cuda = bench_cuda(
         &gpu,
         || {
             let _ = gpu.ops().matmul(&ga, &gb).unwrap();
@@ -64,8 +64,23 @@ fn main() -> modern_chainer::Result<()> {
         20,
     )?;
     println!(
-        "matmul {n}^3:      cpu {cpu_ms:.3} ms  cuda {gpu_ms:.3} ms  x{:.2}",
-        cpu_ms / gpu_ms
+        "matmul {n}^3:      cpu {matmul_cpu:.3} ms  cuda {matmul_cuda:.3} ms  x{:.2}",
+        matmul_cpu / matmul_cuda
+    );
+    let graph_matmul = gpu.graph_matmul(&ga, &gb)?;
+    graph_matmul.replay()?;
+    gpu.synchronize()?;
+    let matmul_graph = bench_cuda(
+        &gpu,
+        || {
+            graph_matmul.replay().unwrap();
+        },
+        3,
+        20,
+    )?;
+    println!(
+        "matmul graph:      cuda {matmul_graph:.3} ms  x{:.2} vs eager",
+        matmul_cuda / matmul_graph
     );
 
     let (batch, input, output) = (128usize, 784usize, 256usize);
@@ -78,14 +93,14 @@ fn main() -> modern_chainer::Result<()> {
     let gx = Tensor::from_f32(gpu.clone(), &x_data, [batch, input])?;
     let gw = Tensor::from_f32(gpu.clone(), &w_data, [output, input])?;
     let gbias = Tensor::from_f32(gpu.clone(), &bias_data, [output])?;
-    let cpu_ms = bench_cpu(
+    let linear_cpu = bench_cpu(
         || {
             let _ = cpu.ops().linear(&cx, &cw, Some(&cbias)).unwrap();
         },
         3,
         20,
     );
-    let gpu_ms = bench_cuda(
+    let linear_cuda = bench_cuda(
         &gpu,
         || {
             let _ = gpu.ops().linear(&gx, &gw, Some(&gbias)).unwrap();
@@ -94,8 +109,8 @@ fn main() -> modern_chainer::Result<()> {
         20,
     )?;
     println!(
-        "linear 128x784x256: cpu {cpu_ms:.3} ms  cuda {gpu_ms:.3} ms  x{:.2}",
-        cpu_ms / gpu_ms
+        "linear 128x784x256: cpu {linear_cpu:.3} ms  cuda {linear_cuda:.3} ms  x{:.2}",
+        linear_cpu / linear_cuda
     );
 
     let params = 1 << 20;
@@ -117,14 +132,14 @@ fn main() -> modern_chainer::Result<()> {
         eps: 1e-8,
         step: 1,
     };
-    let cpu_ms = bench_cpu(
+    let adam_cpu = bench_cpu(
         || {
             let _ = cpu.ops().adam_update(&cp, &cg, &cm, &cv, &cfg).unwrap();
         },
         2,
         10,
     );
-    let gpu_ms = bench_cuda(
+    let adam_cuda = bench_cuda(
         &gpu,
         || {
             let _ = gpu.ops().adam_update(&gp, &gg, &gm, &gv, &cfg).unwrap();
@@ -133,8 +148,34 @@ fn main() -> modern_chainer::Result<()> {
         10,
     )?;
     println!(
-        "adam 1M params:    cpu {cpu_ms:.3} ms  cuda {gpu_ms:.3} ms  x{:.2}",
-        cpu_ms / gpu_ms
+        "adam 1M params:    cpu {adam_cpu:.3} ms  cuda {adam_cuda:.3} ms  x{:.2}",
+        adam_cpu / adam_cuda
+    );
+    let graph_adam = gpu.graph_adam(&gp, &gg, &gm, &gv, &cfg)?;
+    graph_adam.replay()?;
+    gpu.synchronize()?;
+    let adam_graph = bench_cuda(
+        &gpu,
+        || {
+            graph_adam.replay().unwrap();
+        },
+        2,
+        20,
+    )?;
+    println!(
+        "adam graph:        cuda {adam_graph:.3} ms  x{:.2} vs eager",
+        adam_cuda / adam_graph
+    );
+    println!(
+        "JSON {{\"matmul_cpu\":{cpu_matmul:.6},\"matmul_cuda\":{matmul_cuda:.6},\"matmul_graph\":{matmul_graph:.6},\"linear_cpu\":{linear_cpu:.6},\"linear_cuda\":{linear_cuda:.6},\"adam_cpu\":{adam_cpu:.6},\"adam_cuda\":{adam_cuda:.6},\"adam_graph\":{adam_graph:.6}}}",
+        cpu_matmul = matmul_cpu,
+        matmul_cuda = matmul_cuda,
+        matmul_graph = matmul_graph,
+        linear_cpu = linear_cpu,
+        linear_cuda = linear_cuda,
+        adam_cpu = adam_cpu,
+        adam_cuda = adam_cuda,
+        adam_graph = adam_graph,
     );
     Ok(())
 }

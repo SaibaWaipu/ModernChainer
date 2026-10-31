@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use cudarc::cublas::CudaBlas;
+use cudarc::cublaslt::CudaBlasLT;
 use cudarc::driver::{CudaContext as DriverContext, CudaSlice, CudaStream};
 use modern_chainer_core::{Backend, DType, Device, Error, Result, Storage};
 
@@ -12,6 +13,7 @@ pub(crate) struct CudaRuntime {
     pub(crate) ctx: Arc<DriverContext>,
     pub(crate) stream: Arc<CudaStream>,
     pub(crate) blas: Arc<CudaBlas>,
+    pub(crate) blaslt: Arc<CudaBlasLT>,
     pub(crate) kernels: Kernels,
     pub(crate) ordinal: u32,
     pub(crate) name: String,
@@ -21,10 +23,20 @@ impl CudaRuntime {
     pub(crate) fn new(ordinal: u32) -> Result<Arc<Self>> {
         let ctx = DriverContext::new(ordinal as usize)
             .map_err(|error| Error::Backend(format!("cuda context: {error}")))?;
-        let stream = ctx.default_stream();
+        // A single non-default stream is used for all backend work.  Event
+        // tracking across streams is unnecessary and would inject event records
+        // into CUDA graph captures.
+        unsafe { ctx.disable_event_tracking() };
+        let stream = ctx
+            .new_stream()
+            .map_err(|error| Error::Backend(format!("cuda stream: {error}")))?;
         let blas = Arc::new(
             CudaBlas::new(stream.clone())
                 .map_err(|error| Error::Backend(format!("cublas: {error}")))?,
+        );
+        let blaslt = Arc::new(
+            CudaBlasLT::new(stream.clone())
+                .map_err(|error| Error::Backend(format!("cublaslt: {error}")))?,
         );
         let (major, minor) = ctx
             .compute_capability()
@@ -36,6 +48,7 @@ impl CudaRuntime {
             ctx,
             stream,
             blas,
+            blaslt,
             kernels,
             ordinal,
             name,

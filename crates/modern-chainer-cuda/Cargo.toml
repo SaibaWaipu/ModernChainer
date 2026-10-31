@@ -16,7 +16,7 @@ cuda = ["dep:cudarc"]
 modern-chainer-core.workspace = true
 modern-chainer-cpu.workspace = true
 bytemuck.workspace = true
-cudarc = { version = "0.19", optional = true, features = ["cublas", "nvrtc", "dynamic-loading", "cuda-12090"] }
+cudarc = { version = "0.19", optional = true, features = ["cublas", "cublaslt", "nvrtc", "dynamic-loading", "cuda-12090"] }
 
 [dev-dependencies]
 modern-chainer-autograd.workspace = true

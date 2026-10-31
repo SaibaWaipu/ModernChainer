@@ -539,3 +539,47 @@ fn cuda_paged_attention_batch_matches_cpu_batch() {
         .unwrap();
     assert_close(&values(&cuda_out), &values(&cpu_out));
 }
+
+#[test]
+#[serial]
+fn cuda_graph_matmul_and_adam_match_eager() {
+    use modern_chainer_core::AdamConfig;
+
+    if !is_available() {
+        eprintln!("skipping: CUDA is not available");
+        return;
+    }
+    let backend = CudaBackend::new(0).unwrap();
+    let a_data: Vec<f32> = (0..64 * 64).map(|i| (i as f32 * 0.001).sin()).collect();
+    let b_data: Vec<f32> = (0..64 * 64).map(|i| (i as f32 * 0.002).cos()).collect();
+    let a = Tensor::from_f32(backend.clone(), &a_data, [64, 64]).unwrap();
+    let b = Tensor::from_f32(backend.clone(), &b_data, [64, 64]).unwrap();
+    let graph = backend.graph_matmul(&a, &b).unwrap();
+    graph.replay().unwrap();
+    backend.synchronize().unwrap();
+    let eager = backend.ops().matmul(&a, &b).unwrap();
+    assert_close(&values(graph.out()), &values(&eager));
+
+    let n = 1024;
+    let p_data = vec![0.1f32; n];
+    let g_data = vec![0.01f32; n];
+    let zero = vec![0.0f32; n];
+    let p = Tensor::from_f32(backend.clone(), &p_data, [n]).unwrap();
+    let g = Tensor::from_f32(backend.clone(), &g_data, [n]).unwrap();
+    let m = Tensor::from_f32(backend.clone(), &zero, [n]).unwrap();
+    let v = Tensor::from_f32(backend.clone(), &zero, [n]).unwrap();
+    let cfg = AdamConfig {
+        lr: 0.001,
+        beta1: 0.9,
+        beta2: 0.999,
+        eps: 1e-8,
+        step: 1,
+    };
+    let graph_adam = backend.graph_adam(&p, &g, &m, &v, &cfg).unwrap();
+    graph_adam.replay().unwrap();
+    backend.synchronize().unwrap();
+    let (eager_p, eager_m, eager_v) = backend.ops().adam_update(&p, &g, &m, &v, &cfg).unwrap();
+    assert_close(&values(graph_adam.param()), &values(&eager_p));
+    assert_close(&values(graph_adam.m()), &values(&eager_m));
+    assert_close(&values(graph_adam.v()), &values(&eager_v));
+}

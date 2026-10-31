@@ -20,7 +20,9 @@ pub use modern_chainer_core::{
     AdamConfig, Backend, DType, Device, Error, Ops, Result, Shape, Strides, Tensor, he_normal,
 };
 pub use modern_chainer_cpu::{CpuBackend, CpuOps, CpuStorage};
-pub use modern_chainer_cuda::{CudaBackend, CudaOps, CudaStorage};
+pub use modern_chainer_cuda::{
+    CudaBackend, CudaGraphRunner, CudaOps, CudaStorage, GraphAdam, GraphMatmul,
+};
 pub use modern_chainer_llm::{
     BatchOutput, BatchPlan, BlockAllocator, ContinuousBatcher, Decoder, DecoderConfig,
     DecoderHandles, PagedBatchOutput, PagedBatchRequest, PagedBatchRunner, PagedKvCache, RequestId,

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use cudarc::cublas::sys::cublasOperation_t;
 use cudarc::cublas::{Gemm, GemmConfig};
+use cudarc::cublaslt::{Matmul as BlasLtMatmul, MatmulConfig as BlasLtConfig};
 use cudarc::driver::{CudaFunction, CudaSlice, LaunchConfig, PushKernelArg};
 use modern_chainer_core::{Backend, DType, Error, Ops, Result, Shape, Tensor};
 use modern_chainer_cpu::CpuBackend;
@@ -311,37 +312,54 @@ impl Ops<CudaBackend> for CudaOps {
         let (backend, mut storage) = self.out_f32(&Shape::new([batch, out_features]))?;
         {
             let out = storage.f32_mut()?;
-            let config = GemmConfig {
-                transa: cublasOperation_t::CUBLAS_OP_T,
-                transb: cublasOperation_t::CUBLAS_OP_N,
-                m: out_features as i32,
-                n: batch as i32,
-                k: in_features as i32,
-                alpha: 1.0,
-                lda: in_features as i32,
-                ldb: in_features as i32,
-                beta: 0.0,
-                ldc: out_features as i32,
-            };
-            self.gemm(config, weight_slice, x_slice, out)?;
-        }
-        if let Some(bias) = bias {
-            let bias_slice = self.f32(bias)?;
-            let out = storage.f32_mut()?;
-            let rows = i32::try_from(batch).map_err(|_| Error::invalid("tensor too large"))?;
-            let cols =
-                i32::try_from(out_features).map_err(|_| Error::invalid("tensor too large"))?;
-            let total = u32::try_from(batch * out_features)
-                .map_err(|_| Error::invalid("tensor too large"))?;
-            let mut builder = self
-                .runtime
-                .stream
-                .launch_builder(&self.runtime.kernels.bias_add);
-            builder.arg(out).arg(bias_slice).arg(&rows).arg(&cols);
-            unsafe {
-                builder
-                    .launch(LaunchConfig::for_num_elems(total))
-                    .map_err(|error| cuda_error("launch", error))?;
+            match bias {
+                Some(bias) => {
+                    let bias_slice = self.f32(bias)?;
+                    let config = BlasLtConfig {
+                        transa: true,
+                        transb: false,
+                        transc: false,
+                        m: out_features as u64,
+                        n: batch as u64,
+                        k: in_features as u64,
+                        alpha: 1.0,
+                        lda: in_features as i64,
+                        ldb: in_features as i64,
+                        beta: 0.0,
+                        ldc: out_features as i64,
+                        stride_a: None,
+                        stride_b: None,
+                        stride_c: None,
+                        stride_bias: None,
+                        batch_size: None,
+                    };
+                    unsafe {
+                        self.runtime.blaslt.matmul(
+                            config,
+                            weight_slice,
+                            x_slice,
+                            out,
+                            Some(bias_slice),
+                            None,
+                        )
+                    }
+                    .map_err(|error| cuda_error("cublaslt linear", error))?;
+                }
+                None => {
+                    let config = GemmConfig {
+                        transa: cublasOperation_t::CUBLAS_OP_T,
+                        transb: cublasOperation_t::CUBLAS_OP_N,
+                        m: out_features as i32,
+                        n: batch as i32,
+                        k: in_features as i32,
+                        alpha: 1.0,
+                        lda: in_features as i32,
+                        ldb: in_features as i32,
+                        beta: 0.0,
+                        ldc: out_features as i32,
+                    };
+                    self.gemm(config, weight_slice, x_slice, out)?;
+                }
             }
         }
         self.tensor_from_storage(backend, storage, &Shape::new([batch, out_features]))

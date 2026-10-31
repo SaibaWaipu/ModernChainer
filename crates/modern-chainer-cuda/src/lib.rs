@@ -9,12 +9,15 @@
 #[cfg(feature = "cuda")]
 mod backend;
 #[cfg(feature = "cuda")]
+mod graph;
+#[cfg(feature = "cuda")]
 mod kernels;
 #[cfg(feature = "cuda")]
 mod ops;
 
 #[cfg(feature = "cuda")]
 pub use backend::{CudaBackend, CudaStorage};
+pub use graph::{CudaGraphRunner, GraphAdam, GraphMatmul};
 #[cfg(feature = "cuda")]
 pub use ops::CudaOps;
 
