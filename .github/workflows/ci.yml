@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --exclude modern-chainer-python --exclude modern-chainer-vulkan -- -D warnings
+      - name: Tests
+        run: cargo test --workspace --exclude modern-chainer-python --exclude modern-chainer-vulkan
+
+  vulkan:
+    name: Vulkan (lavapipe)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Vulkan loader and lavapipe
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvulkan1 mesa-vulkan-drivers
+      - name: Probe Vulkan
+        run: |
+          env | grep -i vulkan || true
+          ls /usr/share/vulkan/icd.d || true
+      - name: Tests
+        env:
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: cargo test -p modern-chainer-vulkan
+
+  python:
+    name: Python (maturin, pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v6
+      - name: Build extension and test
+        working-directory: python
+        run: |
+          uv venv
+          uv pip install maturin numpy pytest
+          VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release
+          .venv/bin/pytest -q
+          .venv/bin/python examples/train_mlp.py
