@@ -33,7 +33,7 @@ class MLP(chainer.Chain):
         return self.l2(F.relu(self.l1(x)))
 ```
 
-## Status (v0.17.0)
+## Status (v0.18.0)
 
 | Area | Status |
 |---|---|
@@ -368,12 +368,13 @@ RTX 2070 SUPER, PyTorch 2.11.0+cu128, `matmul 512³` / `add 4M` /
 |---|---:|---:|---:|---:|---:|
 | CPU | 0.49 / 0.43 | 2.19 / 8.00 | 0.58 / 0.32 | 3.56 / 4.94 | 1.22 / 1.53 (1.25×) |
 | CUDA | 0.074 / 0.070 | 0.185 / 0.142 | 0.207 / 0.198 | 0.457 / 0.526 | 0.190 / 0.179 (0.94×) |
-| Vulkan:1 | 0.76 / 0.070 | 0.45 / 0.141 | 2.91 / 0.231 | 3.58 / 0.547 | 1.37 / 0.188 (0.14×) |
+| Vulkan:1 | 0.77 / 0.071 | 0.44 / 0.141 | 2.46 / 0.204 | 3.08 / 0.519 | 1.27 / 0.180 (0.14×) |
 
 Python/CUDA is close to parity. Python/Vulkan is correct but still far slower.
-The kernel pass cut Adam from 10.7 to about 3.6 ms and the geomean from 2.11 to
-1.37 ms. Small-NT bias fusion and the small-sum fast path cut linear from 3.19
-to 2.91 ms. The scalar WGSL matmul remains the main bottleneck.
+The kernel pass cut Adam from 10.7 to about 3.1 ms and the geomean from 2.11 to
+1.27 ms. Bias fusion, fused bias gradients, TN-small matmul and the small-sum
+fast path cut linear from 3.19 to 2.46 ms. The scalar WGSL matmul remains the
+main bottleneck.
 
 ## Build and test
 

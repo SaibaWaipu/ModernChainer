@@ -61,7 +61,7 @@ cached per context, and adapters can be selected by index with
 | transpose2d | 16×16 shared-memory tile |
 | matmul | 32×32 tile with 2×2 blocking; aligned fast path; 16×16 small-shape variant |
 | linear | transpose-free matmul against `[out, in]` weights, fused bias for small/large batches |
-| linear_backward | transposed-input matmul avoids materializing `gradᵀ` |
+| linear_backward | transposed-input matmul avoids materializing `gradᵀ`; fuses bias-gradient reduction |
 | adam_update | fused single kernel (`m`, `v`, bias correction and parameter update) |
 | softmax_cross_entropy | fused row softmax and NLL; backward in one kernel |
 | sum_all | single-workgroup fast path for ≤64K elements; two-stage GPU reduction above |
@@ -69,7 +69,9 @@ cached per context, and adapters can be selected by index with
 
 Persistent storage and uniform buffers are pooled per device. Compute pipelines
 are cached per context. Linear forward/backward and reduction chains prepare
-multiple dispatches and submit them in one command encoder.
+multiple dispatches and submit them in one command encoder. Cross-op deferred
+batching was evaluated but reverted: it conflicts with unique uniforms and
+buffer-pool reuse and was slower on this workload.
 
 ### Host fallbacks (correctness-first)
 

@@ -69,7 +69,8 @@ Remaining: block-level in-place COW, wider kernels, CUDA.
   pipeline cache, a unified Python benchmark against PyTorch, fused Adam,
   fused softmax CE / GELU / SiLU, native generic `sum_to` / `sum_all`,
   vectorized elementwise, 32×32 and small-shape matmul, transpose-free
-  linear/backward, command batching, and storage/uniform buffer pools.
+  linear/backward, fused bias gradients, TN-small matmul, local command
+  batching, and storage/uniform buffer pools.
 - Next: multi-tile cooperative-matrix scheduling (the 16×16 single-tile
   prototype was slower than scalar on Turing), faster scalar matmul,
   continuous static batching/request admission, faster long-context
