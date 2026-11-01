@@ -298,6 +298,16 @@ pub trait Ops<B: Backend>: Send + Sync + 'static {
         self.scale(&ones, value)
     }
 
+    fn full_like_scalar(
+        &self,
+        target: &Tensor<B>,
+        scalar: &Tensor<B>,
+        factor: f64,
+    ) -> Result<Tensor<B>> {
+        let value = self.to_scalar(scalar)? * factor;
+        self.full_like(target, value)
+    }
+
     /// Copy a single-element tensor to the host.
     fn to_scalar(&self, _a: &Tensor<B>) -> Result<f64> {
         Err(Error::unsupported("to_scalar"))

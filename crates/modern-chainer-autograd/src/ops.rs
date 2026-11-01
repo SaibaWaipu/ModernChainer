@@ -267,8 +267,7 @@ impl<B: Backend> Op<B> for Sum {
         _outputs: &[&Tensor<B>],
     ) -> Result<Vec<Option<Tensor<B>>>> {
         let ops = grad.backend().ops();
-        let scalar = ops.to_scalar(grad)?;
-        Ok(vec![Some(ops.full_like(inputs[0], scalar)?)])
+        Ok(vec![Some(ops.full_like_scalar(inputs[0], grad, 1.0)?)])
     }
 }
 
@@ -292,8 +291,8 @@ impl<B: Backend> Op<B> for Mean {
         _outputs: &[&Tensor<B>],
     ) -> Result<Vec<Option<Tensor<B>>>> {
         let ops = grad.backend().ops();
-        let scalar = ops.to_scalar(grad)? / inputs[0].numel().max(1) as f64;
-        Ok(vec![Some(ops.full_like(inputs[0], scalar)?)])
+        let factor = 1.0 / inputs[0].numel().max(1) as f64;
+        Ok(vec![Some(ops.full_like_scalar(inputs[0], grad, factor)?)])
     }
 }
 

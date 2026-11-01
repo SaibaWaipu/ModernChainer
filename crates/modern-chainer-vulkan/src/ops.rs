@@ -630,6 +630,34 @@ impl Ops<VulkanBackend> for VulkanOps {
         self.fill(a, value as f32)
     }
 
+    fn full_like_scalar(
+        &self,
+        target: &Tensor<VulkanBackend>,
+        scalar: &Tensor<VulkanBackend>,
+        factor: f64,
+    ) -> Result<Tensor<VulkanBackend>> {
+        let out = self.empty(target.shape(), DType::F32)?;
+        let mut raw = Vec::with_capacity(16);
+        raw.extend_from_slice(&(factor as f32).to_ne_bytes());
+        raw.extend_from_slice(&[0u8; 12]);
+        let params = self.uniform(&raw);
+        let (pipeline, layout) = self.pipeline(
+            "fill_from_scalar",
+            shaders::FILL_FROM_SCALAR,
+            &[storage(0, true), storage(1, false), uniform(2)],
+        );
+        let group = self.bind_group(
+            &layout,
+            &[
+                (0, scalar.storage().buffer.as_ref()),
+                (1, out.storage().buffer.as_ref()),
+                (2, &params),
+            ],
+        );
+        self.dispatch_vec4(&pipeline, &group, out.numel());
+        Ok(out)
+    }
+
     fn to_scalar(&self, a: &Tensor<VulkanBackend>) -> Result<f64> {
         if !a.is_scalar() {
             return Err(Error::invalid(format!(
