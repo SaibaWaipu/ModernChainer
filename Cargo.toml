@@ -17,7 +17,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.14.0"
+version = "0.15.0"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -25,18 +25,18 @@ repository = "https://github.com/SaibaWaipu/ModernChainer"
 authors = ["SaibaWaipu"]
 
 [workspace.dependencies]
-modern-chainer = { path = "crates/modern-chainer", version = "0.14.0" }
-modern-chainer-core = { path = "crates/modern-chainer-core", version = "0.14.0" }
-modern-chainer-cpu = { path = "crates/modern-chainer-cpu", version = "0.14.0" }
-modern-chainer-autograd = { path = "crates/modern-chainer-autograd", version = "0.14.0" }
-modern-chainer-nn = { path = "crates/modern-chainer-nn", version = "0.14.0" }
-modern-chainer-optim = { path = "crates/modern-chainer-optim", version = "0.14.0" }
-modern-chainer-data = { path = "crates/modern-chainer-data", version = "0.14.0" }
-modern-chainer-serial = { path = "crates/modern-chainer-serial", version = "0.14.0" }
-modern-chainer-cuda = { path = "crates/modern-chainer-cuda", version = "0.14.0" }
-modern-chainer-vulkan = { path = "crates/modern-chainer-vulkan", version = "0.14.0" }
-modern-chainer-run = { path = "crates/modern-chainer-run", version = "0.14.0" }
-modern-chainer-llm = { path = "crates/modern-chainer-llm", version = "0.14.0" }
+modern-chainer = { path = "crates/modern-chainer", version = "0.15.0" }
+modern-chainer-core = { path = "crates/modern-chainer-core", version = "0.15.0" }
+modern-chainer-cpu = { path = "crates/modern-chainer-cpu", version = "0.15.0" }
+modern-chainer-autograd = { path = "crates/modern-chainer-autograd", version = "0.15.0" }
+modern-chainer-nn = { path = "crates/modern-chainer-nn", version = "0.15.0" }
+modern-chainer-optim = { path = "crates/modern-chainer-optim", version = "0.15.0" }
+modern-chainer-data = { path = "crates/modern-chainer-data", version = "0.15.0" }
+modern-chainer-serial = { path = "crates/modern-chainer-serial", version = "0.15.0" }
+modern-chainer-cuda = { path = "crates/modern-chainer-cuda", version = "0.15.0" }
+modern-chainer-vulkan = { path = "crates/modern-chainer-vulkan", version = "0.15.0" }
+modern-chainer-run = { path = "crates/modern-chainer-run", version = "0.15.0" }
+modern-chainer-llm = { path = "crates/modern-chainer-llm", version = "0.15.0" }
 thiserror = "2.0"
 bytemuck = { version = "1.25", features = ["derive", "extern_crate_alloc"] }
 rayon = "1.12"

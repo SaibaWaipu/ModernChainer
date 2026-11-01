@@ -123,6 +123,43 @@ impl VulkanOps {
         self.dispatch_2d(pipeline, bind_group, x, y.max(1));
     }
 
+    fn uniform_unique(&self, bytes: &[u8]) -> Arc<wgpu::Buffer> {
+        let size = bytes.len().max(16).div_ceil(16) * 16;
+        let mut padded = vec![0u8; size];
+        padded[..bytes.len()].copy_from_slice(bytes);
+        let buffer = self.ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("modern-chainer batched params"),
+            size: size as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.ctx.queue.write_buffer(&buffer, 0, &padded);
+        Arc::new(buffer)
+    }
+
+    fn submit_batch(&self, dispatches: &[PreparedDispatch]) -> Result<()> {
+        if dispatches.is_empty() {
+            return Ok(());
+        }
+        let mut encoder = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("modern-chainer batch"),
+            });
+        for dispatch in dispatches {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("modern-chainer batch"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&dispatch.pipeline);
+            pass.set_bind_group(0, &dispatch.group, &[]);
+            pass.dispatch_workgroups(dispatch.x, dispatch.y, 1);
+        }
+        self.ctx.queue.submit(Some(encoder.finish()));
+        Ok(())
+    }
+
     fn dispatch_vec4(
         &self,
         pipeline: &wgpu::ComputePipeline,
@@ -283,6 +320,13 @@ fn uniform(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+struct PreparedDispatch {
+    pipeline: wgpu::ComputePipeline,
+    group: wgpu::BindGroup,
+    x: u32,
+    y: u32,
+}
+
 impl Ops<VulkanBackend> for VulkanOps {
     fn add(
         &self,
@@ -420,6 +464,21 @@ impl Ops<VulkanBackend> for VulkanOps {
                 weight.shape().clone(),
             ));
         }
+        if batch <= 128 {
+            let (matmul, y) =
+                self.prepare_matmul_with(x, weight, batch, in_features, out_features, true, true)?;
+            return match bias {
+                Some(bias) => {
+                    let (bias_dispatch, out) = self.prepare_bias_add(&y, bias)?;
+                    self.submit_batch(&[matmul, bias_dispatch])?;
+                    Ok(out)
+                }
+                None => {
+                    self.submit_batch(&[matmul])?;
+                    Ok(y)
+                }
+            };
+        }
         match bias {
             Some(bias) => self.matmul_nt_bias(x, weight, bias, batch, in_features, out_features),
             None => self.matmul_with(x, weight, batch, in_features, out_features, true),
@@ -434,8 +493,11 @@ impl Ops<VulkanBackend> for VulkanOps {
     ) -> Result<(Tensor<VulkanBackend>, Tensor<VulkanBackend>)> {
         let (batch, in_features) = (x.shape().dims()[0], x.shape().dims()[1]);
         let out_features = weight.shape().dims()[0];
-        let grad_x = self.matmul(grad, weight)?;
-        let grad_w = self.matmul_tn(grad, x, out_features, batch, in_features)?;
+        let (grad_x_dispatch, grad_x) =
+            self.prepare_matmul_with(grad, weight, batch, out_features, in_features, false, true)?;
+        let (grad_w_dispatch, grad_w) =
+            self.prepare_matmul_tn(grad, x, out_features, batch, in_features, true)?;
+        self.submit_batch(&[grad_x_dispatch, grad_w_dispatch])?;
         Ok((grad_x, grad_w))
     }
 
@@ -477,8 +539,17 @@ impl Ops<VulkanBackend> for VulkanOps {
     }
 
     fn sum_to(&self, a: &Tensor<VulkanBackend>, shape: &Shape) -> Result<Tensor<VulkanBackend>> {
+        if shape.rank() == 0 {
+            return self.sum_all_gpu(a);
+        }
+        if a.shape() == shape {
+            return Ok(a.clone());
+        }
         if a.rank() == 2 && shape.dims() == [a.shape().dims()[1]] {
             return self.sum_to_bias(a);
+        }
+        if let Ok(result) = self.sum_to_generic(a, shape) {
+            return Ok(result);
         }
         let cpu = self.to_cpu(a)?;
         let backend = CpuBackend::new();
@@ -696,7 +767,49 @@ impl Ops<VulkanBackend> for VulkanOps {
 }
 
 impl VulkanOps {
-    fn matmul_with(
+    fn prepare_bias_add(
+        &self,
+        a: &Tensor<VulkanBackend>,
+        bias: &Tensor<VulkanBackend>,
+    ) -> Result<(PreparedDispatch, Tensor<VulkanBackend>)> {
+        let out = self.empty(a.shape(), DType::F32)?;
+        let cols = a.shape().dims()[a.rank() - 1];
+        let params = self.uniform_unique(&(cols as u32).to_ne_bytes());
+        let (pipeline, layout) = self.pipeline(
+            "bias_add",
+            shaders::BIAS_ADD,
+            &[
+                storage(0, true),
+                storage(1, true),
+                storage(2, false),
+                uniform(3),
+            ],
+        );
+        let group = self.bind_group(
+            &layout,
+            &[
+                (0, a.storage().buffer.as_ref()),
+                (1, bias.storage().buffer.as_ref()),
+                (2, out.storage().buffer.as_ref()),
+                (3, &params),
+            ],
+        );
+        let total = out.numel() as u64;
+        let x = total.div_ceil(64).min(65_535) as u32;
+        let y = total.div_ceil(64).div_ceil(65_535) as u32;
+        Ok((
+            PreparedDispatch {
+                pipeline,
+                group,
+                x: x.max(1),
+                y: y.max(1),
+            },
+            out,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_matmul_with(
         &self,
         a: &Tensor<VulkanBackend>,
         b: &Tensor<VulkanBackend>,
@@ -704,13 +817,18 @@ impl VulkanOps {
         k: usize,
         n: usize,
         transposed_b: bool,
-    ) -> Result<Tensor<VulkanBackend>> {
+        unique_uniform: bool,
+    ) -> Result<(PreparedDispatch, Tensor<VulkanBackend>)> {
         let out = self.empty(&Shape::new([m, n]), DType::F32)?;
         let mut params = Vec::with_capacity(16);
         for value in [m as u32, k as u32, n as u32, 0] {
             params.extend_from_slice(&value.to_ne_bytes());
         }
-        let dims = self.uniform(&params);
+        let dims = if unique_uniform {
+            self.uniform_unique(&params)
+        } else {
+            self.uniform(&params)
+        };
         let small = m <= 128 || n <= 128;
         let (label, code) = match (transposed_b, small) {
             (true, true) => ("matmul_nt_small", shaders::MATMUL_NT_SMALL),
@@ -737,9 +855,31 @@ impl VulkanOps {
                 (3, &dims),
             ],
         );
-        let x = (n as u64).div_ceil(32).min(65_535) as u32;
-        let y = (m as u64).div_ceil(32).min(65_535) as u32;
-        self.dispatch_2d(&pipeline, &group, x.max(1), y.max(1));
+        let tile = if small { 16u64 } else { 32u64 };
+        let x = (n as u64).div_ceil(tile).min(65_535) as u32;
+        let y = (m as u64).div_ceil(tile).min(65_535) as u32;
+        Ok((
+            PreparedDispatch {
+                pipeline,
+                group,
+                x: x.max(1),
+                y: y.max(1),
+            },
+            out,
+        ))
+    }
+
+    fn matmul_with(
+        &self,
+        a: &Tensor<VulkanBackend>,
+        b: &Tensor<VulkanBackend>,
+        m: usize,
+        k: usize,
+        n: usize,
+        transposed_b: bool,
+    ) -> Result<Tensor<VulkanBackend>> {
+        let (dispatch, out) = self.prepare_matmul_with(a, b, m, k, n, transposed_b, false)?;
+        self.submit_batch(&[dispatch])?;
         Ok(out)
     }
 
@@ -785,20 +925,25 @@ impl VulkanOps {
         Ok(out)
     }
 
-    fn matmul_tn(
+    fn prepare_matmul_tn(
         &self,
         a: &Tensor<VulkanBackend>,
         b: &Tensor<VulkanBackend>,
         m: usize,
         k: usize,
         n: usize,
-    ) -> Result<Tensor<VulkanBackend>> {
+        unique_uniform: bool,
+    ) -> Result<(PreparedDispatch, Tensor<VulkanBackend>)> {
         let out = self.empty(&Shape::new([m, n]), DType::F32)?;
         let mut params = Vec::with_capacity(16);
         for value in [m as u32, k as u32, n as u32, 0] {
             params.extend_from_slice(&value.to_ne_bytes());
         }
-        let dims = self.uniform(&params);
+        let dims = if unique_uniform {
+            self.uniform_unique(&params)
+        } else {
+            self.uniform(&params)
+        };
         let (pipeline, layout) = self.pipeline(
             "matmul_tn",
             shaders::MATMUL_TN,
@@ -820,18 +965,25 @@ impl VulkanOps {
         );
         let x = (n as u64).div_ceil(32).min(65_535) as u32;
         let y = (m as u64).div_ceil(32).min(65_535) as u32;
-        self.dispatch_2d(&pipeline, &group, x.max(1), y.max(1));
-        Ok(out)
+        Ok((
+            PreparedDispatch {
+                pipeline,
+                group,
+                x: x.max(1),
+                y: y.max(1),
+            },
+            out,
+        ))
     }
 
-    fn sum_partial(
+    fn prepare_sum_partial(
         &self,
         input: &Tensor<VulkanBackend>,
         len: usize,
-    ) -> Result<Tensor<VulkanBackend>> {
+    ) -> Result<(PreparedDispatch, Tensor<VulkanBackend>)> {
         let groups = len.div_ceil(256);
         let output = self.empty(&Shape::new([groups]), DType::F32)?;
-        let params = self.uniform(&(len as u32).to_ne_bytes());
+        let params = self.uniform_unique(&(len as u32).to_ne_bytes());
         let (pipeline, layout) = self.pipeline(
             "sum_partial",
             shaders::SUM_PARTIAL,
@@ -845,17 +997,24 @@ impl VulkanOps {
                 (2, &params),
             ],
         );
-        self.dispatch_2d(&pipeline, &group, groups as u32, 1);
-        Ok(output)
+        Ok((
+            PreparedDispatch {
+                pipeline,
+                group,
+                x: groups as u32,
+                y: 1,
+            },
+            output,
+        ))
     }
 
-    fn sum_final(
+    fn prepare_sum_final(
         &self,
         input: &Tensor<VulkanBackend>,
         len: usize,
-    ) -> Result<Tensor<VulkanBackend>> {
+    ) -> Result<(PreparedDispatch, Tensor<VulkanBackend>)> {
         let output = self.empty(&Shape::scalar(), DType::F32)?;
-        let params = self.uniform(&(len as u32).to_ne_bytes());
+        let params = self.uniform_unique(&(len as u32).to_ne_bytes());
         let (pipeline, layout) = self.pipeline(
             "sum_final",
             shaders::SUM_FINAL,
@@ -869,18 +1028,34 @@ impl VulkanOps {
                 (2, &params),
             ],
         );
-        self.dispatch_2d(&pipeline, &group, 1, 1);
-        Ok(output)
+        Ok((
+            PreparedDispatch {
+                pipeline,
+                group,
+                x: 1,
+                y: 1,
+            },
+            output,
+        ))
     }
 
     fn sum_all_gpu(&self, a: &Tensor<VulkanBackend>) -> Result<Tensor<VulkanBackend>> {
         let mut current = a.clone();
         let mut len = a.numel();
+        let mut dispatches = Vec::new();
+        let mut keep = Vec::new();
         while len > 256 {
-            current = self.sum_partial(&current, len)?;
+            let (dispatch, next) = self.prepare_sum_partial(&current, len)?;
+            dispatches.push(dispatch);
+            keep.push(current);
+            current = next;
             len = len.div_ceil(256);
         }
-        self.sum_final(&current, len)
+        let (dispatch, output) = self.prepare_sum_final(&current, len)?;
+        dispatches.push(dispatch);
+        keep.push(current);
+        self.submit_batch(&dispatches)?;
+        Ok(output)
     }
 
     fn sum_to_bias(&self, a: &Tensor<VulkanBackend>) -> Result<Tensor<VulkanBackend>> {
@@ -906,6 +1081,80 @@ impl VulkanOps {
             ],
         );
         self.dispatch_2d(&pipeline, &group, cols.div_ceil(256) as u32, 1);
+        Ok(output)
+    }
+
+    fn sum_to_generic(
+        &self,
+        a: &Tensor<VulkanBackend>,
+        shape: &Shape,
+    ) -> Result<Tensor<VulkanBackend>> {
+        let in_dims = a.shape().dims();
+        let out_dims = shape.dims();
+        if out_dims.len() > in_dims.len() || out_dims.len() > 8 || in_dims.len() > 8 {
+            return Err(Error::invalid("vulkan sum_to rank is not supported"));
+        }
+        let offset = in_dims.len() - out_dims.len();
+        let output_len: usize = out_dims.iter().product();
+        if output_len == 0 {
+            return Err(Error::invalid("vulkan sum_to empty output"));
+        }
+        for (d, &dim) in out_dims.iter().enumerate() {
+            let source = in_dims[offset + d];
+            if dim != 1 && dim != source {
+                return Err(Error::invalid("vulkan sum_to incompatible shape"));
+            }
+        }
+        let in_strides = a.strides().as_slice();
+        let mut red_dims = Vec::new();
+        for d in 0..offset {
+            red_dims.push(d);
+        }
+        for d in 0..out_dims.len() {
+            if out_dims[d] == 1 && in_dims[offset + d] > 1 {
+                red_dims.push(offset + d);
+            }
+        }
+        if red_dims.len() > 8 {
+            return Err(Error::invalid(
+                "vulkan sum_to reduction rank is not supported",
+            ));
+        }
+        let red_count: usize = red_dims.iter().map(|&d| in_dims[d]).product();
+        let mut meta = [0u32; 40];
+        meta[0] = out_dims.len() as u32;
+        meta[1] = red_dims.len() as u32;
+        meta[2] = offset as u32;
+        meta[3] = red_count as u32;
+        meta[4] = output_len as u32;
+        for d in 0..in_dims.len() {
+            meta[8 + d] = in_dims[d] as u32;
+            meta[16 + d] = in_strides[d] as u32;
+        }
+        for d in 0..out_dims.len() {
+            meta[24 + d] = out_dims[d] as u32;
+        }
+        for (i, &d) in red_dims.iter().enumerate() {
+            meta[32 + i] = d as u32;
+        }
+        let bytes: Vec<u8> = meta.iter().flat_map(|value| value.to_ne_bytes()).collect();
+        let meta =
+            Tensor::from_bytes(self.backend(), &bytes, Shape::new([bytes.len()]), DType::U8)?;
+        let output = self.empty(shape, DType::F32)?;
+        let (pipeline, layout) = self.pipeline(
+            "sum_to_generic",
+            shaders::SUM_TO_GENERIC,
+            &[storage(0, true), storage(1, false), storage(2, true)],
+        );
+        let group = self.bind_group(
+            &layout,
+            &[
+                (0, a.storage().buffer.as_ref()),
+                (1, output.storage().buffer.as_ref()),
+                (2, meta.storage().buffer.as_ref()),
+            ],
+        );
+        self.dispatch(&pipeline, &group, output_len);
         Ok(output)
     }
 

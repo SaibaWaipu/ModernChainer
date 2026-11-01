@@ -746,3 +746,44 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     out[i] = a[i] / b[i];
 }
 "#;
+
+pub(crate) const SUM_TO_GENERIC: &str = r#"
+@group(0) @binding(0) var<storage, read> input: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+@group(0) @binding(2) var<storage, read> info: array<u32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let out_idx = gid.x + gid.y * 4194240u;
+    let out_rank = info[0];
+    let red_rank = info[1];
+    let offset = info[2];
+    let red_count = info[3];
+    if (out_idx >= info[4]) { return; }
+    var rem = out_idx;
+    var base = 0u;
+    var d = out_rank;
+    loop {
+        if (d == 0u) { break; }
+        d = d - 1u;
+        let dim = info[24u + d];
+        let coord = rem % dim;
+        rem = rem / dim;
+        base = base + coord * info[16u + offset + d];
+    }
+    var sum = 0.0;
+    for (var r: u32 = 0u; r < red_count; r = r + 1u) {
+        var rr = r;
+        var idx = base;
+        for (var rd: u32 = 0u; rd < red_rank; rd = rd + 1u) {
+            let dim_index = info[32u + rd];
+            let size = info[8u + dim_index];
+            let coord = rr % size;
+            rr = rr / size;
+            idx = idx + coord * info[16u + dim_index];
+        }
+        sum = sum + input[idx];
+    }
+    output[out_idx] = sum;
+}
+"#;

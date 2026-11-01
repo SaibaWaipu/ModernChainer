@@ -85,6 +85,27 @@ fn elementwise_and_matmul_match_cpu() {
         1e-4,
     );
 
+    let a_data: Vec<f32> = (0..64 * 32).map(|i| (i as f32) * 0.01 - 1.0).collect();
+    let b_data: Vec<f32> = (0..32 * 40).map(|i| 0.5 - (i as f32) * 0.005).collect();
+    assert_close(
+        &host(
+            &backend
+                .ops()
+                .matmul(
+                    &vf(&backend, &a_data, [64, 32]),
+                    &vf(&backend, &b_data, [32, 40]),
+                )
+                .unwrap(),
+        ),
+        &host(
+            &CpuBackend::new()
+                .ops()
+                .matmul(&cf(&a_data, [64, 32]), &cf(&b_data, [32, 40]))
+                .unwrap(),
+        ),
+        1e-2,
+    );
+
     let t_data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
     let t = vf(&backend, &t_data, [2, 3]);
     assert_close(
@@ -196,4 +217,24 @@ fn linear_training_step_reduces_loss() {
     let first = first.unwrap();
     eprintln!("vulkan linear loss: {first} -> {last}");
     assert!(last < first, "loss did not decrease: {first} -> {last}");
+}
+
+#[test]
+#[serial]
+fn generic_sum_to_matches_cpu() {
+    if !is_available() {
+        eprintln!("skipping: no Vulkan adapter");
+        return;
+    }
+    let backend = VulkanBackend::new().unwrap();
+    let data: Vec<f32> = (0..24).map(|i| i as f32 * 0.25 - 2.0).collect();
+    let x = vf(&backend, &data, [2, 3, 4]);
+    let cpu = cf(&data, [2, 3, 4]);
+    for shape in [vec![3, 1], vec![2, 1, 4], vec![4], vec![2, 3, 4]] {
+        let target = Shape::new(shape.clone());
+        let actual = backend.ops().sum_to(&x, &target).unwrap();
+        let expected = CpuBackend::new().ops().sum_to(&cpu, &target).unwrap();
+        assert_eq!(actual.shape().dims(), expected.shape().dims());
+        assert_close(&host(&actual), &host(&expected), 1e-5);
+    }
 }
