@@ -944,3 +944,293 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     output[i] = vec4<f32>(scalar[0] * params.factor);
 }
 "#;
+
+pub(crate) const SOFTMAX_BACKWARD: &str = r#"
+struct Params { rows: u32, cols: u32, pad0: u32, pad1: u32 };
+@group(0) @binding(0) var<storage, read> x: array<f32>;
+@group(0) @binding(1) var<storage, read> grad: array<f32>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+@group(0) @binding(3) var<uniform> params: Params;
+var<workgroup> scratch: array<f32, 256>;
+
+@compute @workgroup_size(256)
+fn main(
+    @builtin(workgroup_id) wid: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let row = wid.x;
+    if (row >= params.rows) { return; }
+    let base = row * params.cols;
+    var maxv = -1e30;
+    for (var c: u32 = lid.x; c < params.cols; c = c + 256u) {
+        maxv = max(maxv, x[base + c]);
+    }
+    scratch[lid.x] = maxv;
+    workgroupBarrier();
+    for (var stride: u32 = 128u; stride > 0u; stride = stride / 2u) {
+        if (lid.x < stride) { scratch[lid.x] = max(scratch[lid.x], scratch[lid.x + stride]); }
+        workgroupBarrier();
+    }
+    maxv = scratch[0];
+    var sum = 0.0;
+    for (var c: u32 = lid.x; c < params.cols; c = c + 256u) {
+        sum = sum + exp(x[base + c] - maxv);
+    }
+    scratch[lid.x] = sum;
+    workgroupBarrier();
+    for (var stride: u32 = 128u; stride > 0u; stride = stride / 2u) {
+        if (lid.x < stride) { scratch[lid.x] = scratch[lid.x] + scratch[lid.x + stride]; }
+        workgroupBarrier();
+    }
+    let inv = 1.0 / scratch[0];
+    var dot = 0.0;
+    for (var c: u32 = lid.x; c < params.cols; c = c + 256u) {
+        let p = exp(x[base + c] - maxv) * inv;
+        dot = dot + p * grad[base + c];
+    }
+    scratch[lid.x] = dot;
+    workgroupBarrier();
+    for (var stride: u32 = 128u; stride > 0u; stride = stride / 2u) {
+        if (lid.x < stride) { scratch[lid.x] = scratch[lid.x] + scratch[lid.x + stride]; }
+        workgroupBarrier();
+    }
+    dot = scratch[0];
+    for (var c: u32 = lid.x; c < params.cols; c = c + 256u) {
+        let p = exp(x[base + c] - maxv) * inv;
+        out[base + c] = p * (grad[base + c] - dot);
+    }
+}
+"#;
+
+pub(crate) const LAYER_NORM_BACKWARD_DX: &str = r#"
+struct Params { rows: u32, dim: u32, eps: f32, pad: u32 };
+@group(0) @binding(0) var<storage, read> x: array<f32>;
+@group(0) @binding(1) var<storage, read> gamma: array<f32>;
+@group(0) @binding(2) var<storage, read> grad: array<f32>;
+@group(0) @binding(3) var<storage, read_write> out: array<f32>;
+@group(0) @binding(4) var<uniform> params: Params;
+var<workgroup> scratch: array<f32, 256>;
+
+@compute @workgroup_size(256)
+fn main(
+    @builtin(workgroup_id) wid: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let row = wid.x;
+    if (row >= params.rows) { return; }
+    let base = row * params.dim;
+    var sum = 0.0;
+    var sq = 0.0;
+    for (var i: u32 = lid.x; i < params.dim; i = i + 256u) {
+        let v = x[base + i];
+        sum = sum + v;
+        sq = sq + v * v;
+    }
+    scratch[lid.x] = sum;
+    workgroupBarrier();
+    for (var stride: u32 = 128u; stride > 0u; stride = stride / 2u) {
+        if (lid.x < stride) { scratch[lid.x] = scratch[lid.x] + scratch[lid.x + stride]; }
+        workgroupBarrier();
+    }
+    let mean = scratch[0] / f32(params.dim);
+    scratch[lid.x] = sq;
+    workgroupBarrier();
+    for (var stride: u32 = 128u; stride > 0u; stride = stride / 2u) {
+        if (lid.x < stride) { scratch[lid.x] = scratch[lid.x] + scratch[lid.x + stride]; }
+        workgroupBarrier();
+    }
+    let variance = max(scratch[0] / f32(params.dim) - mean * mean, 0.0);
+    let inv = 1.0 / sqrt(variance + params.eps);
+    var sum_dy = 0.0;
+    var sum_dyn = 0.0;
+    for (var i: u32 = lid.x; i < params.dim; i = i + 256u) {
+        let norm = (x[base + i] - mean) * inv;
+        let dy = grad[base + i] * gamma[i];
+        sum_dy = sum_dy + dy;
+        sum_dyn = sum_dyn + dy * norm;
+    }
+    scratch[lid.x] = sum_dy;
+    workgroupBarrier();
+    for (var stride: u32 = 128u; stride > 0u; stride = stride / 2u) {
+        if (lid.x < stride) { scratch[lid.x] = scratch[lid.x] + scratch[lid.x + stride]; }
+        workgroupBarrier();
+    }
+    sum_dy = scratch[0];
+    scratch[lid.x] = sum_dyn;
+    workgroupBarrier();
+    for (var stride: u32 = 128u; stride > 0u; stride = stride / 2u) {
+        if (lid.x < stride) { scratch[lid.x] = scratch[lid.x] + scratch[lid.x + stride]; }
+        workgroupBarrier();
+    }
+    sum_dyn = scratch[0];
+    for (var i: u32 = lid.x; i < params.dim; i = i + 256u) {
+        let norm = (x[base + i] - mean) * inv;
+        let dy = grad[base + i] * gamma[i];
+        out[base + i] = (f32(params.dim) * dy - sum_dy - norm * sum_dyn) * inv / f32(params.dim);
+    }
+}
+"#;
+
+pub(crate) const LAYER_NORM_BACKWARD_PARAMS: &str = r#"
+struct Params { rows: u32, dim: u32, eps: f32, pad: u32 };
+@group(0) @binding(0) var<storage, read> x: array<f32>;
+@group(0) @binding(1) var<storage, read> grad: array<f32>;
+@group(0) @binding(2) var<storage, read_write> dgamma: array<f32>;
+@group(0) @binding(3) var<storage, read_write> dbeta: array<f32>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let c = gid.x;
+    if (c >= params.dim) { return; }
+    var dg = 0.0;
+    var db = 0.0;
+    for (var r: u32 = 0u; r < params.rows; r = r + 1u) {
+        let base = r * params.dim;
+        var sum = 0.0;
+        var sq = 0.0;
+        for (var i: u32 = 0u; i < params.dim; i = i + 1u) {
+            let v = x[base + i];
+            sum = sum + v;
+            sq = sq + v * v;
+        }
+        let mean = sum / f32(params.dim);
+        let variance = max(sq / f32(params.dim) - mean * mean, 0.0);
+        let norm = (x[base + c] - mean) / sqrt(variance + params.eps);
+        dg = dg + grad[base + c] * norm;
+        db = db + grad[base + c];
+    }
+    dgamma[c] = dg;
+    dbeta[c] = db;
+}
+"#;
+
+pub(crate) const EMBEDDING_BACKWARD: &str = r#"
+struct Params { n: u32, dim: u32, pad0: u32, pad1: u32 };
+@group(0) @binding(0) var<storage, read> ids: array<u32>;
+@group(0) @binding(1) var<storage, read> grad: array<f32>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+@group(0) @binding(3) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(
+    @builtin(workgroup_id) wid: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let vocab = wid.x;
+    for (var d: u32 = lid.x; d < params.dim; d = d + 64u) {
+        var acc = 0.0;
+        for (var r: u32 = 0u; r < params.n; r = r + 1u) {
+            if (ids[r * params.pad0] == vocab) {
+                acc = acc + grad[r * params.dim + d];
+            }
+        }
+        out[vocab * params.dim + d] = acc;
+    }
+}
+"#;
+
+pub(crate) const EMBEDDING_FORWARD: &str = r#"
+struct Params { n: u32, dim: u32, pad0: u32, pad1: u32 };
+@group(0) @binding(0) var<storage, read> ids: array<u32>;
+@group(0) @binding(1) var<storage, read> weight: array<f32>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+@group(0) @binding(3) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x + gid.y * 4194240u;
+    if (i >= params.n * params.dim) { return; }
+    let row = i / params.dim;
+    let d = i % params.dim;
+    out[i] = weight[ids[row * params.pad0] * params.dim + d];
+}
+"#;
+
+pub(crate) const LAYER_NORM_FORWARD: &str = r#"
+struct Params { rows: u32, dim: u32, eps: f32, pad: u32 };
+@group(0) @binding(0) var<storage, read> x: array<f32>;
+@group(0) @binding(1) var<storage, read> gamma: array<f32>;
+@group(0) @binding(2) var<storage, read> beta: array<f32>;
+@group(0) @binding(3) var<storage, read_write> out: array<f32>;
+@group(0) @binding(4) var<uniform> params: Params;
+var<workgroup> scratch: array<f32, 256>;
+
+@compute @workgroup_size(256)
+fn main(
+    @builtin(workgroup_id) wid: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let row = wid.x;
+    if (row >= params.rows) { return; }
+    let base = row * params.dim;
+    var sum = 0.0;
+    var sq = 0.0;
+    for (var i: u32 = lid.x; i < params.dim; i = i + 256u) {
+        let v = x[base + i];
+        sum = sum + v;
+        sq = sq + v * v;
+    }
+    scratch[lid.x] = sum;
+    workgroupBarrier();
+    for (var stride: u32 = 128u; stride > 0u; stride = stride / 2u) {
+        if (lid.x < stride) { scratch[lid.x] = scratch[lid.x] + scratch[lid.x + stride]; }
+        workgroupBarrier();
+    }
+    let mean = scratch[0] / f32(params.dim);
+    scratch[lid.x] = sq;
+    workgroupBarrier();
+    for (var stride: u32 = 128u; stride > 0u; stride = stride / 2u) {
+        if (lid.x < stride) { scratch[lid.x] = scratch[lid.x] + scratch[lid.x + stride]; }
+        workgroupBarrier();
+    }
+    let variance = max(scratch[0] / f32(params.dim) - mean * mean, 0.0);
+    let inv = 1.0 / sqrt(variance + params.eps);
+    for (var i: u32 = lid.x; i < params.dim; i = i + 256u) {
+        out[base + i] = (x[base + i] - mean) * inv * gamma[i] + beta[i];
+    }
+}
+"#;
+
+pub(crate) const SOFTMAX_FORWARD: &str = r#"
+struct Params { rows: u32, cols: u32, pad0: u32, pad1: u32 };
+@group(0) @binding(0) var<storage, read> x: array<f32>;
+@group(0) @binding(1) var<storage, read_write> out: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+var<workgroup> scratch: array<f32, 256>;
+
+@compute @workgroup_size(256)
+fn main(
+    @builtin(workgroup_id) wid: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let row = wid.x;
+    if (row >= params.rows) { return; }
+    let base = row * params.cols;
+    var maxv = -1e30;
+    for (var c: u32 = lid.x; c < params.cols; c = c + 256u) {
+        maxv = max(maxv, x[base + c]);
+    }
+    scratch[lid.x] = maxv;
+    workgroupBarrier();
+    for (var stride: u32 = 128u; stride > 0u; stride = stride / 2u) {
+        if (lid.x < stride) { scratch[lid.x] = max(scratch[lid.x], scratch[lid.x + stride]); }
+        workgroupBarrier();
+    }
+    maxv = scratch[0];
+    var sum = 0.0;
+    for (var c: u32 = lid.x; c < params.cols; c = c + 256u) {
+        sum = sum + exp(x[base + c] - maxv);
+    }
+    scratch[lid.x] = sum;
+    workgroupBarrier();
+    for (var stride: u32 = 128u; stride > 0u; stride = stride / 2u) {
+        if (lid.x < stride) { scratch[lid.x] = scratch[lid.x] + scratch[lid.x + stride]; }
+        workgroupBarrier();
+    }
+    let inv = 1.0 / scratch[0];
+    for (var c: u32 = lid.x; c < params.cols; c = c + 256u) {
+        out[base + c] = exp(x[base + c] - maxv) * inv;
+    }
+}
+"#;

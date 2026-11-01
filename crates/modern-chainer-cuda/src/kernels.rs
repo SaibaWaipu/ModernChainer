@@ -730,6 +730,111 @@ extern "C" __global__ void softmax_last_dim_f32(const float* x, float* out, int 
     }
 }
 
+
+extern "C" __global__ void embedding_backward_f32(
+    const long long* ids, const float* grad, float* out, int n, int dim, int vocab
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= vocab * dim) return;
+    int v = i / dim;
+    int d = i % dim;
+    float acc = 0.0f;
+    for (int r = 0; r < n; r++) {
+        if (ids[r] == v) acc += grad[r * dim + d];
+    }
+    out[i] = acc;
+}
+
+extern "C" __global__ void layer_norm_backward_dx_f32(
+    const float* x, const float* gamma, const float* grad, float* out,
+    int rows, int d, float eps
+) {
+    __shared__ float shared[256];
+    int row = blockIdx.x;
+    int tid = threadIdx.x;
+    const float* xr = x + row * d;
+    const float* gr = grad + row * d;
+    float sum = 0.0f;
+    float sumsq = 0.0f;
+    for (int i = tid; i < d; i += blockDim.x) {
+        float v = xr[i];
+        sum += v;
+        sumsq += v * v;
+    }
+    float mean = block_reduce_sum(sum, shared) / d;
+    float var = block_reduce_sum(sumsq, shared) / d - mean * mean;
+    float inv = rsqrtf(var + eps);
+    float sum_dy = 0.0f;
+    float sum_dyn = 0.0f;
+    for (int i = tid; i < d; i += blockDim.x) {
+        float norm = (xr[i] - mean) * inv;
+        float dy = gr[i] * gamma[i];
+        sum_dy += dy;
+        sum_dyn += dy * norm;
+    }
+    float total_dy = block_reduce_sum(sum_dy, shared);
+    float total_dyn = block_reduce_sum(sum_dyn, shared);
+    for (int i = tid; i < d; i += blockDim.x) {
+        float norm = (xr[i] - mean) * inv;
+        float dy = gr[i] * gamma[i];
+        out[row * d + i] = (d * dy - total_dy - norm * total_dyn) * inv / d;
+    }
+}
+
+extern "C" __global__ void layer_norm_backward_params_f32(
+    const float* x, const float* grad, float* dgamma, float* dbeta,
+    int rows, int d, float eps
+) {
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= d) return;
+    float dg = 0.0f;
+    float db = 0.0f;
+    for (int r = 0; r < rows; r++) {
+        const float* xr = x + r * d;
+        float sum = 0.0f;
+        float sq = 0.0f;
+        for (int i = 0; i < d; i++) {
+            float v = xr[i];
+            sum += v;
+            sq += v * v;
+        }
+        float mean = sum / d;
+        float var = sq / d - mean * mean;
+        float norm = (xr[c] - mean) * rsqrtf(var + eps);
+        float g = grad[r * d + c];
+        dg += g * norm;
+        db += g;
+    }
+    dgamma[c] = dg;
+    dbeta[c] = db;
+}
+
+extern "C" __global__ void softmax_backward_f32(
+    const float* x, const float* grad, float* out, int rows, int cols
+) {
+    __shared__ float shared[256];
+    int row = blockIdx.x;
+    int tid = threadIdx.x;
+    const float* xr = x + row * cols;
+    const float* gr = grad + row * cols;
+    float maxv = -1e30f;
+    for (int i = tid; i < cols; i += blockDim.x) maxv = fmaxf(maxv, xr[i]);
+    maxv = block_reduce_max(maxv, shared);
+    float sum = 0.0f;
+    for (int i = tid; i < cols; i += blockDim.x) sum += expf(xr[i] - maxv);
+    sum = block_reduce_sum(sum, shared);
+    float inv = 1.0f / sum;
+    float dot = 0.0f;
+    for (int i = tid; i < cols; i += blockDim.x) {
+        dot += expf(xr[i] - maxv) * inv * gr[i];
+    }
+    dot = block_reduce_sum(dot, shared);
+    for (int i = tid; i < cols; i += blockDim.x) {
+        float p = expf(xr[i] - maxv) * inv;
+        out[row * cols + i] = p * (gr[i] - dot);
+    }
+}
+
 extern "C" __global__ void split_heads_f32(const float* x, float* out, int seq, int heads, int head_dim) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     int total = seq * heads * head_dim;
@@ -1728,6 +1833,10 @@ pub(crate) struct Kernels {
     pub adam_update: CudaFunction,
     pub sum_all: CudaFunction,
     pub sum_to_bias: CudaFunction,
+    pub embedding_backward: CudaFunction,
+    pub layer_norm_backward_dx: CudaFunction,
+    pub layer_norm_backward_params: CudaFunction,
+    pub softmax_backward: CudaFunction,
     pub embedding: CudaFunction,
     pub layer_norm: CudaFunction,
     pub softmax_last_dim: CudaFunction,
@@ -1820,6 +1929,10 @@ impl Kernels {
             adam_update: load("adam_update_f32")?,
             sum_all: load("sum_all_f32")?,
             sum_to_bias: load("sum_to_bias_f32")?,
+            embedding_backward: load("embedding_backward_f32")?,
+            layer_norm_backward_dx: load("layer_norm_backward_dx_f32")?,
+            layer_norm_backward_params: load("layer_norm_backward_params_f32")?,
+            softmax_backward: load("softmax_backward_f32")?,
             embedding: load("embedding_f32")?,
             layer_norm: load("layer_norm_f32")?,
             softmax_last_dim: load("softmax_last_dim_f32")?,

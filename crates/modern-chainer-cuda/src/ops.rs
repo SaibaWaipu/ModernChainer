@@ -1118,6 +1118,43 @@ impl Ops<CudaBackend> for CudaOps {
         self.tensor_from_storage(backend, storage, &shape)
     }
 
+    fn embedding_backward(
+        &self,
+        ids: &Tensor<CudaBackend>,
+        weight: &Tensor<CudaBackend>,
+        grad: &Tensor<CudaBackend>,
+    ) -> Result<Tensor<CudaBackend>> {
+        let rows = ids.numel();
+        let (vocab, dim) = (weight.shape().dims()[0], weight.shape().dims()[1]);
+        let ids_slice = self.i64(ids)?;
+        let grad_slice = self.f32(grad)?;
+        let (backend, mut storage) = self.out_f32(weight.shape())?;
+        let total = vocab * dim;
+        if total > 0 {
+            let out = storage.f32_mut()?;
+            let rows_i = i32::try_from(rows).map_err(|_| Error::invalid("tensor too large"))?;
+            let dim_i = i32::try_from(dim).map_err(|_| Error::invalid("tensor too large"))?;
+            let vocab_i = i32::try_from(vocab).map_err(|_| Error::invalid("tensor too large"))?;
+            let mut builder = self
+                .runtime
+                .stream
+                .launch_builder(&self.runtime.kernels.embedding_backward);
+            builder
+                .arg(ids_slice)
+                .arg(grad_slice)
+                .arg(out)
+                .arg(&rows_i)
+                .arg(&dim_i)
+                .arg(&vocab_i);
+            unsafe {
+                builder
+                    .launch(LaunchConfig::for_num_elems(total as u32))
+                    .map_err(|error| cuda_error("launch", error))?;
+            }
+        }
+        self.tensor_from_storage(backend, storage, weight.shape())
+    }
+
     fn layer_norm(
         &self,
         x: &Tensor<CudaBackend>,
@@ -1163,6 +1200,75 @@ impl Ops<CudaBackend> for CudaOps {
         self.tensor_from_storage(backend, storage, x.shape())
     }
 
+    fn layer_norm_backward(
+        &self,
+        x: &Tensor<CudaBackend>,
+        gamma: &Tensor<CudaBackend>,
+        beta: &Tensor<CudaBackend>,
+        grad: &Tensor<CudaBackend>,
+        eps: f64,
+    ) -> Result<(
+        Tensor<CudaBackend>,
+        Tensor<CudaBackend>,
+        Tensor<CudaBackend>,
+    )> {
+        let dim = *x.shape().dims().last().unwrap();
+        let rows = x.numel() / dim.max(1);
+        let x_slice = self.f32(x)?;
+        let gamma_slice = self.f32(gamma)?;
+        let grad_slice = self.f32(grad)?;
+        let (backend, mut dx_storage) = self.out_f32(x.shape())?;
+        let (_, mut dgamma_storage) = self.out_f32(gamma.shape())?;
+        let (_, mut dbeta_storage) = self.out_f32(beta.shape())?;
+        let rows_i = i32::try_from(rows).map_err(|_| Error::invalid("tensor too large"))?;
+        let dim_i = i32::try_from(dim).map_err(|_| Error::invalid("tensor too large"))?;
+        let eps = eps as f32;
+        if rows > 0 && dim > 0 {
+            let dx = dx_storage.f32_mut()?;
+            let mut builder = self
+                .runtime
+                .stream
+                .launch_builder(&self.runtime.kernels.layer_norm_backward_dx);
+            builder
+                .arg(x_slice)
+                .arg(gamma_slice)
+                .arg(grad_slice)
+                .arg(dx)
+                .arg(&rows_i)
+                .arg(&dim_i)
+                .arg(&eps);
+            unsafe {
+                builder
+                    .launch(Self::row_config(rows)?)
+                    .map_err(|error| cuda_error("launch", error))?;
+            }
+            let dgamma = dgamma_storage.f32_mut()?;
+            let dbeta = dbeta_storage.f32_mut()?;
+            let mut builder = self
+                .runtime
+                .stream
+                .launch_builder(&self.runtime.kernels.layer_norm_backward_params);
+            builder
+                .arg(x_slice)
+                .arg(grad_slice)
+                .arg(dgamma)
+                .arg(dbeta)
+                .arg(&rows_i)
+                .arg(&dim_i)
+                .arg(&eps);
+            unsafe {
+                builder
+                    .launch(LaunchConfig::for_num_elems(dim as u32))
+                    .map_err(|error| cuda_error("launch", error))?;
+            }
+        }
+        Ok((
+            self.tensor_from_storage(backend.clone(), dx_storage, x.shape())?,
+            self.tensor_from_storage(backend.clone(), dgamma_storage, gamma.shape())?,
+            self.tensor_from_storage(backend, dbeta_storage, beta.shape())?,
+        ))
+    }
+
     fn softmax_last_dim(&self, x: &Tensor<CudaBackend>) -> Result<Tensor<CudaBackend>> {
         if x.rank() != 2 {
             return Err(Error::invalid("cuda softmax_last_dim expects a 2-D tensor"));
@@ -1180,6 +1286,42 @@ impl Ops<CudaBackend> for CudaOps {
                 .stream
                 .launch_builder(&self.runtime.kernels.softmax_last_dim);
             builder.arg(x_slice).arg(out).arg(&rows_i).arg(&cols_i);
+            unsafe {
+                builder
+                    .launch(Self::row_config(rows)?)
+                    .map_err(|error| cuda_error("launch", error))?;
+            }
+        }
+        self.tensor_from_storage(backend, storage, x.shape())
+    }
+
+    fn softmax_last_dim_backward(
+        &self,
+        x: &Tensor<CudaBackend>,
+        grad: &Tensor<CudaBackend>,
+    ) -> Result<Tensor<CudaBackend>> {
+        if x.rank() != 2 || x.shape() != grad.shape() {
+            return Err(Error::invalid("cuda softmax backward shape mismatch"));
+        }
+        let rows = x.shape().dims()[0];
+        let cols = x.shape().dims()[1];
+        let x_slice = self.f32(x)?;
+        let grad_slice = self.f32(grad)?;
+        let (backend, mut storage) = self.out_f32(x.shape())?;
+        if rows > 0 {
+            let out = storage.f32_mut()?;
+            let rows_i = i32::try_from(rows).map_err(|_| Error::invalid("tensor too large"))?;
+            let cols_i = i32::try_from(cols).map_err(|_| Error::invalid("tensor too large"))?;
+            let mut builder = self
+                .runtime
+                .stream
+                .launch_builder(&self.runtime.kernels.softmax_backward);
+            builder
+                .arg(x_slice)
+                .arg(grad_slice)
+                .arg(out)
+                .arg(&rows_i)
+                .arg(&cols_i);
             unsafe {
                 builder
                     .launch(Self::row_config(rows)?)

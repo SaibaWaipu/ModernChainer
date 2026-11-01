@@ -743,6 +743,279 @@ impl Ops<VulkanBackend> for VulkanOps {
         Ok((new_p, new_m, new_v))
     }
 
+    fn embedding(
+        &self,
+        ids: &Tensor<VulkanBackend>,
+        weight: &Tensor<VulkanBackend>,
+    ) -> Result<Tensor<VulkanBackend>> {
+        if weight.rank() != 2 {
+            return Err(Error::invalid("embedding weight must be [vocab, dim]"));
+        }
+        let n = ids.numel();
+        let (vocab, dim) = (weight.shape().dims()[0], weight.shape().dims()[1]);
+        let id_stride = match ids.dtype() {
+            DType::I64 => 2u32,
+            DType::I32 | DType::U8 => 1,
+            other => return Err(Error::UnsupportedDType(other)),
+        };
+        let mut shape = ids.shape().dims().to_vec();
+        shape.push(dim);
+        let out = self.empty(&Shape::new(shape), DType::F32)?;
+        let mut raw = Vec::with_capacity(16);
+        raw.extend_from_slice(&(n as u32).to_ne_bytes());
+        raw.extend_from_slice(&(dim as u32).to_ne_bytes());
+        raw.extend_from_slice(&id_stride.to_ne_bytes());
+        raw.extend_from_slice(&0u32.to_ne_bytes());
+        let params = self.uniform(&raw);
+        let (pipeline, layout) = self.pipeline(
+            "embedding_forward",
+            shaders::EMBEDDING_FORWARD,
+            &[
+                storage(0, true),
+                storage(1, true),
+                storage(2, false),
+                uniform(3),
+            ],
+        );
+        let group = self.bind_group(
+            &layout,
+            &[
+                (0, ids.storage().buffer.as_ref()),
+                (1, weight.storage().buffer.as_ref()),
+                (2, out.storage().buffer.as_ref()),
+                (3, &params),
+            ],
+        );
+        self.dispatch(&pipeline, &group, n * dim);
+        let _ = vocab;
+        Ok(out)
+    }
+
+    fn embedding_backward(
+        &self,
+        ids: &Tensor<VulkanBackend>,
+        weight: &Tensor<VulkanBackend>,
+        grad: &Tensor<VulkanBackend>,
+    ) -> Result<Tensor<VulkanBackend>> {
+        let n = ids.numel();
+        let (vocab, dim) = (weight.shape().dims()[0], weight.shape().dims()[1]);
+        let id_stride = match ids.dtype() {
+            DType::I64 => 2u32,
+            DType::I32 | DType::U8 => 1,
+            other => return Err(Error::UnsupportedDType(other)),
+        };
+        let out = self.empty(weight.shape(), DType::F32)?;
+        let mut raw = Vec::with_capacity(16);
+        raw.extend_from_slice(&(n as u32).to_ne_bytes());
+        raw.extend_from_slice(&(dim as u32).to_ne_bytes());
+        raw.extend_from_slice(&id_stride.to_ne_bytes());
+        raw.extend_from_slice(&0u32.to_ne_bytes());
+        let params = self.uniform(&raw);
+        let (pipeline, layout) = self.pipeline(
+            "embedding_backward",
+            shaders::EMBEDDING_BACKWARD,
+            &[
+                storage(0, true),
+                storage(1, true),
+                storage(2, false),
+                uniform(3),
+            ],
+        );
+        let group = self.bind_group(
+            &layout,
+            &[
+                (0, ids.storage().buffer.as_ref()),
+                (1, grad.storage().buffer.as_ref()),
+                (2, out.storage().buffer.as_ref()),
+                (3, &params),
+            ],
+        );
+        self.dispatch_2d(&pipeline, &group, vocab as u32, 1);
+        Ok(out)
+    }
+
+    fn layer_norm(
+        &self,
+        x: &Tensor<VulkanBackend>,
+        gamma: &Tensor<VulkanBackend>,
+        beta: &Tensor<VulkanBackend>,
+        eps: f64,
+    ) -> Result<Tensor<VulkanBackend>> {
+        if x.rank() < 2 {
+            return Err(Error::invalid("layer_norm expects rank >= 2"));
+        }
+        let dim = *x.shape().dims().last().unwrap();
+        let rows = x.numel() / dim.max(1);
+        let out = self.empty(x.shape(), DType::F32)?;
+        let mut raw = Vec::with_capacity(16);
+        raw.extend_from_slice(&(rows as u32).to_ne_bytes());
+        raw.extend_from_slice(&(dim as u32).to_ne_bytes());
+        raw.extend_from_slice(&(eps as f32).to_ne_bytes());
+        raw.extend_from_slice(&0u32.to_ne_bytes());
+        let params = self.uniform(&raw);
+        let (pipeline, layout) = self.pipeline(
+            "layer_norm_forward",
+            shaders::LAYER_NORM_FORWARD,
+            &[
+                storage(0, true),
+                storage(1, true),
+                storage(2, true),
+                storage(3, false),
+                uniform(4),
+            ],
+        );
+        let group = self.bind_group(
+            &layout,
+            &[
+                (0, x.storage().buffer.as_ref()),
+                (1, gamma.storage().buffer.as_ref()),
+                (2, beta.storage().buffer.as_ref()),
+                (3, out.storage().buffer.as_ref()),
+                (4, &params),
+            ],
+        );
+        self.dispatch_2d(&pipeline, &group, rows as u32, 1);
+        Ok(out)
+    }
+
+    fn layer_norm_backward(
+        &self,
+        x: &Tensor<VulkanBackend>,
+        gamma: &Tensor<VulkanBackend>,
+        beta: &Tensor<VulkanBackend>,
+        grad: &Tensor<VulkanBackend>,
+        eps: f64,
+    ) -> Result<(
+        Tensor<VulkanBackend>,
+        Tensor<VulkanBackend>,
+        Tensor<VulkanBackend>,
+    )> {
+        let dim = *x.shape().dims().last().unwrap();
+        let rows = x.numel() / dim.max(1);
+        let dx = self.empty(x.shape(), DType::F32)?;
+        let dgamma = self.empty(gamma.shape(), DType::F32)?;
+        let dbeta = self.empty(beta.shape(), DType::F32)?;
+        let mut raw = Vec::with_capacity(16);
+        raw.extend_from_slice(&(rows as u32).to_ne_bytes());
+        raw.extend_from_slice(&(dim as u32).to_ne_bytes());
+        raw.extend_from_slice(&(eps as f32).to_ne_bytes());
+        raw.extend_from_slice(&0u32.to_ne_bytes());
+        let params = self.uniform(&raw);
+        let (pipeline, layout) = self.pipeline(
+            "layer_norm_backward_dx",
+            shaders::LAYER_NORM_BACKWARD_DX,
+            &[
+                storage(0, true),
+                storage(1, true),
+                storage(2, true),
+                storage(3, false),
+                uniform(4),
+            ],
+        );
+        let group = self.bind_group(
+            &layout,
+            &[
+                (0, x.storage().buffer.as_ref()),
+                (1, gamma.storage().buffer.as_ref()),
+                (2, grad.storage().buffer.as_ref()),
+                (3, dx.storage().buffer.as_ref()),
+                (4, &params),
+            ],
+        );
+        self.dispatch_2d(&pipeline, &group, rows as u32, 1);
+        let (pipeline, layout) = self.pipeline(
+            "layer_norm_backward_params",
+            shaders::LAYER_NORM_BACKWARD_PARAMS,
+            &[
+                storage(0, true),
+                storage(1, true),
+                storage(2, false),
+                storage(3, false),
+                uniform(4),
+            ],
+        );
+        let group = self.bind_group(
+            &layout,
+            &[
+                (0, x.storage().buffer.as_ref()),
+                (1, grad.storage().buffer.as_ref()),
+                (2, dgamma.storage().buffer.as_ref()),
+                (3, dbeta.storage().buffer.as_ref()),
+                (4, &params),
+            ],
+        );
+        self.dispatch_2d(&pipeline, &group, dim.div_ceil(256) as u32, 1);
+        Ok((dx, dgamma, dbeta))
+    }
+
+    fn softmax_last_dim(&self, x: &Tensor<VulkanBackend>) -> Result<Tensor<VulkanBackend>> {
+        if x.rank() != 2 {
+            return Err(Error::invalid("softmax expects a 2-D tensor"));
+        }
+        let (rows, cols) = (x.shape().dims()[0], x.shape().dims()[1]);
+        let out = self.empty(x.shape(), DType::F32)?;
+        let mut raw = Vec::with_capacity(16);
+        raw.extend_from_slice(&(rows as u32).to_ne_bytes());
+        raw.extend_from_slice(&(cols as u32).to_ne_bytes());
+        raw.extend_from_slice(&0u32.to_ne_bytes());
+        raw.extend_from_slice(&0u32.to_ne_bytes());
+        let params = self.uniform(&raw);
+        let (pipeline, layout) = self.pipeline(
+            "softmax_forward",
+            shaders::SOFTMAX_FORWARD,
+            &[storage(0, true), storage(1, false), uniform(2)],
+        );
+        let group = self.bind_group(
+            &layout,
+            &[
+                (0, x.storage().buffer.as_ref()),
+                (1, out.storage().buffer.as_ref()),
+                (2, &params),
+            ],
+        );
+        self.dispatch_2d(&pipeline, &group, rows as u32, 1);
+        Ok(out)
+    }
+
+    fn softmax_last_dim_backward(
+        &self,
+        x: &Tensor<VulkanBackend>,
+        grad: &Tensor<VulkanBackend>,
+    ) -> Result<Tensor<VulkanBackend>> {
+        if x.rank() != 2 || x.shape() != grad.shape() {
+            return Err(Error::invalid("softmax backward shape mismatch"));
+        }
+        let (rows, cols) = (x.shape().dims()[0], x.shape().dims()[1]);
+        let out = self.empty(x.shape(), DType::F32)?;
+        let mut raw = Vec::with_capacity(16);
+        raw.extend_from_slice(&(rows as u32).to_ne_bytes());
+        raw.extend_from_slice(&(cols as u32).to_ne_bytes());
+        raw.extend_from_slice(&0u32.to_ne_bytes());
+        raw.extend_from_slice(&0u32.to_ne_bytes());
+        let params = self.uniform(&raw);
+        let (pipeline, layout) = self.pipeline(
+            "softmax_backward",
+            shaders::SOFTMAX_BACKWARD,
+            &[
+                storage(0, true),
+                storage(1, true),
+                storage(2, false),
+                uniform(3),
+            ],
+        );
+        let group = self.bind_group(
+            &layout,
+            &[
+                (0, x.storage().buffer.as_ref()),
+                (1, grad.storage().buffer.as_ref()),
+                (2, out.storage().buffer.as_ref()),
+                (3, &params),
+            ],
+        );
+        self.dispatch_2d(&pipeline, &group, rows as u32, 1);
+        Ok(out)
+    }
+
     fn softmax_cross_entropy(
         &self,
         logits: &Tensor<VulkanBackend>,

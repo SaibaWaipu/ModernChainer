@@ -238,3 +238,78 @@ fn generic_sum_to_matches_cpu() {
         assert_close(&host(&actual), &host(&expected), 1e-5);
     }
 }
+
+#[test]
+#[serial]
+fn backward_embedding_norm_softmax_match_cpu() {
+    use modern_chainer_core::{DType, Ops, Tensor};
+
+    if !is_available() {
+        eprintln!("skipping: no Vulkan adapter");
+        return;
+    }
+    let backend = VulkanBackend::new().unwrap();
+    let ids = Tensor::from_slice(backend.clone(), &[0i64, 2, 0], [3], DType::I64).unwrap();
+    let weight = vf(&backend, &[0.1, 0.2, -0.3, 0.4, 0.5, -0.6], [3, 2]);
+    let grad = vf(&backend, &[0.2, 0.1, -0.4, 0.3, 0.5, -0.2], [3, 2]);
+    let expected = CpuBackend::new()
+        .ops()
+        .embedding_backward(
+            &Tensor::from_slice(CpuBackend::new(), &[0i64, 2, 0], [3], DType::I64).unwrap(),
+            &cf(&[0.1, 0.2, -0.3, 0.4, 0.5, -0.6], [3, 2]),
+            &cf(&[0.2, 0.1, -0.4, 0.3, 0.5, -0.2], [3, 2]),
+        )
+        .unwrap();
+    assert_close(
+        &host(
+            &backend
+                .ops()
+                .embedding_backward(&ids, &weight, &grad)
+                .unwrap(),
+        ),
+        &host(&expected),
+        1e-5,
+    );
+
+    let x = cf(&[0.2, -0.4, 0.7, 0.1, 0.3, -0.2], [2, 3]);
+    let gamma = cf(&[1.0, 0.9, 1.1], [3]);
+    let beta = cf(&[0.1, -0.1, 0.0], [3]);
+    let g = cf(&[0.3, -0.2, 0.4, 0.1, 0.5, -0.1], [2, 3]);
+    let (cdx, cdg, cdb) = CpuBackend::new()
+        .ops()
+        .layer_norm_backward(&x, &gamma, &beta, &g, 1e-5)
+        .unwrap();
+    let (dx, dg, db) = backend
+        .ops()
+        .layer_norm_backward(
+            &vf(&backend, &[0.2, -0.4, 0.7, 0.1, 0.3, -0.2], [2, 3]),
+            &vf(&backend, &[1.0, 0.9, 1.1], [3]),
+            &vf(&backend, &[0.1, -0.1, 0.0], [3]),
+            &vf(&backend, &[0.3, -0.2, 0.4, 0.1, 0.5, -0.1], [2, 3]),
+            1e-5,
+        )
+        .unwrap();
+    assert_close(&host(&dx), &host(&cdx), 1e-5);
+    assert_close(&host(&dg), &host(&cdg), 1e-5);
+    assert_close(&host(&db), &host(&cdb), 1e-5);
+
+    let soft = cf(&[0.2, -0.4, 0.7, 0.1, 0.3, -0.2], [2, 3]);
+    let sg = cf(&[0.3, -0.2, 0.4, 0.1, 0.5, -0.1], [2, 3]);
+    let expected = CpuBackend::new()
+        .ops()
+        .softmax_last_dim_backward(&soft, &sg)
+        .unwrap();
+    assert_close(
+        &host(
+            &backend
+                .ops()
+                .softmax_last_dim_backward(
+                    &vf(&backend, &[0.2, -0.4, 0.7, 0.1, 0.3, -0.2], [2, 3]),
+                    &vf(&backend, &[0.3, -0.2, 0.4, 0.1, 0.5, -0.1], [2, 3]),
+                )
+                .unwrap(),
+        ),
+        &host(&expected),
+        1e-5,
+    );
+}

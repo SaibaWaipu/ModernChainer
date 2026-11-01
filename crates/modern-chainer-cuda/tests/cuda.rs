@@ -1310,3 +1310,81 @@ fn cuda_batched_static_decoder_flash_wide_head() {
         }
     }
 }
+
+#[test]
+#[serial]
+fn cuda_backward_embedding_norm_softmax() {
+    use modern_chainer_core::{DType, Ops, Tensor};
+
+    if !is_available() {
+        eprintln!("skipping: CUDA is not available");
+        return;
+    }
+    let backend = CudaBackend::new(0).unwrap();
+    let ids = Tensor::from_slice(backend.clone(), &[0i64, 2, 0], [3], DType::I64).unwrap();
+    let weight =
+        Tensor::from_f32(backend.clone(), &[0.1, 0.2, -0.3, 0.4, 0.5, -0.6], [3, 2]).unwrap();
+    let grad =
+        Tensor::from_f32(backend.clone(), &[0.2, 0.1, -0.4, 0.3, 0.5, -0.2], [3, 2]).unwrap();
+    let cpu_weight =
+        Tensor::from_f32(CpuBackend::new(), &[0.1, 0.2, -0.3, 0.4, 0.5, -0.6], [3, 2]).unwrap();
+    let cpu_grad =
+        Tensor::from_f32(CpuBackend::new(), &[0.2, 0.1, -0.4, 0.3, 0.5, -0.2], [3, 2]).unwrap();
+    let actual = backend
+        .ops()
+        .embedding_backward(&ids, &weight, &grad)
+        .unwrap();
+    let cpu_ids = Tensor::from_slice(CpuBackend::new(), &[0i64, 2, 0], [3], DType::I64).unwrap();
+    let expected = CpuBackend::new()
+        .ops()
+        .embedding_backward(&cpu_ids, &cpu_weight, &cpu_grad)
+        .unwrap();
+    for (a, b) in values(&actual).iter().zip(values(&expected)) {
+        assert!((a - b).abs() < 1e-5);
+    }
+
+    let x = Tensor::from_f32(backend.clone(), &[0.2, -0.4, 0.7, 0.1, 0.3, -0.2], [2, 3]).unwrap();
+    let gamma = Tensor::from_f32(backend.clone(), &[1.0, 0.9, 1.1], [3]).unwrap();
+    let beta = Tensor::from_f32(backend.clone(), &[0.1, -0.1, 0.0], [3]).unwrap();
+    let g = Tensor::from_f32(backend.clone(), &[0.3, -0.2, 0.4, 0.1, 0.5, -0.1], [2, 3]).unwrap();
+    let (dx, dg, db) = backend
+        .ops()
+        .layer_norm_backward(&x, &gamma, &beta, &g, 1e-5)
+        .unwrap();
+    let cx =
+        Tensor::from_f32(CpuBackend::new(), &[0.2, -0.4, 0.7, 0.1, 0.3, -0.2], [2, 3]).unwrap();
+    let cg = Tensor::from_f32(CpuBackend::new(), &[1.0, 0.9, 1.1], [3]).unwrap();
+    let cb = Tensor::from_f32(CpuBackend::new(), &[0.1, -0.1, 0.0], [3]).unwrap();
+    let cgrad =
+        Tensor::from_f32(CpuBackend::new(), &[0.3, -0.2, 0.4, 0.1, 0.5, -0.1], [2, 3]).unwrap();
+    let (cdx, cdg, cdb) = CpuBackend::new()
+        .ops()
+        .layer_norm_backward(&cx, &cg, &cb, &cgrad, 1e-5)
+        .unwrap();
+    for (a, b) in values(&dx).iter().zip(values(&cdx)) {
+        assert!((a - b).abs() < 1e-5);
+    }
+    for (a, b) in values(&dg).iter().zip(values(&cdg)) {
+        assert!((a - b).abs() < 1e-5);
+    }
+    for (a, b) in values(&db).iter().zip(values(&cdb)) {
+        assert!((a - b).abs() < 1e-5);
+    }
+
+    let soft =
+        Tensor::from_f32(backend.clone(), &[0.2, -0.4, 0.7, 0.1, 0.3, -0.2], [2, 3]).unwrap();
+    let sg = Tensor::from_f32(backend.clone(), &[0.3, -0.2, 0.4, 0.1, 0.5, -0.1], [2, 3]).unwrap();
+    let actual = backend.ops().softmax_last_dim_backward(&soft, &sg).unwrap();
+    let expected = CpuBackend::new()
+        .ops()
+        .softmax_last_dim_backward(
+            &Tensor::from_f32(CpuBackend::new(), &[0.2, -0.4, 0.7, 0.1, 0.3, -0.2], [2, 3])
+                .unwrap(),
+            &Tensor::from_f32(CpuBackend::new(), &[0.3, -0.2, 0.4, 0.1, 0.5, -0.1], [2, 3])
+                .unwrap(),
+        )
+        .unwrap();
+    for (a, b) in values(&actual).iter().zip(values(&expected)) {
+        assert!((a - b).abs() < 1e-5);
+    }
+}
