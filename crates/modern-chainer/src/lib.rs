@@ -37,7 +37,10 @@ pub use modern_chainer_llm::{
     DecoderHandles, PagedBatchOutput, PagedBatchRequest, PagedBatchRunner, PagedKvCache, RequestId,
     RequestState, Sampler, argmax_token, generate, sample_token, speculative_generate,
 };
-pub use modern_chainer_nn::{Embedding, LayerNorm, Linear, Module, Parameter, Sequential};
+pub use modern_chainer_nn::{
+    AveragePool2d, BatchNorm, Conv2d, ConvTranspose2d, Embedding, LayerNorm, Linear, MaxPool2d,
+    Module, MultiHeadAttention, Parameter, Sequential,
+};
 pub use modern_chainer_optim::{Adam, GradScaler, MomentumSGD, Optimizer, SGD, zero_grad};
 pub use modern_chainer_run::{
     Run, RunContext, RunMode, ScalarValue, StateBuilder, StateId, StateKey, StateSpec, StateStore,
@@ -92,15 +95,15 @@ pub mod prelude {
     pub use crate::F as functional;
     pub use crate::L;
     pub use crate::{
-        Activation, Adam, AdamConfig, AutocastGuard, Backend, BatchPlan, BatchedStaticDecoder,
-        BlockAllocator, ComputeType, ContinuousBatcher, CpuBackend, CudaBackend, DType, Decoder,
-        DecoderConfig, Device, Embedding, Error, GradScaler, GraphLinearTrainer,
-        GraphTrainerConfig, KvDType, LayerNorm, Linear, LinearMseAdamStep, Module, MomentumSGD,
-        Ops, Optimizer, PagedBatchRunner, Parameter, RequestId, Result, Run, RunMode, SGD, Sampler,
-        Shape, StateId, StateKey, StateSpec, StateStore, StaticDecoderInput, StaticDecoderStep,
-        StaticLinearConfig, StaticLinearInput, StaticRun, Step, Tensor, Variable, ZeroGrad,
-        autocast, autocast_dtype, generate, is_autocast_enabled, no_grad, speculative_generate,
-        zero_grad,
+        Activation, Adam, AdamConfig, AutocastGuard, AveragePool2d, Backend, BatchNorm, BatchPlan,
+        BatchedStaticDecoder, BlockAllocator, ComputeType, ContinuousBatcher, Conv2d,
+        ConvTranspose2d, CpuBackend, CudaBackend, DType, Decoder, DecoderConfig, Device, Embedding,
+        Error, GradScaler, GraphLinearTrainer, GraphTrainerConfig, KvDType, LayerNorm, Linear,
+        LinearMseAdamStep, MaxPool2d, Module, MomentumSGD, MultiHeadAttention, Ops, Optimizer,
+        PagedBatchRunner, Parameter, RequestId, Result, Run, RunMode, SGD, Sampler, Shape, StateId,
+        StateKey, StateSpec, StateStore, StaticDecoderInput, StaticDecoderStep, StaticLinearConfig,
+        StaticLinearInput, StaticRun, Step, Tensor, Variable, ZeroGrad, autocast, autocast_dtype,
+        generate, is_autocast_enabled, no_grad, speculative_generate, zero_grad,
     };
 }
 

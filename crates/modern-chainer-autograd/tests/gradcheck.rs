@@ -231,3 +231,98 @@ fn exp_log_sigmoid() -> Result<()> {
         &[x],
     )
 }
+
+#[test]
+fn conv_and_pool() -> Result<()> {
+    let x = var(
+        &[
+            0.1, 0.2, -0.3, 0.4, 0.5, -0.6, 0.7, 0.8, -0.9, 0.2, -0.1, 0.3, -0.4, 0.5, 0.6, -0.7,
+            0.8, -0.9,
+        ],
+        [1, 2, 3, 3],
+    );
+    let w = var(
+        &[
+            0.2, -0.1, 0.3, 0.4, -0.2, 0.1, 0.5, -0.3, 0.15, -0.25, 0.35, -0.45, 0.55, -0.65, 0.75,
+            -0.85,
+        ],
+        [2, 2, 2, 2],
+    );
+    let b = var(&[0.1, -0.2], [2]);
+    check(
+        |xs| {
+            let y = ops::conv2d(&xs[0], &xs[1], Some(&xs[2]), 1, 0)?;
+            ops::sum(&y)
+        },
+        &[x.clone(), w, b],
+    )?;
+    check(
+        |xs| {
+            let y = ops::max_pool2d(&xs[0], 2, 2, 0)?;
+            ops::sum(&y)
+        },
+        std::slice::from_ref(&x),
+    )?;
+    check(
+        |xs| {
+            let y = ops::average_pool2d(&xs[0], 2, 2, 0)?;
+            ops::sum(&y)
+        },
+        &[x],
+    )
+}
+
+#[test]
+fn conv_transpose_and_batch_norm() -> Result<()> {
+    let x = var(&[0.2, -0.1, 0.3, 0.4, -0.5, 0.6, 0.7, -0.8], [1, 2, 2, 2]);
+    let w = var(
+        &[
+            0.2, -0.1, 0.3, 0.4, -0.2, 0.1, 0.5, -0.3, 0.15, -0.25, 0.35, -0.45, 0.55, -0.65, 0.75,
+            -0.85,
+        ],
+        [2, 2, 2, 2],
+    );
+    let b = var(&[0.05, -0.1], [2]);
+    check(
+        |xs| {
+            let y = ops::conv_transpose2d(&xs[0], &xs[1], Some(&xs[2]), 2, 0, 0)?;
+            ops::sum(&y)
+        },
+        &[x.clone(), w, b],
+    )?;
+    let gamma = var(&[1.1, 0.9], [2]);
+    let beta = var(&[0.1, -0.2], [2]);
+    check(
+        |xs| {
+            let y = ops::batch_norm(&xs[0], &xs[1], &xs[2], 1e-5)?;
+            let y = ops::mul(&y, &y)?;
+            ops::sum(&y)
+        },
+        &[x, gamma, beta],
+    )
+}
+
+#[test]
+fn reshape_permute_attention() -> Result<()> {
+    let x = var(&[0.2, -0.1, 0.3, 0.4, -0.5, 0.6], [2, 3]);
+    check(
+        |xs| {
+            let y = ops::reshape(&xs[0], [3, 2])?;
+            let y = ops::permute(&y, vec![1, 0])?;
+            ops::sum(&y)
+        },
+        std::slice::from_ref(&x),
+    )?;
+
+    let q = var(&[0.2, -0.1, 0.4, 0.3], [1, 2, 2]);
+    let k = var(&[0.1, 0.2, -0.3, 0.4], [1, 2, 2]);
+    let v = var(&[0.5, -0.2, 0.3, 0.1], [1, 2, 2]);
+    check(
+        |xs| {
+            let y = ops::multi_head_attention(&xs[0], &xs[1], &xs[2], 1, true)?;
+            let y = ops::mul(&y, &y)?;
+            ops::sum(&y)
+        },
+        &[q, k, v],
+    )
+}

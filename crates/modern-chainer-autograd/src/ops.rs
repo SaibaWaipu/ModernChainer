@@ -5,6 +5,11 @@ use modern_chainer_core::{Backend, Ops, Result, Tensor};
 use crate::node::{Op, apply, apply1};
 use crate::variable::Variable;
 
+pub use crate::host_ops::{
+    average_pool2d, batch_norm, conv_transpose2d, conv2d, max_pool2d, multi_head_attention,
+    permute, reshape,
+};
+
 fn check_arity<B: Backend>(inputs: &[&Tensor<B>], expected: usize, name: &str) -> Result<()> {
     if inputs.len() != expected {
         return Err(modern_chainer_core::Error::invalid(format!(

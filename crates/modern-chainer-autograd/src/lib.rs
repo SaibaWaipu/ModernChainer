@@ -6,6 +6,7 @@
 //! construction for inference.
 
 pub mod gradcheck;
+pub mod host_ops;
 pub mod node;
 pub mod ops;
 pub mod variable;
