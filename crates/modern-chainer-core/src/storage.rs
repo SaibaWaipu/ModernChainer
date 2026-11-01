@@ -223,6 +223,21 @@ pub trait Ops<B: Backend>: Send + Sync + 'static {
         Ok((grad_x, grad_w))
     }
 
+    /// Gradients of `linear` including the bias reduction.
+    ///
+    /// Backends may fuse the three reductions into one submission.
+    fn linear_backward_with_bias(
+        &self,
+        grad: &Tensor<B>,
+        x: &Tensor<B>,
+        weight: &Tensor<B>,
+        bias_shape: &Shape,
+    ) -> Result<(Tensor<B>, Tensor<B>, Tensor<B>)> {
+        let (grad_x, grad_w) = self.linear_backward(grad, x, weight)?;
+        let grad_b = self.sum_to(grad, bias_shape)?;
+        Ok((grad_x, grad_w, grad_b))
+    }
+
     /// Fused Adam update returning `(param, m, v)`.
     fn adam_update(
         &self,

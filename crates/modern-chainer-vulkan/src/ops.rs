@@ -504,6 +504,33 @@ impl Ops<VulkanBackend> for VulkanOps {
         Ok((grad_x, grad_w))
     }
 
+    fn linear_backward_with_bias(
+        &self,
+        grad: &Tensor<VulkanBackend>,
+        x: &Tensor<VulkanBackend>,
+        weight: &Tensor<VulkanBackend>,
+        bias_shape: &Shape,
+    ) -> Result<(
+        Tensor<VulkanBackend>,
+        Tensor<VulkanBackend>,
+        Tensor<VulkanBackend>,
+    )> {
+        let (batch, in_features) = (x.shape().dims()[0], x.shape().dims()[1]);
+        let out_features = weight.shape().dims()[0];
+        let (grad_x_dispatch, grad_x) =
+            self.prepare_matmul_with(grad, weight, batch, out_features, in_features, false, true)?;
+        let (grad_w_dispatch, grad_w) =
+            self.prepare_matmul_tn(grad, x, out_features, batch, in_features, true)?;
+        if bias_shape.dims() != [out_features] {
+            self.submit_batch(&[grad_x_dispatch, grad_w_dispatch])?;
+            let grad_b = self.sum_to(grad, bias_shape)?;
+            return Ok((grad_x, grad_w, grad_b));
+        }
+        let (grad_b_dispatch, grad_b) = self.prepare_sum_to_bias(grad)?;
+        self.submit_batch(&[grad_x_dispatch, grad_w_dispatch, grad_b_dispatch])?;
+        Ok((grad_x, grad_w, grad_b))
+    }
+
     fn transpose2d(&self, a: &Tensor<VulkanBackend>) -> Result<Tensor<VulkanBackend>> {
         if a.rank() != 2 {
             return Err(Error::invalid("vulkan transpose2d expects a 2-D tensor"));
@@ -597,6 +624,10 @@ impl Ops<VulkanBackend> for VulkanOps {
 
     fn zeros_like(&self, a: &Tensor<VulkanBackend>) -> Result<Tensor<VulkanBackend>> {
         self.fill(a, 0.0)
+    }
+
+    fn full_like(&self, a: &Tensor<VulkanBackend>, value: f64) -> Result<Tensor<VulkanBackend>> {
+        self.fill(a, value as f32)
     }
 
     fn to_scalar(&self, a: &Tensor<VulkanBackend>) -> Result<f64> {
@@ -964,9 +995,15 @@ impl VulkanOps {
         } else {
             self.uniform(&params)
         };
+        let small = k <= 128;
+        let (label, code) = if small {
+            ("matmul_tn_small", shaders::MATMUL_TN_SMALL)
+        } else {
+            ("matmul_tn", shaders::MATMUL_TN)
+        };
         let (pipeline, layout) = self.pipeline(
-            "matmul_tn",
-            shaders::MATMUL_TN,
+            label,
+            code,
             &[
                 storage(0, true),
                 storage(1, true),
@@ -983,8 +1020,9 @@ impl VulkanOps {
                 (3, &dims),
             ],
         );
-        let x = (n as u64).div_ceil(32).min(65_535) as u32;
-        let y = (m as u64).div_ceil(32).min(65_535) as u32;
+        let tile = if small { 16u64 } else { 32u64 };
+        let x = (n as u64).div_ceil(tile).min(65_535) as u32;
+        let y = (m as u64).div_ceil(tile).min(65_535) as u32;
         Ok((
             PreparedDispatch {
                 pipeline,
@@ -1078,7 +1116,10 @@ impl VulkanOps {
         Ok(output)
     }
 
-    fn sum_to_bias(&self, a: &Tensor<VulkanBackend>) -> Result<Tensor<VulkanBackend>> {
+    fn prepare_sum_to_bias(
+        &self,
+        a: &Tensor<VulkanBackend>,
+    ) -> Result<(PreparedDispatch, Tensor<VulkanBackend>)> {
         let (rows, cols) = (a.shape().dims()[0], a.shape().dims()[1]);
         let output = self.empty(&Shape::new([cols]), DType::F32)?;
         let mut raw = Vec::with_capacity(16);
@@ -1086,7 +1127,7 @@ impl VulkanOps {
         raw.extend_from_slice(&(cols as u32).to_ne_bytes());
         raw.extend_from_slice(&0u32.to_ne_bytes());
         raw.extend_from_slice(&0u32.to_ne_bytes());
-        let params = self.uniform(&raw);
+        let params = self.uniform_unique(&raw);
         let (pipeline, layout) = self.pipeline(
             "sum_to_bias",
             shaders::SUM_TO_BIAS,
@@ -1100,7 +1141,20 @@ impl VulkanOps {
                 (2, &params),
             ],
         );
-        self.dispatch_2d(&pipeline, &group, cols.div_ceil(256) as u32, 1);
+        Ok((
+            PreparedDispatch {
+                pipeline,
+                group,
+                x: cols.div_ceil(256) as u32,
+                y: 1,
+            },
+            output,
+        ))
+    }
+
+    fn sum_to_bias(&self, a: &Tensor<VulkanBackend>) -> Result<Tensor<VulkanBackend>> {
+        let (dispatch, output) = self.prepare_sum_to_bias(a)?;
+        self.submit_batch(&[dispatch])?;
         Ok(output)
     }
 

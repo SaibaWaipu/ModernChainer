@@ -217,12 +217,13 @@ impl<B: Backend> Op<B> for LinearOp {
         _outputs: &[&Tensor<B>],
     ) -> Result<Vec<Option<Tensor<B>>>> {
         let ops = grad.backend().ops();
-        let (grad_x, grad_w) = ops.linear_backward(grad, inputs[0], inputs[1])?;
-        let mut grads: Vec<Option<Tensor<B>>> = vec![Some(grad_x), Some(grad_w)];
         if inputs.len() == 3 {
-            grads.push(Some(ops.sum_to(grad, inputs[2].shape())?));
+            let (grad_x, grad_w, grad_b) =
+                ops.linear_backward_with_bias(grad, inputs[0], inputs[1], inputs[2].shape())?;
+            return Ok(vec![Some(grad_x), Some(grad_w), Some(grad_b)]);
         }
-        Ok(grads)
+        let (grad_x, grad_w) = ops.linear_backward(grad, inputs[0], inputs[1])?;
+        Ok(vec![Some(grad_x), Some(grad_w)])
     }
 }
 
