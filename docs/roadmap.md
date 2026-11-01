@@ -70,8 +70,9 @@ Remaining: block-level in-place COW, wider kernels, CUDA.
   fused softmax CE / GELU / SiLU, native generic `sum_to` / `sum_all`,
   vectorized elementwise, 32×32 and small-shape matmul, transpose-free
   linear/backward, fused bias gradients, TN-small matmul, local command
-  batching, and storage/uniform buffer pools.
-- Next: multi-tile cooperative-matrix scheduling (the 16×16 single-tile
+  batching, GPU-side scalar broadcast, and storage/uniform buffer pools.
+- Next: CPU-side bind-group/autograd overhead, multi-tile cooperative-matrix
+  scheduling (the 16×16 single-tile
   prototype was slower than scalar on Turing), faster scalar matmul,
   continuous static batching/request admission, faster long-context
   low-precision decode, backend-agnostic Static Step trait, full-model f16/bf16

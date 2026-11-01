@@ -26,7 +26,7 @@ class MLP(chainer.Chain):
         return self.l2(F.relu(self.l1(x)))
 ```
 
-## ステータス（v0.18.0）
+## ステータス（v0.19.0）
 
 | 領域 | 状態 |
 |---|---|
@@ -310,9 +310,9 @@ RTX 2070 SUPER、PyTorch 2.11.0+cu128、`matmul 512³` / `add 4M` / `linear fwd+
 |---|---:|---:|---:|---:|---:|
 | CPU | 0.49 / 0.43 | 2.19 / 8.00 | 0.58 / 0.32 | 3.56 / 4.94 | 1.22 / 1.53 (1.25×) |
 | CUDA | 0.074 / 0.070 | 0.185 / 0.142 | 0.207 / 0.198 | 0.457 / 0.526 | 0.190 / 0.179 (0.94×) |
-| Vulkan:1 | 0.77 / 0.071 | 0.44 / 0.141 | 2.46 / 0.204 | 3.08 / 0.519 | 1.27 / 0.180 (0.14×) |
+| Vulkan:1 | 0.76 / 0.071 | 0.44 / 0.141 | 2.41 / 0.202 | 2.90 / 0.604 | 1.24 / 0.187 (0.15×) |
 
-Python/CUDA はほぼ互角、Python/Vulkan は正しく動くがまだ大幅に遅いです。カーネル改善で Adam は 10.7 → 約 3.1 ms、幾何平均は 2.11 → 1.27 ms になりました。linear は bias 融合・bias-grad 融合・TN small で 3.19 → 2.46 ms。残る主因は scalar WGSL matmul です。
+Python/CUDA はほぼ互角、Python/Vulkan は正しく動くがまだ大幅に遅いです。カーネル改善で Adam は 10.7 → 2.9 ms、幾何平均は 2.11 → 1.24 ms になりました。linear は bias 融合・bias-grad 融合・TN small・sum backward の host sync 除去で 3.19 → 2.41 ms。残る主因は scalar WGSL matmul です。
 
 ## ビルドとテスト
 
