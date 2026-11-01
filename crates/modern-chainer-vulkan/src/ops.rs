@@ -465,19 +465,22 @@ impl Ops<VulkanBackend> for VulkanOps {
             ));
         }
         if batch <= 128 {
-            let (matmul, y) =
+            if let Some(bias) = bias {
+                let (dispatch, out) = self.prepare_matmul_nt_small_bias(
+                    x,
+                    weight,
+                    bias,
+                    batch,
+                    in_features,
+                    out_features,
+                )?;
+                self.submit_batch(&[dispatch])?;
+                return Ok(out);
+            }
+            let (dispatch, y) =
                 self.prepare_matmul_with(x, weight, batch, in_features, out_features, true, true)?;
-            return match bias {
-                Some(bias) => {
-                    let (bias_dispatch, out) = self.prepare_bias_add(&y, bias)?;
-                    self.submit_batch(&[matmul, bias_dispatch])?;
-                    Ok(out)
-                }
-                None => {
-                    self.submit_batch(&[matmul])?;
-                    Ok(y)
-                }
-            };
+            self.submit_batch(&[dispatch])?;
+            return Ok(y);
         }
         match bias {
             Some(bias) => self.matmul_nt_bias(x, weight, bias, batch, in_features, out_features),
@@ -767,36 +770,44 @@ impl Ops<VulkanBackend> for VulkanOps {
 }
 
 impl VulkanOps {
-    fn prepare_bias_add(
+    fn prepare_matmul_nt_small_bias(
         &self,
         a: &Tensor<VulkanBackend>,
+        b: &Tensor<VulkanBackend>,
         bias: &Tensor<VulkanBackend>,
+        m: usize,
+        k: usize,
+        n: usize,
     ) -> Result<(PreparedDispatch, Tensor<VulkanBackend>)> {
-        let out = self.empty(a.shape(), DType::F32)?;
-        let cols = a.shape().dims()[a.rank() - 1];
-        let params = self.uniform_unique(&(cols as u32).to_ne_bytes());
+        let out = self.empty(&Shape::new([m, n]), DType::F32)?;
+        let mut params = Vec::with_capacity(16);
+        for value in [m as u32, k as u32, n as u32, 0] {
+            params.extend_from_slice(&value.to_ne_bytes());
+        }
+        let dims = self.uniform_unique(&params);
         let (pipeline, layout) = self.pipeline(
-            "bias_add",
-            shaders::BIAS_ADD,
+            "matmul_nt_small_bias",
+            shaders::MATMUL_NT_SMALL_BIAS,
             &[
                 storage(0, true),
                 storage(1, true),
                 storage(2, false),
-                uniform(3),
+                storage(3, true),
+                uniform(4),
             ],
         );
         let group = self.bind_group(
             &layout,
             &[
                 (0, a.storage().buffer.as_ref()),
-                (1, bias.storage().buffer.as_ref()),
+                (1, b.storage().buffer.as_ref()),
                 (2, out.storage().buffer.as_ref()),
-                (3, &params),
+                (3, bias.storage().buffer.as_ref()),
+                (4, &dims),
             ],
         );
-        let total = out.numel() as u64;
-        let x = total.div_ceil(64).min(65_535) as u32;
-        let y = total.div_ceil(64).div_ceil(65_535) as u32;
+        let x = (n as u64).div_ceil(16).min(65_535) as u32;
+        let y = (m as u64).div_ceil(16).min(65_535) as u32;
         Ok((
             PreparedDispatch {
                 pipeline,
@@ -1053,7 +1064,7 @@ impl VulkanOps {
         let mut len = a.numel();
         let mut dispatches = Vec::new();
         let mut keep = Vec::new();
-        while len > 256 {
+        while len > 65_536 {
             let (dispatch, next) = self.prepare_sum_partial(&current, len)?;
             dispatches.push(dispatch);
             keep.push(current);
