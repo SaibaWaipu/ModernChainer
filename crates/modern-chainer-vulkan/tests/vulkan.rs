@@ -186,6 +186,24 @@ fn reductions_match_cpu() {
 
 #[test]
 #[serial]
+fn sum_backward_fills_every_output() {
+    if !is_available() {
+        eprintln!("skipping: no Vulkan adapter");
+        return;
+    }
+    let backend = VulkanBackend::new().unwrap();
+    let x = Variable::new(
+        Tensor::from_f32(backend.clone(), &vec![0.25f32; 64 * 128], [64, 128]).unwrap(),
+    );
+    let loss = F::sum(&x).unwrap();
+    loss.backward().unwrap();
+    let grad = host(&x.grad().unwrap());
+    assert_eq!(grad.len(), 64 * 128);
+    assert_close(&grad, &vec![1.0f32; 64 * 128], 1e-6);
+}
+
+#[test]
+#[serial]
 fn linear_training_step_reduces_loss() {
     if !is_available() {
         eprintln!("skipping: no Vulkan adapter");

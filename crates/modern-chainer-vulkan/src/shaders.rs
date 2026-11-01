@@ -631,7 +631,7 @@ fn main(
         let ka = t * TILE + lid.x;
         let kb = t * TILE + lid.y;
         if (row < params.m && ka < params.k) {
-            tile_a[lid.y * TILE + lid.x] = a[row * params.k + ka];
+            tile_a[lid.y * TILE + lid.x] = a[ka * params.m + row];
         } else {
             tile_a[lid.y * TILE + lid.x] = 0.0;
         }
@@ -937,9 +937,9 @@ struct Params { factor: f32, pad0: f32, pad1: f32, pad2: f32 };
 @group(0) @binding(0) var<storage, read> scalar: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<vec4<f32>>;
 @group(0) @binding(2) var<uniform> params: Params;
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x + gid.y * 4194240u;
+    let i = gid.x + gid.y * 16776960u;
     if (i >= arrayLength(&output)) { return; }
     output[i] = vec4<f32>(scalar[0] * params.factor);
 }
