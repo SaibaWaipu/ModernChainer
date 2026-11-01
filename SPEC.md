@@ -1,6 +1,6 @@
 # Modern Chainer — Specification
 
-Status: v0.20.0 implementation. This document records the product intent, the
+Status: v0.21.0 implementation. This document records the product intent, the
 implemented surface, and the deliberately deferred work.
 
 ## 1. Vision
@@ -286,9 +286,17 @@ subclassing; custom ops must currently be written in Rust.
 - Vision: `data::image::GrayImage` with PPM read/write and nearest resize.
 - Audio: `data::audio::Wav` (PCM16/float32 WAV), RMS, zero-crossing rate and
   Goertzel features.
-- CPU autograd: `exp`, `log`, `sigmoid`, `softmax`, `layer_norm`, `embedding`.
-- Examples: synthetic image classification, LSGAN, VAE, VQ-VAE, keyword
-  spotting and a single-head Transformer encoder.
+- CPU autograd: `exp`, `log`, `sigmoid`, `softmax`, `layer_norm`, `embedding`,
+  `conv2d`, `conv_transpose2d`, `max_pool2d`, `average_pool2d`, `batch_norm`,
+  `reshape`, `permute`, `multi_head_attention`.
+- Links: `Conv2d`, `ConvTranspose2d`, `BatchNorm`, `LayerNorm`, `Embedding`,
+  `MultiHeadAttention`, `MaxPool2d`, `AveragePool2d`.
+- Tokenizers/loaders: image patch tokenizer + PPM loader, audio frame tokenizer
+  + WAV loader, character/word text tokenizers.
+- Examples: synthetic image classification (MLP and CNN), LSGAN, VAE, VQ-VAE,
+  keyword spotting, single-head and batched Transformer attention.
+- CUDA/Vulkan native backward for embedding, LayerNorm and softmax; conv,
+  pooling, BatchNorm and attention use host fallbacks with gradients.
 
 ### CUDA (core ops)
 

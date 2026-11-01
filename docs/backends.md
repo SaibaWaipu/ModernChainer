@@ -60,12 +60,14 @@ cached per context, and adapters can be selected by index with
 | gelu, silu | native activations |
 | transpose2d | 16×16 shared-memory tile |
 | matmul | 32×32 tile with 2×2 blocking; aligned fast path; 16×16 small-shape variant |
+| conv2d / conv_transpose2d / pool / batch_norm / attention | host fallback with gradients, usable on any backend |
 | linear | transpose-free matmul against `[out, in]` weights, fused bias for small/large batches |
 | linear_backward | transposed-input matmul avoids materializing `gradᵀ`; fuses bias-gradient reduction |
 | adam_update | fused single kernel (`m`, `v`, bias correction and parameter update) |
 | softmax_cross_entropy | fused row softmax and NLL; backward in one kernel |
 | sum_all | single-workgroup fast path for ≤64K elements; two-stage GPU reduction above |
 | full_like_scalar | GPU-side scalar broadcast for Sum/Mean backward (no host readback) |
+| embedding / layer_norm / softmax | forward and backward kernels |
 | sum_to | native bias-column and generic rank≤8 broadcast reduction |
 
 Persistent storage and uniform buffers are pooled per device. Compute pipelines

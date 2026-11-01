@@ -45,16 +45,18 @@ VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release
 ### `chainer.functions` (`F`)
 
 `add`, `sub`, `mul`, `div`, `sqrt`, `relu`, `neg`, `matmul`, `transpose`,
-`sum`, `mean`, `softmax_cross_entropy`.
+`sum`, `mean`, `softmax`, `exp`, `log`, `sigmoid`, `layer_norm`, `batch_norm`,
+`embedding`, `conv2d`, `conv_transpose2d`, `max_pool2d`, `average_pool2d`,
+`reshape`, `permute`, `multi_head_attention`, `softmax_cross_entropy`.
 
 Broadcasting is supported for binary elementwise ops and for
 `softmax_cross_entropy` logits of shape `[batch, classes]` with integer labels.
 
 ### `chainer.links` (`L`)
 
-`Linear(in_features, out_features, seed=0, device="cpu")` with `W`, `b`,
-`parameters()`, `cleargrads()` and `__call__`. The layer and its input must be
-on the same device.
+`Linear`, `Conv2d`, `ConvTranspose2d`, `BatchNorm`, `LayerNorm`, `Embedding`
+and `MultiHeadAttention`, all with `device="cpu|cuda|vulkan:N"`. The layer and
+its input must be on the same device.
 
 ### Devices
 

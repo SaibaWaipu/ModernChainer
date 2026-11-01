@@ -44,7 +44,7 @@ class MLP(chainer.Chain):
 | シリアライズ | ネイティブ `.mcn`、Chainer `.npz` は計画中 |
 | Trainer / Updater / Extensions | 計画中 |
 | ドキュメント | README（日本語）、SPEC / docs（英語） |
-| Examples | MLP / decoder / batching / static / CUDA / Vulkan に加え、画像分類・GAN・VAE・VQ-VAE・音声・Transformer |
+| Examples | MLP / CNN / decoder / batching / static / CUDA / Vulkan、GAN・VAE・VQ-VAE・音声・Transformer（batch attention） |
 
 Python パッケージは Chainer 7 の完全互換ではありません。API の形と Define-by-Run の感触を残しつつ、現代の Python に合わない部分は整理しています。State by Run は v0.4 時点では Rust ファーストです。
 
@@ -66,11 +66,13 @@ cargo run --release --example vulkan_matmul   # Vulkan ローダ/ICD が必要
 
 # 画像 / 生成モデル / 音声 / Transformer（合成データ、CPU）
 cargo run --release --example image_classification
+cargo run --release --example image_classification_cnn
 cargo run --release --example gan
 cargo run --release --example vae
 cargo run --release --example vq_vae
 cargo run --release --example speech_recognition
 cargo run --release --example transformer
+cargo run --release --example transformer_batch
 ```
 
 Python から device を選択:
@@ -347,7 +349,7 @@ Vulkan テストは利用可能なアダプタ（NVIDIA / AMD / Intel / Mesa lav
 - [`docs/python-api.md`](docs/python-api.md) — Python API と Chainer 7 との差分（英語）
 - [`docs/benchmarks.md`](docs/benchmarks.md) — 計測方法と結果（英語）
 - [`docs/roadmap.md`](docs/roadmap.md) — ロードマップ（英語）
-- [`docs/examples.md`](docs/examples.md) — 画像 / GAN / VAE / VQ-VAE / 音声 / Transformer（英語）
+- [`docs/examples.md`](docs/examples.md) — 画像 / CNN / GAN / VAE / VQ-VAE / 音声 / Transformer（英語）
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — 開発手順（英語）
 
 ## 主な制約
