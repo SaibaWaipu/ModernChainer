@@ -1,5 +1,21 @@
 """Links and modules (`L.*`)."""
 
-from ._chainer import Linear
+from ._chainer import (
+    BatchNorm,
+    Conv2d,
+    ConvTranspose2d,
+    Embedding,
+    LayerNorm,
+    Linear,
+    MultiHeadAttention,
+)
 
-__all__ = ["Linear"]
+__all__ = [
+    "BatchNorm",
+    "Conv2d",
+    "ConvTranspose2d",
+    "Embedding",
+    "LayerNorm",
+    "Linear",
+    "MultiHeadAttention",
+]

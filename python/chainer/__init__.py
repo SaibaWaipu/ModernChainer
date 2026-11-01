@@ -22,7 +22,13 @@ from contextlib import contextmanager
 
 from ._chainer import (
     Adam,
+    BatchNorm,
+    Conv2d,
+    ConvTranspose2d,
+    Embedding,
+    LayerNorm,
     Linear,
+    MultiHeadAttention,
     SGD,
     Tensor,
     Variable,
@@ -47,7 +53,10 @@ class Chain:
 
     def __setattr__(self, name, value):
         object.__setattr__(self, name, value)
-        if isinstance(value, (Linear, Chain)):
+        if isinstance(
+            value,
+            (Linear, Conv2d, ConvTranspose2d, BatchNorm, LayerNorm, Embedding, MultiHeadAttention, Chain),
+        ):
             self._children[name] = value
 
     def add_link(self, name, link):
@@ -76,8 +85,14 @@ class Chain:
 
 __all__ = [
     "Adam",
+    "BatchNorm",
     "Chain",
+    "Conv2d",
+    "ConvTranspose2d",
+    "Embedding",
+    "LayerNorm",
     "Linear",
+    "MultiHeadAttention",
     "SGD",
     "Tensor",
     "Variable",

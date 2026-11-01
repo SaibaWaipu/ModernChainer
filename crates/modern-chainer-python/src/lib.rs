@@ -655,6 +655,257 @@ unary_op!(transpose, F::transpose);
 unary_op!(neg, F::neg);
 unary_op!(sum, F::sum);
 unary_op!(mean, F::mean);
+unary_op!(exp, F::exp);
+unary_op!(log, F::log);
+unary_op!(sigmoid, F::sigmoid);
+unary_op!(softmax, F::softmax);
+
+#[pyfunction]
+fn reshape(x: PyRef<'_, PyVariable>, shape: Vec<usize>) -> PyResult<PyVariable> {
+    match &x.inner {
+        DynVariable::Cpu(x) => Ok(PyVariable::wrap(DynVariable::Cpu(
+            F::reshape(x, Shape::new(shape)).map_err(to_py)?,
+        ))),
+        DynVariable::Cuda(x) => Ok(PyVariable::wrap(DynVariable::Cuda(
+            F::reshape(x, Shape::new(shape)).map_err(to_py)?,
+        ))),
+        DynVariable::Vulkan(x) => Ok(PyVariable::wrap(DynVariable::Vulkan(
+            F::reshape(x, Shape::new(shape)).map_err(to_py)?,
+        ))),
+    }
+}
+
+#[pyfunction]
+fn permute(x: PyRef<'_, PyVariable>, axes: Vec<usize>) -> PyResult<PyVariable> {
+    match &x.inner {
+        DynVariable::Cpu(x) => Ok(PyVariable::wrap(DynVariable::Cpu(
+            F::permute(x, axes).map_err(to_py)?,
+        ))),
+        DynVariable::Cuda(x) => Ok(PyVariable::wrap(DynVariable::Cuda(
+            F::permute(x, axes).map_err(to_py)?,
+        ))),
+        DynVariable::Vulkan(x) => Ok(PyVariable::wrap(DynVariable::Vulkan(
+            F::permute(x, axes).map_err(to_py)?,
+        ))),
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, gamma, beta, eps=1e-5))]
+fn layer_norm(
+    x: PyRef<'_, PyVariable>,
+    gamma: PyRef<'_, PyVariable>,
+    beta: PyRef<'_, PyVariable>,
+    eps: f64,
+) -> PyResult<PyVariable> {
+    match (&x.inner, &gamma.inner, &beta.inner) {
+        (DynVariable::Cpu(x), DynVariable::Cpu(g), DynVariable::Cpu(b)) => Ok(PyVariable::wrap(
+            DynVariable::Cpu(F::layer_norm(x, g, b, eps).map_err(to_py)?),
+        )),
+        (DynVariable::Cuda(x), DynVariable::Cuda(g), DynVariable::Cuda(b)) => Ok(PyVariable::wrap(
+            DynVariable::Cuda(F::layer_norm(x, g, b, eps).map_err(to_py)?),
+        )),
+        (DynVariable::Vulkan(x), DynVariable::Vulkan(g), DynVariable::Vulkan(b)) => {
+            Ok(PyVariable::wrap(DynVariable::Vulkan(
+                F::layer_norm(x, g, b, eps).map_err(to_py)?,
+            )))
+        }
+        _ => Err(PyRuntimeError::new_err("layer_norm device mismatch")),
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, gamma, beta, eps=1e-5))]
+fn batch_norm(
+    x: PyRef<'_, PyVariable>,
+    gamma: PyRef<'_, PyVariable>,
+    beta: PyRef<'_, PyVariable>,
+    eps: f64,
+) -> PyResult<PyVariable> {
+    match (&x.inner, &gamma.inner, &beta.inner) {
+        (DynVariable::Cpu(x), DynVariable::Cpu(g), DynVariable::Cpu(b)) => Ok(PyVariable::wrap(
+            DynVariable::Cpu(F::batch_norm(x, g, b, eps).map_err(to_py)?),
+        )),
+        (DynVariable::Cuda(x), DynVariable::Cuda(g), DynVariable::Cuda(b)) => Ok(PyVariable::wrap(
+            DynVariable::Cuda(F::batch_norm(x, g, b, eps).map_err(to_py)?),
+        )),
+        (DynVariable::Vulkan(x), DynVariable::Vulkan(g), DynVariable::Vulkan(b)) => {
+            Ok(PyVariable::wrap(DynVariable::Vulkan(
+                F::batch_norm(x, g, b, eps).map_err(to_py)?,
+            )))
+        }
+        _ => Err(PyRuntimeError::new_err("batch_norm device mismatch")),
+    }
+}
+
+#[pyfunction]
+fn embedding(ids: PyRef<'_, PyVariable>, weight: PyRef<'_, PyVariable>) -> PyResult<PyVariable> {
+    match (&ids.inner, &weight.inner) {
+        (DynVariable::Cpu(i), DynVariable::Cpu(w)) => Ok(PyVariable::wrap(DynVariable::Cpu(
+            F::embedding(i, w).map_err(to_py)?,
+        ))),
+        (DynVariable::Cuda(i), DynVariable::Cuda(w)) => Ok(PyVariable::wrap(DynVariable::Cuda(
+            F::embedding(i, w).map_err(to_py)?,
+        ))),
+        (DynVariable::Vulkan(i), DynVariable::Vulkan(w)) => Ok(PyVariable::wrap(
+            DynVariable::Vulkan(F::embedding(i, w).map_err(to_py)?),
+        )),
+        _ => Err(PyRuntimeError::new_err("embedding device mismatch")),
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, weight, bias, stride=1, padding=0))]
+fn conv2d(
+    x: PyRef<'_, PyVariable>,
+    weight: PyRef<'_, PyVariable>,
+    bias: Option<PyRef<'_, PyVariable>>,
+    stride: usize,
+    padding: usize,
+) -> PyResult<PyVariable> {
+    let bias = bias.as_ref().map(|b| &b.inner);
+    match (&x.inner, &weight.inner, bias) {
+        (DynVariable::Cpu(x), DynVariable::Cpu(w), None) => Ok(PyVariable::wrap(DynVariable::Cpu(
+            F::conv2d(x, w, None, stride, padding).map_err(to_py)?,
+        ))),
+        (DynVariable::Cuda(x), DynVariable::Cuda(w), None) => Ok(PyVariable::wrap(
+            DynVariable::Cuda(F::conv2d(x, w, None, stride, padding).map_err(to_py)?),
+        )),
+        (DynVariable::Vulkan(x), DynVariable::Vulkan(w), None) => Ok(PyVariable::wrap(
+            DynVariable::Vulkan(F::conv2d(x, w, None, stride, padding).map_err(to_py)?),
+        )),
+        (DynVariable::Cpu(x), DynVariable::Cpu(w), Some(DynVariable::Cpu(b))) => {
+            Ok(PyVariable::wrap(DynVariable::Cpu(
+                F::conv2d(x, w, Some(b), stride, padding).map_err(to_py)?,
+            )))
+        }
+        (DynVariable::Cuda(x), DynVariable::Cuda(w), Some(DynVariable::Cuda(b))) => {
+            Ok(PyVariable::wrap(DynVariable::Cuda(
+                F::conv2d(x, w, Some(b), stride, padding).map_err(to_py)?,
+            )))
+        }
+        (DynVariable::Vulkan(x), DynVariable::Vulkan(w), Some(DynVariable::Vulkan(b))) => {
+            Ok(PyVariable::wrap(DynVariable::Vulkan(
+                F::conv2d(x, w, Some(b), stride, padding).map_err(to_py)?,
+            )))
+        }
+        _ => Err(PyRuntimeError::new_err("conv2d device mismatch")),
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, weight, bias, stride=1, padding=0, output_padding=0))]
+fn conv_transpose2d(
+    x: PyRef<'_, PyVariable>,
+    weight: PyRef<'_, PyVariable>,
+    bias: Option<PyRef<'_, PyVariable>>,
+    stride: usize,
+    padding: usize,
+    output_padding: usize,
+) -> PyResult<PyVariable> {
+    let bias = bias.as_ref().map(|b| &b.inner);
+    match (&x.inner, &weight.inner, bias) {
+        (DynVariable::Cpu(x), DynVariable::Cpu(w), None) => Ok(PyVariable::wrap(DynVariable::Cpu(
+            F::conv_transpose2d(x, w, None, stride, padding, output_padding).map_err(to_py)?,
+        ))),
+        (DynVariable::Cuda(x), DynVariable::Cuda(w), None) => {
+            Ok(PyVariable::wrap(DynVariable::Cuda(
+                F::conv_transpose2d(x, w, None, stride, padding, output_padding).map_err(to_py)?,
+            )))
+        }
+        (DynVariable::Vulkan(x), DynVariable::Vulkan(w), None) => {
+            Ok(PyVariable::wrap(DynVariable::Vulkan(
+                F::conv_transpose2d(x, w, None, stride, padding, output_padding).map_err(to_py)?,
+            )))
+        }
+        (DynVariable::Cpu(x), DynVariable::Cpu(w), Some(DynVariable::Cpu(b))) => {
+            Ok(PyVariable::wrap(DynVariable::Cpu(
+                F::conv_transpose2d(x, w, Some(b), stride, padding, output_padding)
+                    .map_err(to_py)?,
+            )))
+        }
+        (DynVariable::Cuda(x), DynVariable::Cuda(w), Some(DynVariable::Cuda(b))) => {
+            Ok(PyVariable::wrap(DynVariable::Cuda(
+                F::conv_transpose2d(x, w, Some(b), stride, padding, output_padding)
+                    .map_err(to_py)?,
+            )))
+        }
+        (DynVariable::Vulkan(x), DynVariable::Vulkan(w), Some(DynVariable::Vulkan(b))) => {
+            Ok(PyVariable::wrap(DynVariable::Vulkan(
+                F::conv_transpose2d(x, w, Some(b), stride, padding, output_padding)
+                    .map_err(to_py)?,
+            )))
+        }
+        _ => Err(PyRuntimeError::new_err("conv_transpose2d device mismatch")),
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, kernel, stride=1, padding=0))]
+fn max_pool2d(
+    x: PyRef<'_, PyVariable>,
+    kernel: usize,
+    stride: usize,
+    padding: usize,
+) -> PyResult<PyVariable> {
+    match &x.inner {
+        DynVariable::Cpu(x) => Ok(PyVariable::wrap(DynVariable::Cpu(
+            F::max_pool2d(x, kernel, stride, padding).map_err(to_py)?,
+        ))),
+        DynVariable::Cuda(x) => Ok(PyVariable::wrap(DynVariable::Cuda(
+            F::max_pool2d(x, kernel, stride, padding).map_err(to_py)?,
+        ))),
+        DynVariable::Vulkan(x) => Ok(PyVariable::wrap(DynVariable::Vulkan(
+            F::max_pool2d(x, kernel, stride, padding).map_err(to_py)?,
+        ))),
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, kernel, stride=1, padding=0))]
+fn average_pool2d(
+    x: PyRef<'_, PyVariable>,
+    kernel: usize,
+    stride: usize,
+    padding: usize,
+) -> PyResult<PyVariable> {
+    match &x.inner {
+        DynVariable::Cpu(x) => Ok(PyVariable::wrap(DynVariable::Cpu(
+            F::average_pool2d(x, kernel, stride, padding).map_err(to_py)?,
+        ))),
+        DynVariable::Cuda(x) => Ok(PyVariable::wrap(DynVariable::Cuda(
+            F::average_pool2d(x, kernel, stride, padding).map_err(to_py)?,
+        ))),
+        DynVariable::Vulkan(x) => Ok(PyVariable::wrap(DynVariable::Vulkan(
+            F::average_pool2d(x, kernel, stride, padding).map_err(to_py)?,
+        ))),
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (q, k, v, heads, causal=false))]
+fn multi_head_attention(
+    q: PyRef<'_, PyVariable>,
+    k: PyRef<'_, PyVariable>,
+    v: PyRef<'_, PyVariable>,
+    heads: usize,
+    causal: bool,
+) -> PyResult<PyVariable> {
+    match (&q.inner, &k.inner, &v.inner) {
+        (DynVariable::Cpu(q), DynVariable::Cpu(k), DynVariable::Cpu(v)) => Ok(PyVariable::wrap(
+            DynVariable::Cpu(F::multi_head_attention(q, k, v, heads, causal).map_err(to_py)?),
+        )),
+        (DynVariable::Cuda(q), DynVariable::Cuda(k), DynVariable::Cuda(v)) => Ok(PyVariable::wrap(
+            DynVariable::Cuda(F::multi_head_attention(q, k, v, heads, causal).map_err(to_py)?),
+        )),
+        (DynVariable::Vulkan(q), DynVariable::Vulkan(k), DynVariable::Vulkan(v)) => {
+            Ok(PyVariable::wrap(DynVariable::Vulkan(
+                F::multi_head_attention(q, k, v, heads, causal).map_err(to_py)?,
+            )))
+        }
+        _ => Err(PyRuntimeError::new_err("attention device mismatch")),
+    }
+}
 
 #[pyfunction]
 #[pyo3(signature = (logits, target))]
@@ -673,6 +924,526 @@ fn softmax_cross_entropy(
             DynVariable::Vulkan(F::softmax_cross_entropy(a, b).map_err(to_py)?),
         )),
         _ => Err(PyRuntimeError::new_err("operand device mismatch")),
+    }
+}
+
+enum DynConv2d {
+    Cpu(Conv2d<CpuBackend>),
+    Cuda(Conv2d<CudaBackend>),
+    Vulkan(Conv2d<VulkanBackend>),
+}
+
+#[pyclass(name = "Conv2d", module = "chainer.links")]
+pub struct PyConv2d {
+    inner: DynConv2d,
+}
+
+#[pymethods]
+impl PyConv2d {
+    #[new]
+    #[pyo3(signature = (in_channels, out_channels, kernel, stride=1, padding=0, seed=0, device="cpu"))]
+    fn new(
+        in_channels: usize,
+        out_channels: usize,
+        kernel: usize,
+        stride: usize,
+        padding: usize,
+        seed: u64,
+        device: &str,
+    ) -> PyResult<Self> {
+        let target = parse_device(device)?;
+        let inner = match target {
+            Device::Cpu => DynConv2d::Cpu(
+                Conv2d::new(in_channels, out_channels, kernel, stride, padding, seed)
+                    .map_err(to_py)?,
+            ),
+            Device::Cuda(index) => {
+                let backend = cuda_backend(index)?;
+                DynConv2d::Cuda(
+                    Conv2d::with_backend(
+                        backend,
+                        in_channels,
+                        out_channels,
+                        kernel,
+                        stride,
+                        padding,
+                        seed,
+                    )
+                    .map_err(to_py)?,
+                )
+            }
+            Device::Vulkan(index) => {
+                let backend = vulkan_backend(index as usize)?;
+                DynConv2d::Vulkan(
+                    Conv2d::with_backend(
+                        backend,
+                        in_channels,
+                        out_channels,
+                        kernel,
+                        stride,
+                        padding,
+                        seed,
+                    )
+                    .map_err(to_py)?,
+                )
+            }
+        };
+        Ok(Self { inner })
+    }
+
+    fn forward(&self, x: PyRef<'_, PyVariable>) -> PyResult<PyVariable> {
+        match (&self.inner, &x.inner) {
+            (DynConv2d::Cpu(l), DynVariable::Cpu(x)) => Ok(PyVariable::wrap(DynVariable::Cpu(
+                l.forward(x).map_err(to_py)?,
+            ))),
+            (DynConv2d::Cuda(l), DynVariable::Cuda(x)) => Ok(PyVariable::wrap(DynVariable::Cuda(
+                l.forward(x).map_err(to_py)?,
+            ))),
+            (DynConv2d::Vulkan(l), DynVariable::Vulkan(x)) => Ok(PyVariable::wrap(
+                DynVariable::Vulkan(l.forward(x).map_err(to_py)?),
+            )),
+            _ => Err(PyRuntimeError::new_err("Conv2d device mismatch")),
+        }
+    }
+
+    fn parameters(&self) -> Vec<PyVariable> {
+        match &self.inner {
+            DynConv2d::Cpu(l) => l
+                .parameters()
+                .into_iter()
+                .map(|p| PyVariable::wrap(DynVariable::Cpu(p.variable)))
+                .collect(),
+            DynConv2d::Cuda(l) => l
+                .parameters()
+                .into_iter()
+                .map(|p| PyVariable::wrap(DynVariable::Cuda(p.variable)))
+                .collect(),
+            DynConv2d::Vulkan(l) => l
+                .parameters()
+                .into_iter()
+                .map(|p| PyVariable::wrap(DynVariable::Vulkan(p.variable)))
+                .collect(),
+        }
+    }
+
+    fn __call__(&self, x: PyRef<'_, PyVariable>) -> PyResult<PyVariable> {
+        self.forward(x)
+    }
+
+    #[getter]
+    #[allow(non_snake_case)]
+    fn W(&self) -> PyVariable {
+        match &self.inner {
+            DynConv2d::Cpu(l) => PyVariable::wrap(DynVariable::Cpu(l.weight().clone())),
+            DynConv2d::Cuda(l) => PyVariable::wrap(DynVariable::Cuda(l.weight().clone())),
+            DynConv2d::Vulkan(l) => PyVariable::wrap(DynVariable::Vulkan(l.weight().clone())),
+        }
+    }
+}
+
+enum DynConvTranspose2d {
+    Cpu(ConvTranspose2d<CpuBackend>),
+    Cuda(ConvTranspose2d<CudaBackend>),
+    Vulkan(ConvTranspose2d<VulkanBackend>),
+}
+
+#[pyclass(name = "ConvTranspose2d", module = "chainer.links")]
+pub struct PyConvTranspose2d {
+    inner: DynConvTranspose2d,
+}
+
+#[pymethods]
+impl PyConvTranspose2d {
+    #[new]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (in_channels, out_channels, kernel, stride=1, padding=0, output_padding=0, seed=0, device="cpu"))]
+    fn new(
+        in_channels: usize,
+        out_channels: usize,
+        kernel: usize,
+        stride: usize,
+        padding: usize,
+        output_padding: usize,
+        seed: u64,
+        device: &str,
+    ) -> PyResult<Self> {
+        let target = parse_device(device)?;
+        let inner = match target {
+            Device::Cpu => DynConvTranspose2d::Cpu(
+                ConvTranspose2d::new(
+                    in_channels,
+                    out_channels,
+                    kernel,
+                    stride,
+                    padding,
+                    output_padding,
+                    seed,
+                )
+                .map_err(to_py)?,
+            ),
+            Device::Cuda(index) => {
+                let backend = cuda_backend(index)?;
+                DynConvTranspose2d::Cuda(
+                    ConvTranspose2d::with_backend(
+                        backend,
+                        in_channels,
+                        out_channels,
+                        kernel,
+                        stride,
+                        padding,
+                        output_padding,
+                        seed,
+                    )
+                    .map_err(to_py)?,
+                )
+            }
+            Device::Vulkan(index) => {
+                let backend = vulkan_backend(index as usize)?;
+                DynConvTranspose2d::Vulkan(
+                    ConvTranspose2d::with_backend(
+                        backend,
+                        in_channels,
+                        out_channels,
+                        kernel,
+                        stride,
+                        padding,
+                        output_padding,
+                        seed,
+                    )
+                    .map_err(to_py)?,
+                )
+            }
+        };
+        Ok(Self { inner })
+    }
+
+    fn forward(&self, x: PyRef<'_, PyVariable>) -> PyResult<PyVariable> {
+        match (&self.inner, &x.inner) {
+            (DynConvTranspose2d::Cpu(l), DynVariable::Cpu(x)) => Ok(PyVariable::wrap(
+                DynVariable::Cpu(l.forward(x).map_err(to_py)?),
+            )),
+            (DynConvTranspose2d::Cuda(l), DynVariable::Cuda(x)) => Ok(PyVariable::wrap(
+                DynVariable::Cuda(l.forward(x).map_err(to_py)?),
+            )),
+            (DynConvTranspose2d::Vulkan(l), DynVariable::Vulkan(x)) => Ok(PyVariable::wrap(
+                DynVariable::Vulkan(l.forward(x).map_err(to_py)?),
+            )),
+            _ => Err(PyRuntimeError::new_err("ConvTranspose2d device mismatch")),
+        }
+    }
+
+    fn parameters(&self) -> Vec<PyVariable> {
+        match &self.inner {
+            DynConvTranspose2d::Cpu(l) => l
+                .parameters()
+                .into_iter()
+                .map(|p| PyVariable::wrap(DynVariable::Cpu(p.variable)))
+                .collect(),
+            DynConvTranspose2d::Cuda(l) => l
+                .parameters()
+                .into_iter()
+                .map(|p| PyVariable::wrap(DynVariable::Cuda(p.variable)))
+                .collect(),
+            DynConvTranspose2d::Vulkan(l) => l
+                .parameters()
+                .into_iter()
+                .map(|p| PyVariable::wrap(DynVariable::Vulkan(p.variable)))
+                .collect(),
+        }
+    }
+
+    fn __call__(&self, x: PyRef<'_, PyVariable>) -> PyResult<PyVariable> {
+        self.forward(x)
+    }
+}
+
+enum DynBatchNorm {
+    Cpu(BatchNorm<CpuBackend>),
+    Cuda(BatchNorm<CudaBackend>),
+    Vulkan(BatchNorm<VulkanBackend>),
+}
+
+#[pyclass(name = "BatchNorm", module = "chainer.links")]
+pub struct PyBatchNorm {
+    inner: DynBatchNorm,
+}
+
+#[pymethods]
+impl PyBatchNorm {
+    #[new]
+    #[pyo3(signature = (channels, eps=1e-5, device="cpu"))]
+    fn new(channels: usize, eps: f64, device: &str) -> PyResult<Self> {
+        let target = parse_device(device)?;
+        let inner = match target {
+            Device::Cpu => DynBatchNorm::Cpu(BatchNorm::new(channels, eps).map_err(to_py)?),
+            Device::Cuda(index) => DynBatchNorm::Cuda(
+                BatchNorm::with_backend(cuda_backend(index)?, channels, eps).map_err(to_py)?,
+            ),
+            Device::Vulkan(index) => DynBatchNorm::Vulkan(
+                BatchNorm::with_backend(vulkan_backend(index as usize)?, channels, eps)
+                    .map_err(to_py)?,
+            ),
+        };
+        Ok(Self { inner })
+    }
+
+    fn forward(&self, x: PyRef<'_, PyVariable>) -> PyResult<PyVariable> {
+        match (&self.inner, &x.inner) {
+            (DynBatchNorm::Cpu(l), DynVariable::Cpu(x)) => Ok(PyVariable::wrap(DynVariable::Cpu(
+                l.forward(x).map_err(to_py)?,
+            ))),
+            (DynBatchNorm::Cuda(l), DynVariable::Cuda(x)) => Ok(PyVariable::wrap(
+                DynVariable::Cuda(l.forward(x).map_err(to_py)?),
+            )),
+            (DynBatchNorm::Vulkan(l), DynVariable::Vulkan(x)) => Ok(PyVariable::wrap(
+                DynVariable::Vulkan(l.forward(x).map_err(to_py)?),
+            )),
+            _ => Err(PyRuntimeError::new_err("BatchNorm device mismatch")),
+        }
+    }
+
+    fn parameters(&self) -> Vec<PyVariable> {
+        match &self.inner {
+            DynBatchNorm::Cpu(l) => l
+                .parameters()
+                .into_iter()
+                .map(|p| PyVariable::wrap(DynVariable::Cpu(p.variable)))
+                .collect(),
+            DynBatchNorm::Cuda(l) => l
+                .parameters()
+                .into_iter()
+                .map(|p| PyVariable::wrap(DynVariable::Cuda(p.variable)))
+                .collect(),
+            DynBatchNorm::Vulkan(l) => l
+                .parameters()
+                .into_iter()
+                .map(|p| PyVariable::wrap(DynVariable::Vulkan(p.variable)))
+                .collect(),
+        }
+    }
+
+    fn __call__(&self, x: PyRef<'_, PyVariable>) -> PyResult<PyVariable> {
+        self.forward(x)
+    }
+}
+
+enum DynLayerNorm {
+    Cpu(LayerNorm<CpuBackend>),
+    Cuda(LayerNorm<CudaBackend>),
+    Vulkan(LayerNorm<VulkanBackend>),
+}
+
+#[pyclass(name = "LayerNorm", module = "chainer.links")]
+pub struct PyLayerNorm {
+    inner: DynLayerNorm,
+}
+
+#[pymethods]
+impl PyLayerNorm {
+    #[new]
+    #[pyo3(signature = (dim, eps=1e-5, device="cpu"))]
+    fn new(dim: usize, eps: f64, device: &str) -> PyResult<Self> {
+        let target = parse_device(device)?;
+        let inner = match target {
+            Device::Cpu => DynLayerNorm::Cpu(LayerNorm::new(dim, eps).map_err(to_py)?),
+            Device::Cuda(index) => DynLayerNorm::Cuda(
+                LayerNorm::with_backend(cuda_backend(index)?, dim, eps).map_err(to_py)?,
+            ),
+            Device::Vulkan(index) => DynLayerNorm::Vulkan(
+                LayerNorm::with_backend(vulkan_backend(index as usize)?, dim, eps)
+                    .map_err(to_py)?,
+            ),
+        };
+        Ok(Self { inner })
+    }
+
+    fn forward(&self, x: PyRef<'_, PyVariable>) -> PyResult<PyVariable> {
+        match (&self.inner, &x.inner) {
+            (DynLayerNorm::Cpu(l), DynVariable::Cpu(x)) => Ok(PyVariable::wrap(DynVariable::Cpu(
+                l.forward(x).map_err(to_py)?,
+            ))),
+            (DynLayerNorm::Cuda(l), DynVariable::Cuda(x)) => Ok(PyVariable::wrap(
+                DynVariable::Cuda(l.forward(x).map_err(to_py)?),
+            )),
+            (DynLayerNorm::Vulkan(l), DynVariable::Vulkan(x)) => Ok(PyVariable::wrap(
+                DynVariable::Vulkan(l.forward(x).map_err(to_py)?),
+            )),
+            _ => Err(PyRuntimeError::new_err("LayerNorm device mismatch")),
+        }
+    }
+
+    fn parameters(&self) -> Vec<PyVariable> {
+        match &self.inner {
+            DynLayerNorm::Cpu(l) => l
+                .parameters()
+                .into_iter()
+                .map(|p| PyVariable::wrap(DynVariable::Cpu(p.variable)))
+                .collect(),
+            DynLayerNorm::Cuda(l) => l
+                .parameters()
+                .into_iter()
+                .map(|p| PyVariable::wrap(DynVariable::Cuda(p.variable)))
+                .collect(),
+            DynLayerNorm::Vulkan(l) => l
+                .parameters()
+                .into_iter()
+                .map(|p| PyVariable::wrap(DynVariable::Vulkan(p.variable)))
+                .collect(),
+        }
+    }
+
+    fn __call__(&self, x: PyRef<'_, PyVariable>) -> PyResult<PyVariable> {
+        self.forward(x)
+    }
+}
+
+enum DynEmbedding {
+    Cpu(Embedding<CpuBackend>),
+    Cuda(Embedding<CudaBackend>),
+    Vulkan(Embedding<VulkanBackend>),
+}
+
+#[pyclass(name = "Embedding", module = "chainer.links")]
+pub struct PyEmbedding {
+    inner: DynEmbedding,
+}
+
+#[pymethods]
+impl PyEmbedding {
+    #[new]
+    #[pyo3(signature = (vocab, dim, seed=0, device="cpu"))]
+    fn new(vocab: usize, dim: usize, seed: u64, device: &str) -> PyResult<Self> {
+        let target = parse_device(device)?;
+        let inner = match target {
+            Device::Cpu => DynEmbedding::Cpu(Embedding::new(vocab, dim, seed).map_err(to_py)?),
+            Device::Cuda(index) => DynEmbedding::Cuda(
+                Embedding::with_backend(cuda_backend(index)?, vocab, dim, seed).map_err(to_py)?,
+            ),
+            Device::Vulkan(index) => DynEmbedding::Vulkan(
+                Embedding::with_backend(vulkan_backend(index as usize)?, vocab, dim, seed)
+                    .map_err(to_py)?,
+            ),
+        };
+        Ok(Self { inner })
+    }
+
+    fn forward(&self, ids: PyRef<'_, PyVariable>) -> PyResult<PyVariable> {
+        match (&self.inner, &ids.inner) {
+            (DynEmbedding::Cpu(l), DynVariable::Cpu(x)) => Ok(PyVariable::wrap(DynVariable::Cpu(
+                l.forward(x).map_err(to_py)?,
+            ))),
+            (DynEmbedding::Cuda(l), DynVariable::Cuda(x)) => Ok(PyVariable::wrap(
+                DynVariable::Cuda(l.forward(x).map_err(to_py)?),
+            )),
+            (DynEmbedding::Vulkan(l), DynVariable::Vulkan(x)) => Ok(PyVariable::wrap(
+                DynVariable::Vulkan(l.forward(x).map_err(to_py)?),
+            )),
+            _ => Err(PyRuntimeError::new_err("Embedding device mismatch")),
+        }
+    }
+
+    fn parameters(&self) -> Vec<PyVariable> {
+        match &self.inner {
+            DynEmbedding::Cpu(l) => l
+                .parameters()
+                .into_iter()
+                .map(|p| PyVariable::wrap(DynVariable::Cpu(p.variable)))
+                .collect(),
+            DynEmbedding::Cuda(l) => l
+                .parameters()
+                .into_iter()
+                .map(|p| PyVariable::wrap(DynVariable::Cuda(p.variable)))
+                .collect(),
+            DynEmbedding::Vulkan(l) => l
+                .parameters()
+                .into_iter()
+                .map(|p| PyVariable::wrap(DynVariable::Vulkan(p.variable)))
+                .collect(),
+        }
+    }
+
+    fn __call__(&self, ids: PyRef<'_, PyVariable>) -> PyResult<PyVariable> {
+        self.forward(ids)
+    }
+}
+
+enum DynMultiHeadAttention {
+    Cpu(MultiHeadAttention<CpuBackend>),
+    Cuda(MultiHeadAttention<CudaBackend>),
+    Vulkan(MultiHeadAttention<VulkanBackend>),
+}
+
+#[pyclass(name = "MultiHeadAttention", module = "chainer.links")]
+pub struct PyMultiHeadAttention {
+    inner: DynMultiHeadAttention,
+}
+
+#[pymethods]
+impl PyMultiHeadAttention {
+    #[new]
+    #[pyo3(signature = (dim, heads, causal=false, device="cpu"))]
+    fn new(dim: usize, heads: usize, causal: bool, device: &str) -> PyResult<Self> {
+        let target = parse_device(device)?;
+        let inner = match target {
+            Device::Cpu => DynMultiHeadAttention::Cpu(
+                MultiHeadAttention::new(dim, heads, causal).map_err(to_py)?,
+            ),
+            Device::Cuda(index) => DynMultiHeadAttention::Cuda(
+                MultiHeadAttention::with_backend(cuda_backend(index)?, dim, heads, causal)
+                    .map_err(to_py)?,
+            ),
+            Device::Vulkan(index) => DynMultiHeadAttention::Vulkan(
+                MultiHeadAttention::with_backend(
+                    vulkan_backend(index as usize)?,
+                    dim,
+                    heads,
+                    causal,
+                )
+                .map_err(to_py)?,
+            ),
+        };
+        Ok(Self { inner })
+    }
+
+    fn forward(&self, x: PyRef<'_, PyVariable>) -> PyResult<PyVariable> {
+        match (&self.inner, &x.inner) {
+            (DynMultiHeadAttention::Cpu(l), DynVariable::Cpu(x)) => Ok(PyVariable::wrap(
+                DynVariable::Cpu(l.forward(x).map_err(to_py)?),
+            )),
+            (DynMultiHeadAttention::Cuda(l), DynVariable::Cuda(x)) => Ok(PyVariable::wrap(
+                DynVariable::Cuda(l.forward(x).map_err(to_py)?),
+            )),
+            (DynMultiHeadAttention::Vulkan(l), DynVariable::Vulkan(x)) => Ok(PyVariable::wrap(
+                DynVariable::Vulkan(l.forward(x).map_err(to_py)?),
+            )),
+            _ => Err(PyRuntimeError::new_err(
+                "MultiHeadAttention device mismatch",
+            )),
+        }
+    }
+
+    fn parameters(&self) -> Vec<PyVariable> {
+        match &self.inner {
+            DynMultiHeadAttention::Cpu(l) => l
+                .parameters()
+                .into_iter()
+                .map(|p| PyVariable::wrap(DynVariable::Cpu(p.variable)))
+                .collect(),
+            DynMultiHeadAttention::Cuda(l) => l
+                .parameters()
+                .into_iter()
+                .map(|p| PyVariable::wrap(DynVariable::Cuda(p.variable)))
+                .collect(),
+            DynMultiHeadAttention::Vulkan(l) => l
+                .parameters()
+                .into_iter()
+                .map(|p| PyVariable::wrap(DynVariable::Vulkan(p.variable)))
+                .collect(),
+        }
+    }
+
+    fn __call__(&self, x: PyRef<'_, PyVariable>) -> PyResult<PyVariable> {
+        self.forward(x)
     }
 }
 
@@ -829,6 +1600,12 @@ fn _chainer(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyTensor>()?;
     module.add_class::<PyVariable>()?;
     module.add_class::<PyLinear>()?;
+    module.add_class::<PyConv2d>()?;
+    module.add_class::<PyConvTranspose2d>()?;
+    module.add_class::<PyBatchNorm>()?;
+    module.add_class::<PyLayerNorm>()?;
+    module.add_class::<PyEmbedding>()?;
+    module.add_class::<PyMultiHeadAttention>()?;
     module.add_class::<PySGD>()?;
     module.add_class::<PyAdam>()?;
     module.add_function(wrap_pyfunction!(relu, module)?)?;
@@ -842,6 +1619,20 @@ fn _chainer(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(neg, module)?)?;
     module.add_function(wrap_pyfunction!(sum, module)?)?;
     module.add_function(wrap_pyfunction!(mean, module)?)?;
+    module.add_function(wrap_pyfunction!(exp, module)?)?;
+    module.add_function(wrap_pyfunction!(log, module)?)?;
+    module.add_function(wrap_pyfunction!(sigmoid, module)?)?;
+    module.add_function(wrap_pyfunction!(softmax, module)?)?;
+    module.add_function(wrap_pyfunction!(reshape, module)?)?;
+    module.add_function(wrap_pyfunction!(permute, module)?)?;
+    module.add_function(wrap_pyfunction!(layer_norm, module)?)?;
+    module.add_function(wrap_pyfunction!(batch_norm, module)?)?;
+    module.add_function(wrap_pyfunction!(embedding, module)?)?;
+    module.add_function(wrap_pyfunction!(conv2d, module)?)?;
+    module.add_function(wrap_pyfunction!(conv_transpose2d, module)?)?;
+    module.add_function(wrap_pyfunction!(max_pool2d, module)?)?;
+    module.add_function(wrap_pyfunction!(average_pool2d, module)?)?;
+    module.add_function(wrap_pyfunction!(multi_head_attention, module)?)?;
     module.add_function(wrap_pyfunction!(softmax_cross_entropy, module)?)?;
     module.add_function(wrap_pyfunction!(cuda_available, module)?)?;
     module.add_function(wrap_pyfunction!(vulkan_available, module)?)?;
