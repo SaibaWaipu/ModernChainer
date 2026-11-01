@@ -51,6 +51,7 @@ class MLP(chainer.Chain):
 | Serialization | Native `.mcn`; Chainer `.npz` reader planned |
 | Trainer / Updater / Extensions | Planned |
 | Documentation | README (Japanese default + English), `SPEC.md` / `docs/` (English) |
+| Examples | MLP / decoder / batching / static / CUDA / Vulkan plus image classification, GAN, VAE, VQ-VAE, audio and Transformer |
 
 The Python package is intentionally not a byte-for-byte reimplementation of
 Chainer 7. It keeps the shape of the API and the define-by-run feel while
@@ -72,6 +73,14 @@ cargo run --release --example static_step
 cargo run --release --example static_decoder
 cargo run --release --example static_batched_decoder
 cargo run --release --example vulkan_matmul   # requires a Vulkan loader/ICD
+
+# Vision / generative models / audio / Transformer (synthetic, CPU)
+cargo run --release --example image_classification
+cargo run --release --example gan
+cargo run --release --example vae
+cargo run --release --example vq_vae
+cargo run --release --example speech_recognition
+cargo run --release --example transformer
 ```
 
 Select a device from Python:
@@ -401,6 +410,7 @@ lavapipe) and skip cleanly when no Vulkan loader is present.
 - [`docs/python-api.md`](docs/python-api.md) — Python surface and differences from Chainer 7
 - [`docs/benchmarks.md`](docs/benchmarks.md) — methodology and results
 - [`docs/roadmap.md`](docs/roadmap.md) — roadmap
+- [`docs/examples.md`](docs/examples.md) — image / GAN / VAE / VQ-VAE / audio / Transformer
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — development workflow
 
 ## Known limitations

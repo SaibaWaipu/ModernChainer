@@ -71,6 +71,9 @@ Remaining: block-level in-place COW, wider kernels, CUDA.
   vectorized elementwise, 32×32 and small-shape matmul, transpose-free
   linear/backward, fused bias gradients, TN-small matmul, local command
   batching, GPU-side scalar broadcast, and storage/uniform buffer pools.
+- Done: image / GAN / VAE / VQ-VAE / audio / Transformer examples with synthetic
+  data, plus CPU autograd for embedding, LayerNorm, softmax, exp/log/sigmoid,
+  and image/audio utilities.
 - Next: CPU-side bind-group/autograd overhead, multi-tile cooperative-matrix
   scheduling (the 16×16 single-tile
   prototype was slower than scalar on Turing), faster scalar matmul,

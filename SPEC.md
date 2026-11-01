@@ -1,6 +1,6 @@
 # Modern Chainer — Specification
 
-Status: v0.19.0 implementation. This document records the product intent, the
+Status: v0.20.0 implementation. This document records the product intent, the
 implemented surface, and the deliberately deferred work.
 
 ## 1. Vision
@@ -280,6 +280,15 @@ subclassing; custom ops must currently be written in Rust.
   Linear forward/backward and reduction chains submit batched command encoders.
 - Verified on RTX 2070 SUPER and Mesa lavapipe; tests skip when no adapter is
   available.
+
+### Examples and data utilities
+
+- Vision: `data::image::GrayImage` with PPM read/write and nearest resize.
+- Audio: `data::audio::Wav` (PCM16/float32 WAV), RMS, zero-crossing rate and
+  Goertzel features.
+- CPU autograd: `exp`, `log`, `sigmoid`, `softmax`, `layer_norm`, `embedding`.
+- Examples: synthetic image classification, LSGAN, VAE, VQ-VAE, keyword
+  spotting and a single-head Transformer encoder.
 
 ### CUDA (core ops)
 
