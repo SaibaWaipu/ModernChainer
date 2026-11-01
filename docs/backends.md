@@ -262,7 +262,7 @@ cargo test -p modern-chainer-cuda
 cargo run --release --example cuda_matmul
 cargo run --release --example cuda_bench
 # PyTorch CUDA comparison
-CUDA_VISIBLE_DEVICES=<uuid> /tmp/opencode/torch-venv/bin/python scripts/bench_cuda_vs_pytorch.py
+CUDA_VISIBLE_DEVICES=<uuid> python/.venv/bin/python scripts/bench_cuda_vs_pytorch.py
 ```
 
 Tests skip when no CUDA driver/runtime is available.

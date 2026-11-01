@@ -1,6 +1,6 @@
 # Modern Chainer — Specification
 
-Status: v0.22.0 implementation. This document records the product intent, the
+Status: v0.22.1 implementation. This document records the product intent, the
 implemented surface, and the deliberately deferred work.
 
 ## 1. Vision

@@ -4,7 +4,7 @@ Runs the Rust `cuda_bench` example (JSON line), then benchmarks the same shapes
 with PyTorch, including CUDA Graph replay.  Use a Python environment with the
 CUDA build of PyTorch:
 
-    /tmp/opencode/torch-venv/bin/python scripts/bench_cuda_vs_pytorch.py
+    python/.venv/bin/python scripts/bench_cuda_vs_pytorch.py
 
 Set CUDA_VISIBLE_DEVICES to the target GPU (UUID is safest).
 """

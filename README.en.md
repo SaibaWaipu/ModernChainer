@@ -352,9 +352,9 @@ VARIABLE=1 PREFILL_LEN=512 DECODE_TOKENS=32 \
   cargo run --release --example static_batched_decoder
 # PyTorch comparison (CUDA-enabled torch venv)
 CUDA_VISIBLE_DEVICES=<RTX 2070S UUID> \
-  /tmp/opencode/torch-venv/bin/python scripts/bench_cuda_vs_pytorch.py
+  python/.venv/bin/python scripts/bench_cuda_vs_pytorch.py
 CUDA_VISIBLE_DEVICES=<RTX 2070S UUID> \
-  /tmp/opencode/torch-venv/bin/python scripts/bench_static_batched_vs_pytorch.py
+  python/.venv/bin/python scripts/bench_static_batched_vs_pytorch.py
 ```
 
 cuBLASLt fuses bias and GELU into the GEMM epilogue; the decoder MLP uses
@@ -373,7 +373,7 @@ adapter index; `vulkan:1` is the RTX 2070 SUPER on this machine.
 
 ```bash
 PYTHONPATH="$PWD/python" BENCH_DEVICES=cpu,cuda,vulkan:1 \
-  /tmp/opencode/torch-venv/bin/python scripts/bench_vs_pytorch.py
+  python/.venv/bin/python scripts/bench_vs_pytorch.py
 ```
 
 RTX 2070 SUPER, PyTorch 2.11.0+cu128, `matmul 512³` / `add 4M` /
@@ -390,6 +390,13 @@ The kernel pass cut Adam from 10.7 to about 2.9 ms and the geomean from 2.11 to
 1.24 ms. Bias fusion, fused bias gradients, TN-small matmul, the small-sum fast
 path and GPU-side scalar broadcast cut linear from 3.19 to 2.41 ms. The scalar
 WGSL matmul remains the main bottleneck.
+
+[`scripts/bench_examples_vs_pytorch.py`](scripts/bench_examples_vs_pytorch.py)
+now benchmarks the example workloads (Iris / MNIST / CIFAR-10 / CNN /
+Wikipedia) too. On CPU and CUDA, the MLP workloads are at or above PyTorch;
+Vulkan accuracy now matches CPU/CUDA, but conv and attention host fallbacks keep
+it slow. See the Example workloads section in
+[`docs/benchmarks.md`](docs/benchmarks.md).
 
 ## Build and test
 

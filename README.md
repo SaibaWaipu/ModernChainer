@@ -296,9 +296,9 @@ VARIABLE=1 PREFILL_LEN=512 DECODE_TOKENS=32 \
   cargo run --release --example static_batched_decoder
 # PyTorch 比較（CUDA 版 PyTorch の venv を使用）
 CUDA_VISIBLE_DEVICES=<RTX 2070S の UUID> \
-  /tmp/opencode/torch-venv/bin/python scripts/bench_cuda_vs_pytorch.py
+  python/.venv/bin/python scripts/bench_cuda_vs_pytorch.py
 CUDA_VISIBLE_DEVICES=<RTX 2070S の UUID> \
-  /tmp/opencode/torch-venv/bin/python scripts/bench_static_batched_vs_pytorch.py
+  python/.venv/bin/python scripts/bench_static_batched_vs_pytorch.py
 ```
 
 cuBLASLt は bias、および GELU を GEMM エピローグで融合します。decoder の MLP は GELU に切り替え、bias+GELU を 1 カーネルで実行します。`ComputeType` で F32 / TF32 / F16 / BF16 を選べます。メモリプールがデバイス割り当てを再利用します。
@@ -316,7 +316,7 @@ CUDA / Vulkan を含めて Python から PyTorch と比較できます。Vulkan 
 
 ```bash
 PYTHONPATH="$PWD/python" BENCH_DEVICES=cpu,cuda,vulkan:1 \
-  /tmp/opencode/torch-venv/bin/python scripts/bench_vs_pytorch.py
+  python/.venv/bin/python scripts/bench_vs_pytorch.py
 ```
 
 RTX 2070 SUPER、PyTorch 2.11.0+cu128、`matmul 512³` / `add 4M` / `linear fwd+bwd 128×784×256` / `Adam 1024²`。単位 ms、`ours / torch`。
@@ -328,6 +328,8 @@ RTX 2070 SUPER、PyTorch 2.11.0+cu128、`matmul 512³` / `add 4M` / `linear fwd+
 | Vulkan:1 | 0.76 / 0.071 | 0.44 / 0.141 | 2.41 / 0.202 | 2.90 / 0.604 | 1.24 / 0.187 (0.15×) |
 
 Python/CUDA はほぼ互角、Python/Vulkan は正しく動くがまだ大幅に遅いです。カーネル改善で Adam は 10.7 → 2.9 ms、幾何平均は 2.11 → 1.24 ms になりました。linear は bias 融合・bias-grad 融合・TN small・sum backward の host sync 除去で 3.19 → 2.41 ms。残る主因は scalar WGSL matmul です。
+
+[`scripts/bench_examples_vs_pytorch.py`](scripts/bench_examples_vs_pytorch.py) でサンプル実装も比較できます（Iris / MNIST / CIFAR-10 / CNN / Wikipedia）。CPU と CUDA では MLP 系で PyTorch と同等以上、Vulkan は精度一致まで修正済みですが、conv / attention の host fallback によりまだ遅いです。詳細は [`docs/benchmarks.md`](docs/benchmarks.md) の Example workloads を参照してください。
 
 ## ビルドとテスト
 

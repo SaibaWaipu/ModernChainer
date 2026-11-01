@@ -46,5 +46,5 @@ From the repository root:
 
 ```bash
 PYTHONPATH="$PWD/python" BENCH_DEVICES=cpu,cuda,vulkan:1 \
-  /tmp/opencode/torch-venv/bin/python scripts/bench_vs_pytorch.py
+  python/.venv/bin/python scripts/bench_vs_pytorch.py
 ```

@@ -10,11 +10,14 @@
 | OS | Linux 6.12 (Debian 13) |
 | Rust | 1.99.0, release profile (`lto = "thin"`, `codegen-units = 1`) |
 | Python | 3.13 |
-| PyTorch | 2.15.0+cpu |
+| PyTorch | 2.11.0+cu128 |
+| CUDA | 12.8 |
 | NumPy | 2.5.4 |
 
-Both implementations use 12 threads. The harness sets
-`torch.set_num_threads(12)` and `RAYON_NUM_THREADS=12`.
+The microbenchmark harness uses 12 threads: `torch.set_num_threads(12)` and
+`RAYON_NUM_THREADS=12`. The example-workload harness uses 12 Rayon workers and
+4 PyTorch CPU threads; 4 was the best of 1/4/8/12 in spot checks for the small
+CPU models.
 
 ## Harness
 
@@ -185,7 +188,7 @@ same RTX 2070 SUPER was used for CUDA and `vulkan:1`.
 
 ```bash
 PYTHONPATH="$PWD/python" BENCH_DEVICES=cpu,cuda,vulkan:1 \
-  /tmp/opencode/torch-venv/bin/python scripts/bench_vs_pytorch.py
+  python/.venv/bin/python scripts/bench_vs_pytorch.py
 ```
 
 Milliseconds, `ours / torch`; PyTorch 2.11.0+cu128, 5 warmups, median of 30
@@ -210,9 +213,81 @@ validated, but was slower on Turing because of f16 conversion and the small
 was also tried twice, including uniform/buffer recycling, and remained slower
 than local batching, so it is not enabled.
 
+## Example workloads (2026-11-01)
+
+`scripts/bench_examples_vs_pytorch.py` trains the shipped examples through the
+Python APIs, using the same data and update schedule on each device. It is a
+workload comparison, not a hyperparameter search.
+
+| Workload | Data | Schedule |
+|---|---|---|
+| Iris | 120 train / 30 test, standardized | MLP 4→16→3, batch 30, 300 Adam steps |
+| MNIST | 6000 train / 1000 test | MLP 784→128→10, batch 64, 300 Adam steps |
+| CIFAR-10 | 4000 train / 1000 test PNG subset | MLP 3072→128→10, batch 32, 150 Adam steps |
+| CNN | synthetic 16×16 stripes/diagonal, 642 train / 30 test | 2×conv+BN+pool, batch 8, 80 Adam steps |
+| Wikipedia | first 60k chars, char model, seq 32 | 1-layer Transformer, 400 Adam steps, 120 generated chars |
+
+Method:
+
+- Warmup then median of 3 runs; training seconds only (evaluation/generation
+  is shown separately where relevant).
+- Modern Chainer runs the Python API on `cpu`, `cuda`, and `vulkan:1` (RTX
+  2070 SUPER). PyTorch runs on CPU or CUDA; Vulkan is compared with PyTorch
+  CUDA on the same RTX because PyTorch has no Vulkan backend.
+- PyTorch CPU uses 4 threads, the best of 1/4/8/12 for these tiny models.
+  Modern Chainer uses 12 Rayon workers.
+- CIFAR is the upstream fast.ai PNG mirror, not the original Python pickle
+  files. The MLP is a baseline, not the accuracy-focused example.
+
+### Training time (seconds, lower is better)
+
+| Workload | MC CPU | Torch CPU | MC CUDA | Torch CUDA | MC Vulkan | Torch CUDA (Vulkan ref) |
+|---|---:|---:|---:|---:|---:|---:|
+| Iris | 0.010 | 0.110 | 0.050 | 0.170 | 1.792 | 0.176 |
+| MNIST | 0.185 | 0.185 | 0.109 | 0.226 | 1.836 | 0.227 |
+| CIFAR-10 | 0.180 | 0.147 | 0.079 | 0.137 | 0.936 | 0.137 |
+| CNN | 0.073 | 0.089 | 0.146 | 0.083 | 0.870 | 0.081 |
+| Wikipedia | 0.475 | 0.494 | 0.552 | 0.631 | 10.126 | 0.643 |
+
+### Accuracy
+
+| Workload | MC CPU | Torch CPU | MC CUDA | Torch CUDA | MC Vulkan |
+|---|---:|---:|---:|---:|---:|
+| Iris | 0.967 | 0.967 | 0.967 | 0.967 | 0.967 |
+| MNIST | 0.924 | 0.909 | 0.924 | 0.914 | 0.924 |
+| CIFAR-10 | 0.307 | 0.269 | 0.307 | 0.257 | 0.307 |
+| CNN | 0.500 | 0.667 | 0.500 | 0.333 | 0.500 |
+
+Wikipedia has no accuracy metric; generation took 0.046 s (MC CPU), 0.051 s
+(MC CUDA), 0.837 s (MC Vulkan), and 0.033–0.057 s (PyTorch CPU/CUDA).
+
+### Interpretation
+
+- CPU: Modern Chainer is faster on Iris and the tiny CNN, at parity on MNIST
+  and Wikipedia, and about 1.2× slower on the CIFAR MLP. PyTorch CPU with 12
+  threads was much slower on the CNN (1.0–1.7 s); thread tuning matters more
+  than the framework difference at this size.
+- CUDA: Modern Chainer is 1.1–3.4× faster than PyTorch CUDA on the MLP and
+  Transformer workloads. The CNN is 0.57× because conv/pool/BatchNorm use the
+  host fallback, while PyTorch has native cuDNN kernels.
+- Vulkan: accuracy now matches CPU/CUDA. Training is still roughly 6–36× slower
+  than Modern Chainer CUDA for these small models, and Wikipedia is 10.1 s.
+  The bottleneck is per-op dispatch and host round-trips in the conv/attention
+  fallbacks, not the corrected reduction path; native Vulkan attention and conv
+  are the next optimization targets.
+
+Reproduce with the project venv:
+
+```bash
+export LD_LIBRARY_PATH="$PWD/python/.venv/lib/python3.13/site-packages/nvidia/cuda_nvrtc/lib:$PWD/python/.venv/lib/python3.13/site-packages/nvidia/cublas/lib:$PWD/python/.venv/lib/python3.13/site-packages/nvidia/cuda_runtime/lib:$LD_LIBRARY_PATH"
+CUDA_VISIBLE_DEVICES=<RTX UUID> PYTHONPATH="$PWD/python" \
+  python/.venv/bin/python scripts/bench_examples_vs_pytorch.py \
+  --runs 3
+```
+
 ## Reproducing the Vulkan numbers
 
-Vulkan correctness is covered by `cargo test -p modern-chainer-vulkan`. The
-current reduction-heavy ops round-trip through the CPU, so Vulkan performance is
-not yet benchmarked against CUDA/cuBLAS; that comparison belongs to the CUDA
-milestone.
+Vulkan correctness is covered by `cargo test -p modern-chainer-vulkan`.
+Microbenchmarks and the example-workload suite now cover Vulkan; conv, pooling,
+BatchNorm and attention still round-trip through the CPU, which dominates the
+example timings. Native Vulkan implementations of those ops are the next step.
