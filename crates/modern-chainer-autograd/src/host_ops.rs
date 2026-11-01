@@ -840,7 +840,9 @@ impl<B: Backend> Op<B> for MultiHeadAttentionOp {
                         }
                     }
                     for ki in 0..seq {
-                        if sum > 0.0 {
+                        if self.causal && ki > qi {
+                            scores[qi * seq + ki] = 0.0;
+                        } else if sum > 0.0 {
                             scores[qi * seq + ki] /= sum;
                         }
                     }
@@ -885,7 +887,7 @@ impl<B: Backend> Op<B> for MultiHeadAttentionOp {
                     let mut maxv = f32::NEG_INFINITY;
                     for ki in 0..seq {
                         if self.causal && ki > qi {
-                            probs[qi * seq + ki] = 0.0;
+                            probs[qi * seq + ki] = f32::NEG_INFINITY;
                             continue;
                         }
                         let mut dot = 0f32;
