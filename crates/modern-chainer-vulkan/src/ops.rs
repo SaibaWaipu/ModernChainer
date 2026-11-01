@@ -31,18 +31,25 @@ impl VulkanOps {
         )
     }
 
-    fn uniform(&self, bytes: &[u8]) -> wgpu::Buffer {
+    fn uniform(&self, bytes: &[u8]) -> Arc<wgpu::Buffer> {
         let size = bytes.len().max(16).div_ceil(16) * 16;
         let mut padded = vec![0u8; size];
         padded[..bytes.len()].copy_from_slice(bytes);
-        let buffer = self.ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("modern-chainer params"),
-            size: size as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+        let mut uniforms = self
+            .ctx
+            .uniforms
+            .lock()
+            .expect("vulkan uniform cache poisoned");
+        let buffer = uniforms.entry(size).or_insert_with(|| {
+            Arc::new(self.ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("modern-chainer params"),
+                size: size as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }))
         });
-        self.ctx.queue.write_buffer(&buffer, 0, &padded);
-        buffer
+        self.ctx.queue.write_buffer(buffer, 0, &padded);
+        Arc::clone(buffer)
     }
 
     fn pipeline(
@@ -125,7 +132,7 @@ impl VulkanOps {
         if n == 0 {
             return;
         }
-        let workgroups = (n as u64).div_ceil(64 * 4);
+        let workgroups = (n as u64).div_ceil(256 * 4);
         let x = workgroups.min(65_535) as u32;
         let y = workgroups.div_ceil(65_535) as u32;
         self.dispatch_2d(pipeline, bind_group, x, y.max(1));
@@ -182,9 +189,9 @@ impl VulkanOps {
         let group = self.bind_group(
             &layout,
             &[
-                (0, &a.storage().buffer),
-                (1, &b.storage().buffer),
-                (2, &out.storage().buffer),
+                (0, a.storage().buffer.as_ref()),
+                (1, b.storage().buffer.as_ref()),
+                (2, out.storage().buffer.as_ref()),
             ],
         );
         self.dispatch_vec4(&pipeline, &group, out.numel());
@@ -201,9 +208,31 @@ impl VulkanOps {
         let (pipeline, layout) = self.pipeline(label, code, &[storage(0, true), storage(1, false)]);
         let group = self.bind_group(
             &layout,
-            &[(0, &a.storage().buffer), (1, &out.storage().buffer)],
+            &[
+                (0, a.storage().buffer.as_ref()),
+                (1, out.storage().buffer.as_ref()),
+            ],
         );
         self.dispatch(&pipeline, &group, out.numel());
+        Ok(out)
+    }
+
+    fn unary_vec4(
+        &self,
+        label: &str,
+        code: &str,
+        a: &Tensor<VulkanBackend>,
+    ) -> Result<Tensor<VulkanBackend>> {
+        let out = self.empty(a.shape(), DType::F32)?;
+        let (pipeline, layout) = self.pipeline(label, code, &[storage(0, true), storage(1, false)]);
+        let group = self.bind_group(
+            &layout,
+            &[
+                (0, a.storage().buffer.as_ref()),
+                (1, out.storage().buffer.as_ref()),
+            ],
+        );
+        self.dispatch_vec4(&pipeline, &group, out.numel());
         Ok(out)
     }
 
@@ -261,7 +290,7 @@ impl Ops<VulkanBackend> for VulkanOps {
         b: &Tensor<VulkanBackend>,
     ) -> Result<Tensor<VulkanBackend>> {
         if a.shape() == b.shape() {
-            return self.binary_vec4("add4", shaders::ADD4, a, b);
+            return self.binary_vec4("add4", shaders::ADD_VEC, a, b);
         }
         if a.rank() == 2 && b.rank() == 1 && b.shape().dims()[0] == a.shape().dims()[1] {
             let out = self.empty(a.shape(), DType::F32)?;
@@ -279,9 +308,9 @@ impl Ops<VulkanBackend> for VulkanOps {
             let group = self.bind_group(
                 &layout,
                 &[
-                    (0, &a.storage().buffer),
-                    (1, &b.storage().buffer),
-                    (2, &out.storage().buffer),
+                    (0, a.storage().buffer.as_ref()),
+                    (1, b.storage().buffer.as_ref()),
+                    (2, out.storage().buffer.as_ref()),
                     (3, &params),
                 ],
             );
@@ -296,7 +325,7 @@ impl Ops<VulkanBackend> for VulkanOps {
         a: &Tensor<VulkanBackend>,
         b: &Tensor<VulkanBackend>,
     ) -> Result<Tensor<VulkanBackend>> {
-        self.binary_vec4("sub4", shaders::SUB4, a, b)
+        self.binary_vec4("sub4", shaders::SUB_VEC, a, b)
     }
 
     fn mul(
@@ -304,7 +333,7 @@ impl Ops<VulkanBackend> for VulkanOps {
         a: &Tensor<VulkanBackend>,
         b: &Tensor<VulkanBackend>,
     ) -> Result<Tensor<VulkanBackend>> {
-        self.binary_vec4("mul4", shaders::MUL4, a, b)
+        self.binary_vec4("mul4", shaders::MUL_VEC, a, b)
     }
 
     fn div(
@@ -312,15 +341,15 @@ impl Ops<VulkanBackend> for VulkanOps {
         a: &Tensor<VulkanBackend>,
         b: &Tensor<VulkanBackend>,
     ) -> Result<Tensor<VulkanBackend>> {
-        self.binary_vec4("div4", shaders::DIV4, a, b)
+        self.binary_vec4("div4", shaders::DIV_VEC, a, b)
     }
 
     fn sqrt(&self, a: &Tensor<VulkanBackend>) -> Result<Tensor<VulkanBackend>> {
-        self.unary("sqrt", shaders::SQRT, a)
+        self.unary_vec4("sqrt4", shaders::SQRT4, a)
     }
 
     fn relu(&self, a: &Tensor<VulkanBackend>) -> Result<Tensor<VulkanBackend>> {
-        self.unary("relu", shaders::RELU, a)
+        self.unary_vec4("relu4", shaders::RELU4, a)
     }
 
     fn relu_backward(
@@ -344,9 +373,9 @@ impl Ops<VulkanBackend> for VulkanOps {
         let group = self.bind_group(
             &layout,
             &[
-                (0, &x.storage().buffer),
-                (1, &grad.storage().buffer),
-                (2, &out.storage().buffer),
+                (0, x.storage().buffer.as_ref()),
+                (1, grad.storage().buffer.as_ref()),
+                (2, out.storage().buffer.as_ref()),
             ],
         );
         self.dispatch(&pipeline, &group, out.numel());
@@ -391,11 +420,23 @@ impl Ops<VulkanBackend> for VulkanOps {
                 weight.shape().clone(),
             ));
         }
-        let y = self.matmul_with(x, weight, batch, in_features, out_features, true)?;
         match bias {
-            Some(bias) => self.add(&y, bias),
-            None => Ok(y),
+            Some(bias) => self.matmul_nt_bias(x, weight, bias, batch, in_features, out_features),
+            None => self.matmul_with(x, weight, batch, in_features, out_features, true),
         }
+    }
+
+    fn linear_backward(
+        &self,
+        grad: &Tensor<VulkanBackend>,
+        x: &Tensor<VulkanBackend>,
+        weight: &Tensor<VulkanBackend>,
+    ) -> Result<(Tensor<VulkanBackend>, Tensor<VulkanBackend>)> {
+        let (batch, in_features) = (x.shape().dims()[0], x.shape().dims()[1]);
+        let out_features = weight.shape().dims()[0];
+        let grad_x = self.matmul(grad, weight)?;
+        let grad_w = self.matmul_tn(grad, x, out_features, batch, in_features)?;
+        Ok((grad_x, grad_w))
     }
 
     fn transpose2d(&self, a: &Tensor<VulkanBackend>) -> Result<Tensor<VulkanBackend>> {
@@ -417,12 +458,17 @@ impl Ops<VulkanBackend> for VulkanOps {
         let group = self.bind_group(
             &layout,
             &[
-                (0, &a.storage().buffer),
-                (1, &out.storage().buffer),
+                (0, a.storage().buffer.as_ref()),
+                (1, out.storage().buffer.as_ref()),
                 (2, &dims),
             ],
         );
-        self.dispatch(&pipeline, &group, out.numel());
+        self.dispatch_2d(
+            &pipeline,
+            &group,
+            (cols as u64).div_ceil(16) as u32,
+            (rows as u64).div_ceil(16) as u32,
+        );
         Ok(out)
     }
 
@@ -441,34 +487,33 @@ impl Ops<VulkanBackend> for VulkanOps {
     }
 
     fn silu(&self, a: &Tensor<VulkanBackend>) -> Result<Tensor<VulkanBackend>> {
-        let cpu = self.to_cpu(a)?;
-        let result = CpuBackend::new().ops().silu(&cpu)?;
-        self.upload(&result)
+        self.unary("silu", shaders::SILU, a)
     }
 
     fn gelu(&self, a: &Tensor<VulkanBackend>) -> Result<Tensor<VulkanBackend>> {
-        let cpu = self.to_cpu(a)?;
-        let result = CpuBackend::new().ops().gelu(&cpu)?;
-        self.upload(&result)
+        self.unary("gelu", shaders::GELU, a)
     }
 
     fn scale(&self, a: &Tensor<VulkanBackend>, factor: f64) -> Result<Tensor<VulkanBackend>> {
         let out = self.empty(a.shape(), DType::F32)?;
-        let params = self.uniform(&(factor as f32).to_ne_bytes());
+        let mut raw = Vec::with_capacity(16);
+        raw.extend_from_slice(&(factor as f32).to_ne_bytes());
+        raw.extend_from_slice(&[0u8; 12]);
+        let params = self.uniform(&raw);
         let (pipeline, layout) = self.pipeline(
-            "scale",
-            shaders::SCALE,
+            "scale4",
+            shaders::SCALE4,
             &[storage(0, true), storage(1, false), uniform(2)],
         );
         let group = self.bind_group(
             &layout,
             &[
-                (0, &a.storage().buffer),
-                (1, &out.storage().buffer),
+                (0, a.storage().buffer.as_ref()),
+                (1, out.storage().buffer.as_ref()),
                 (2, &params),
             ],
         );
-        self.dispatch(&pipeline, &group, out.numel());
+        self.dispatch_vec4(&pipeline, &group, out.numel());
         Ok(out)
     }
 
@@ -489,7 +534,7 @@ impl Ops<VulkanBackend> for VulkanOps {
         }
         let bytes = self
             .backend()
-            .read_buffer(&a.storage().buffer, a.dtype().size_in_bytes())?;
+            .read_buffer(a.storage().buffer.as_ref(), a.dtype().size_in_bytes())?;
         match a.dtype() {
             DType::F32 => Ok(f32::from_ne_bytes(bytes[..4].try_into().unwrap()) as f64),
             DType::F64 => Ok(f64::from_ne_bytes(bytes[..8].try_into().unwrap())),
@@ -551,13 +596,13 @@ impl Ops<VulkanBackend> for VulkanOps {
         let group = self.bind_group(
             &layout,
             &[
-                (0, &param.storage().buffer),
-                (1, &grad.storage().buffer),
-                (2, &m.storage().buffer),
-                (3, &v.storage().buffer),
-                (4, &new_p.storage().buffer),
-                (5, &new_m.storage().buffer),
-                (6, &new_v.storage().buffer),
+                (0, param.storage().buffer.as_ref()),
+                (1, grad.storage().buffer.as_ref()),
+                (2, m.storage().buffer.as_ref()),
+                (3, v.storage().buffer.as_ref()),
+                (4, new_p.storage().buffer.as_ref()),
+                (5, new_m.storage().buffer.as_ref()),
+                (6, new_v.storage().buffer.as_ref()),
                 (7, &params),
             ],
         );
@@ -570,11 +615,41 @@ impl Ops<VulkanBackend> for VulkanOps {
         logits: &Tensor<VulkanBackend>,
         target: &Tensor<VulkanBackend>,
     ) -> Result<Tensor<VulkanBackend>> {
-        let logits = self.to_cpu(logits)?;
-        let target = self.to_cpu(target)?;
-        let backend = CpuBackend::new();
-        let result = backend.ops().softmax_cross_entropy(&logits, &target)?;
-        self.upload(&result)
+        if logits.rank() != 2 {
+            return Err(Error::invalid("vulkan softmax CE expects 2-D logits"));
+        }
+        let (rows, classes) = (logits.shape().dims()[0], logits.shape().dims()[1]);
+        if target.numel() != rows {
+            return Err(Error::invalid("vulkan softmax CE target size mismatch"));
+        }
+        let losses = self.empty(&Shape::new([rows]), DType::F32)?;
+        let mut raw = Vec::with_capacity(16);
+        raw.extend_from_slice(&(rows as u32).to_ne_bytes());
+        raw.extend_from_slice(&(classes as u32).to_ne_bytes());
+        raw.extend_from_slice(&0u32.to_ne_bytes());
+        raw.extend_from_slice(&0u32.to_ne_bytes());
+        let params = self.uniform(&raw);
+        let (pipeline, layout) = self.pipeline(
+            "softmax_ce_forward",
+            shaders::SOFTMAX_CE_FORWARD,
+            &[
+                storage(0, true),
+                storage(1, true),
+                storage(2, false),
+                uniform(3),
+            ],
+        );
+        let group = self.bind_group(
+            &layout,
+            &[
+                (0, logits.storage().buffer.as_ref()),
+                (1, target.storage().buffer.as_ref()),
+                (2, losses.storage().buffer.as_ref()),
+                (3, &params),
+            ],
+        );
+        self.dispatch_2d(&pipeline, &group, rows as u32, 1);
+        self.sum_all_gpu(&losses)
     }
 
     fn softmax_cross_entropy_backward(
@@ -582,13 +657,41 @@ impl Ops<VulkanBackend> for VulkanOps {
         logits: &Tensor<VulkanBackend>,
         target: &Tensor<VulkanBackend>,
     ) -> Result<Tensor<VulkanBackend>> {
-        let logits = self.to_cpu(logits)?;
-        let target = self.to_cpu(target)?;
-        let backend = CpuBackend::new();
-        let result = backend
-            .ops()
-            .softmax_cross_entropy_backward(&logits, &target)?;
-        self.upload(&result)
+        if logits.rank() != 2 {
+            return Err(Error::invalid("vulkan softmax CE expects 2-D logits"));
+        }
+        let (rows, classes) = (logits.shape().dims()[0], logits.shape().dims()[1]);
+        if target.numel() != rows {
+            return Err(Error::invalid("vulkan softmax CE target size mismatch"));
+        }
+        let grad = self.empty(logits.shape(), DType::F32)?;
+        let mut raw = Vec::with_capacity(16);
+        raw.extend_from_slice(&(rows as u32).to_ne_bytes());
+        raw.extend_from_slice(&(classes as u32).to_ne_bytes());
+        raw.extend_from_slice(&0u32.to_ne_bytes());
+        raw.extend_from_slice(&0u32.to_ne_bytes());
+        let params = self.uniform(&raw);
+        let (pipeline, layout) = self.pipeline(
+            "softmax_ce_backward",
+            shaders::SOFTMAX_CE_BACKWARD,
+            &[
+                storage(0, true),
+                storage(1, true),
+                storage(2, false),
+                uniform(3),
+            ],
+        );
+        let group = self.bind_group(
+            &layout,
+            &[
+                (0, logits.storage().buffer.as_ref()),
+                (1, target.storage().buffer.as_ref()),
+                (2, grad.storage().buffer.as_ref()),
+                (3, &params),
+            ],
+        );
+        self.dispatch_2d(&pipeline, &group, rows as u32, 1);
+        Ok(grad)
     }
 }
 
@@ -608,35 +711,110 @@ impl VulkanOps {
             params.extend_from_slice(&value.to_ne_bytes());
         }
         let dims = self.uniform(&params);
-        let (pipeline, layout) = if transposed_b {
-            self.pipeline(
-                "matmul_nt",
-                shaders::MATMUL_NT,
-                &[
-                    storage(0, true),
-                    storage(1, true),
-                    storage(2, false),
-                    uniform(3),
-                ],
-            )
-        } else {
-            self.pipeline(
-                "matmul",
-                shaders::MATMUL,
-                &[
-                    storage(0, true),
-                    storage(1, true),
-                    storage(2, false),
-                    uniform(3),
-                ],
-            )
+        let small = m <= 128 || n <= 128;
+        let (label, code) = match (transposed_b, small) {
+            (true, true) => ("matmul_nt_small", shaders::MATMUL_NT_SMALL),
+            (false, true) => ("matmul_small", shaders::MATMUL_SMALL),
+            (true, false) => ("matmul_nt", shaders::MATMUL_NT),
+            (false, false) => ("matmul", shaders::MATMUL),
         };
+        let (pipeline, layout) = self.pipeline(
+            label,
+            code,
+            &[
+                storage(0, true),
+                storage(1, true),
+                storage(2, false),
+                uniform(3),
+            ],
+        );
         let group = self.bind_group(
             &layout,
             &[
-                (0, &a.storage().buffer),
-                (1, &b.storage().buffer),
-                (2, &out.storage().buffer),
+                (0, a.storage().buffer.as_ref()),
+                (1, b.storage().buffer.as_ref()),
+                (2, out.storage().buffer.as_ref()),
+                (3, &dims),
+            ],
+        );
+        let x = (n as u64).div_ceil(32).min(65_535) as u32;
+        let y = (m as u64).div_ceil(32).min(65_535) as u32;
+        self.dispatch_2d(&pipeline, &group, x.max(1), y.max(1));
+        Ok(out)
+    }
+
+    fn matmul_nt_bias(
+        &self,
+        a: &Tensor<VulkanBackend>,
+        b: &Tensor<VulkanBackend>,
+        bias: &Tensor<VulkanBackend>,
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> Result<Tensor<VulkanBackend>> {
+        let out = self.empty(&Shape::new([m, n]), DType::F32)?;
+        let mut params = Vec::with_capacity(16);
+        for value in [m as u32, k as u32, n as u32, 0] {
+            params.extend_from_slice(&value.to_ne_bytes());
+        }
+        let dims = self.uniform(&params);
+        let (pipeline, layout) = self.pipeline(
+            "matmul_nt_bias",
+            shaders::MATMUL_NT_BIAS,
+            &[
+                storage(0, true),
+                storage(1, true),
+                storage(2, false),
+                storage(3, true),
+                uniform(4),
+            ],
+        );
+        let group = self.bind_group(
+            &layout,
+            &[
+                (0, a.storage().buffer.as_ref()),
+                (1, b.storage().buffer.as_ref()),
+                (2, out.storage().buffer.as_ref()),
+                (3, bias.storage().buffer.as_ref()),
+                (4, &dims),
+            ],
+        );
+        let x = (n as u64).div_ceil(32).min(65_535) as u32;
+        let y = (m as u64).div_ceil(32).min(65_535) as u32;
+        self.dispatch_2d(&pipeline, &group, x.max(1), y.max(1));
+        Ok(out)
+    }
+
+    fn matmul_tn(
+        &self,
+        a: &Tensor<VulkanBackend>,
+        b: &Tensor<VulkanBackend>,
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> Result<Tensor<VulkanBackend>> {
+        let out = self.empty(&Shape::new([m, n]), DType::F32)?;
+        let mut params = Vec::with_capacity(16);
+        for value in [m as u32, k as u32, n as u32, 0] {
+            params.extend_from_slice(&value.to_ne_bytes());
+        }
+        let dims = self.uniform(&params);
+        let (pipeline, layout) = self.pipeline(
+            "matmul_tn",
+            shaders::MATMUL_TN,
+            &[
+                storage(0, true),
+                storage(1, true),
+                storage(2, false),
+                uniform(3),
+            ],
+        );
+        let group = self.bind_group(
+            &layout,
+            &[
+                (0, a.storage().buffer.as_ref()),
+                (1, b.storage().buffer.as_ref()),
+                (2, out.storage().buffer.as_ref()),
                 (3, &dims),
             ],
         );
@@ -662,8 +840,8 @@ impl VulkanOps {
         let group = self.bind_group(
             &layout,
             &[
-                (0, &input.storage().buffer),
-                (1, &output.storage().buffer),
+                (0, input.storage().buffer.as_ref()),
+                (1, output.storage().buffer.as_ref()),
                 (2, &params),
             ],
         );
@@ -686,8 +864,8 @@ impl VulkanOps {
         let group = self.bind_group(
             &layout,
             &[
-                (0, &input.storage().buffer),
-                (1, &output.storage().buffer),
+                (0, input.storage().buffer.as_ref()),
+                (1, output.storage().buffer.as_ref()),
                 (2, &params),
             ],
         );
@@ -722,8 +900,8 @@ impl VulkanOps {
         let group = self.bind_group(
             &layout,
             &[
-                (0, &a.storage().buffer),
-                (1, &output.storage().buffer),
+                (0, a.storage().buffer.as_ref()),
+                (1, output.storage().buffer.as_ref()),
                 (2, &params),
             ],
         );
@@ -733,11 +911,14 @@ impl VulkanOps {
 
     fn fill(&self, a: &Tensor<VulkanBackend>, value: f32) -> Result<Tensor<VulkanBackend>> {
         let out = self.empty(a.shape(), DType::F32)?;
-        let params = self.uniform(&value.to_ne_bytes());
+        let mut raw = Vec::with_capacity(16);
+        raw.extend_from_slice(&value.to_ne_bytes());
+        raw.extend_from_slice(&[0u8; 12]);
+        let params = self.uniform(&raw);
         let (pipeline, layout) =
-            self.pipeline("fill", shaders::FILL, &[storage(0, false), uniform(1)]);
-        let group = self.bind_group(&layout, &[(0, &out.storage().buffer), (1, &params)]);
-        self.dispatch(&pipeline, &group, out.numel());
+            self.pipeline("fill4", shaders::FILL4, &[storage(0, false), uniform(1)]);
+        let group = self.bind_group(&layout, &[(0, out.storage().buffer.as_ref()), (1, &params)]);
+        self.dispatch_vec4(&pipeline, &group, out.numel());
         Ok(out)
     }
 }

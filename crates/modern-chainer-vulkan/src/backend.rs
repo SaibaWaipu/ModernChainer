@@ -6,8 +6,23 @@ use crate::gpu::GpuContext;
 pub use crate::ops::VulkanOps;
 
 pub struct VulkanStorage {
-    pub(crate) buffer: wgpu::Buffer,
+    pub(crate) buffer: Arc<wgpu::Buffer>,
     len: usize,
+    ctx: Arc<GpuContext>,
+}
+
+impl Drop for VulkanStorage {
+    fn drop(&mut self) {
+        let mut buffers = self
+            .ctx
+            .buffers
+            .lock()
+            .expect("vulkan buffer pool poisoned");
+        let entry = buffers.entry(self.len).or_default();
+        if entry.len() < 64 {
+            entry.push(Arc::clone(&self.buffer));
+        }
+    }
 }
 
 impl Storage for VulkanStorage {
@@ -78,6 +93,21 @@ impl VulkanBackend {
         }))
     }
 
+    fn pooled_buffer(&self, bytes: usize) -> Result<Arc<wgpu::Buffer>> {
+        let size = aligned(bytes);
+        if let Some(buffer) = self
+            .ctx
+            .buffers
+            .lock()
+            .expect("vulkan buffer pool poisoned")
+            .get_mut(&size)
+            .and_then(Vec::pop)
+        {
+            return Ok(buffer);
+        }
+        Ok(Arc::new(self.create_buffer(size)?))
+    }
+
     pub(crate) fn read_buffer(&self, buffer: &wgpu::Buffer, len: usize) -> Result<Vec<u8>> {
         let size = aligned(len.max(4));
         let staging = self.ctx.device.create_buffer(&wgpu::BufferDescriptor {
@@ -133,16 +163,20 @@ impl Backend for VulkanBackend {
     }
 
     fn alloc(&self, bytes: usize) -> Result<Self::Storage> {
+        let len = aligned(bytes);
         Ok(VulkanStorage {
-            buffer: self.create_buffer(bytes)?,
-            len: aligned(bytes),
+            buffer: self.pooled_buffer(len)?,
+            len,
+            ctx: Arc::clone(&self.ctx),
         })
     }
 
     fn alloc_zeroed(&self, bytes: usize) -> Result<Self::Storage> {
         let storage = self.alloc(bytes)?;
         let zeros = vec![0u8; aligned(bytes)];
-        self.ctx.queue.write_buffer(&storage.buffer, 0, &zeros);
+        self.ctx
+            .queue
+            .write_buffer(storage.buffer.as_ref(), 0, &zeros);
         Ok(storage)
     }
 
@@ -152,18 +186,18 @@ impl Backend for VulkanBackend {
         }
         let mut padded = src.to_vec();
         padded.resize(dst.len, 0);
-        self.ctx.queue.write_buffer(&dst.buffer, 0, &padded);
+        self.ctx.queue.write_buffer(dst.buffer.as_ref(), 0, &padded);
         Ok(())
     }
 
     fn copy_to_host(&self, src: &Self::Storage, dst: &mut [u8]) -> Result<()> {
         let len = dst.len().min(src.len);
-        let bytes = self.read_buffer(&src.buffer, src.len)?;
+        let bytes = self.read_buffer(src.buffer.as_ref(), src.len)?;
         dst[..len].copy_from_slice(&bytes[..len]);
         Ok(())
     }
 }
 
 pub(crate) fn aligned(bytes: usize) -> usize {
-    bytes.max(4).div_ceil(4) * 4
+    bytes.max(16).div_ceil(16) * 16
 }

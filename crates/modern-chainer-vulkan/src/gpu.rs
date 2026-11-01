@@ -9,6 +9,8 @@ pub(crate) struct GpuContext {
     pub info: wgpu::AdapterInfo,
     pub adapter_index: usize,
     pub pipelines: Mutex<HashMap<String, (wgpu::ComputePipeline, wgpu::BindGroupLayout)>>,
+    pub buffers: Mutex<HashMap<usize, Vec<Arc<wgpu::Buffer>>>>,
+    pub uniforms: Mutex<HashMap<usize, Arc<wgpu::Buffer>>>,
 }
 
 impl GpuContext {
@@ -53,6 +55,8 @@ impl GpuContext {
             info,
             adapter_index,
             pipelines: Mutex::new(HashMap::new()),
+            buffers: Mutex::new(HashMap::new()),
+            uniforms: Mutex::new(HashMap::new()),
         }))
     }
 }
