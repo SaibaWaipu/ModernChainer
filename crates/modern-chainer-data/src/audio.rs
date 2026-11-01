@@ -182,3 +182,76 @@ mod tests {
         assert!(at > off * 10.0);
     }
 }
+
+/// Splits a waveform into fixed-size (optionally overlapping) frames.
+#[derive(Clone, Debug)]
+pub struct FrameTokenizer {
+    pub frame: usize,
+    pub hop: usize,
+}
+
+impl FrameTokenizer {
+    pub fn new(frame: usize, hop: usize) -> Result<Self> {
+        if frame == 0 || hop == 0 {
+            return Err(Error::invalid("frame and hop must be positive"));
+        }
+        Ok(Self { frame, hop })
+    }
+
+    pub fn tokenize(&self, samples: &[f32]) -> Vec<Vec<f32>> {
+        let mut out = Vec::new();
+        let mut start = 0usize;
+        while start < samples.len() {
+            let end = (start + self.frame).min(samples.len());
+            let mut frame = samples[start..end].to_vec();
+            frame.resize(self.frame, 0.0);
+            out.push(frame);
+            start += self.hop;
+        }
+        out
+    }
+}
+
+/// Loads `.wav` files from one subdirectory per class.
+pub fn load_wav_dir(root: impl AsRef<Path>) -> Result<Vec<(Wav, usize)>> {
+    let root = root.as_ref();
+    let mut classes: Vec<_> = fs::read_dir(root)
+        .map_err(|e| Error::invalid(e.to_string()))?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_dir())
+        .collect();
+    classes.sort_by_key(|entry| entry.file_name());
+    let mut out = Vec::new();
+    for (label, class) in classes.into_iter().enumerate() {
+        let mut files: Vec<_> = fs::read_dir(class.path())
+            .map_err(|e| Error::invalid(e.to_string()))?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("wav"))
+            })
+            .collect();
+        files.sort_by_key(|entry| entry.file_name());
+        for file in files {
+            out.push((Wav::read(file.path())?, label));
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tokenizer_tests {
+    use super::*;
+
+    #[test]
+    fn frame_tokenizer() {
+        let frames = FrameTokenizer::new(4, 2)
+            .unwrap()
+            .tokenize(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0], vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(frames[2], vec![5.0, 0.0, 0.0, 0.0]);
+    }
+}

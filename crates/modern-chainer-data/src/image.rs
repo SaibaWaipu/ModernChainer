@@ -121,3 +121,80 @@ mod tests {
         }
     }
 }
+
+/// Splits a grayscale image into flattened square patches.
+#[derive(Clone, Debug)]
+pub struct PatchTokenizer {
+    pub patch: usize,
+}
+
+impl PatchTokenizer {
+    pub fn new(patch: usize) -> Result<Self> {
+        if patch == 0 {
+            return Err(Error::invalid("patch size must be positive"));
+        }
+        Ok(Self { patch })
+    }
+
+    pub fn tokenize(&self, image: &GrayImage) -> Result<Vec<Vec<f32>>> {
+        if !image.width.is_multiple_of(self.patch) || !image.height.is_multiple_of(self.patch) {
+            return Err(Error::invalid("image size must be divisible by patch size"));
+        }
+        let mut tokens = Vec::new();
+        for y in (0..image.height).step_by(self.patch) {
+            for x in (0..image.width).step_by(self.patch) {
+                let mut patch = Vec::with_capacity(self.patch * self.patch);
+                for py in 0..self.patch {
+                    for px in 0..self.patch {
+                        patch.push(image.pixel(x + px, y + py));
+                    }
+                }
+                tokens.push(patch);
+            }
+        }
+        Ok(tokens)
+    }
+}
+
+/// Loads `.ppm` images from one subdirectory per class.
+pub fn load_ppm_dir(root: impl AsRef<std::path::Path>) -> Result<Vec<(GrayImage, usize)>> {
+    let root = root.as_ref();
+    let mut classes: Vec<_> = std::fs::read_dir(root)
+        .map_err(|e| Error::invalid(e.to_string()))?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_dir())
+        .collect();
+    classes.sort_by_key(|entry| entry.file_name());
+    let mut out = Vec::new();
+    for (label, class) in classes.into_iter().enumerate() {
+        let mut files: Vec<_> = std::fs::read_dir(class.path())
+            .map_err(|e| Error::invalid(e.to_string()))?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("ppm"))
+            })
+            .collect();
+        files.sort_by_key(|entry| entry.file_name());
+        for file in files {
+            let bytes = std::fs::read(file.path()).map_err(|e| Error::invalid(e.to_string()))?;
+            out.push((GrayImage::read_ppm(&bytes)?, label));
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod extra_tests {
+    use super::*;
+
+    #[test]
+    fn patch_tokenizer() {
+        let image = GrayImage::new(4, 4, (0..16).map(|v| v as f32).collect()).unwrap();
+        let tokens = PatchTokenizer::new(2).unwrap().tokenize(&image).unwrap();
+        assert_eq!(tokens.len(), 4);
+        assert_eq!(tokens[0], vec![0.0, 1.0, 4.0, 5.0]);
+    }
+}

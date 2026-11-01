@@ -2,6 +2,7 @@
 
 pub mod audio;
 pub mod image;
+pub mod text;
 
 use modern_chainer_core::Rng;
 
