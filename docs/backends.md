@@ -59,7 +59,7 @@ cached per context, and adapters can be selected by index with
 | sqrt, relu, scale, fill | vec4 elementwise; relu backward scalar |
 | gelu, silu | native activations |
 | transpose2d | 16×16 shared-memory tile |
-| matmul | 32×32 tile with 2×2 blocking; 16×16 small-shape variant |
+| matmul | 32×32 tile with 2×2 blocking; aligned fast path; 16×16 small-shape variant |
 | linear | transpose-free matmul against `[out, in]` weights, fused bias for large batches |
 | linear_backward | transposed-input matmul avoids materializing `gradᵀ` |
 | adam_update | fused single kernel (`m`, `v`, bias correction and parameter update) |
