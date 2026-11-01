@@ -67,13 +67,12 @@ Remaining: block-level in-place COW, wider kernels, CUDA.
   last-token-only LM head, and TTFT/tokens/s benchmarks against PyTorch eager.
 - Done: Python device execution for CPU/CUDA/Vulkan, Vulkan adapter selection,
   pipeline cache, a unified Python benchmark against PyTorch, fused Adam,
-  fused softmax CE / GELU / SiLU, native `sum_all` / bias `sum_to`, vectorized
-  elementwise, 32×32 and small-shape matmul, transpose-free linear/backward,
-  and storage/uniform buffer pools.
-- Next: faster Vulkan matmul, native generic `sum_to`, command batching,
-  continuous static batching/request admission, faster long-context
-  low-precision decode, backend-agnostic Static Step trait, full-model f16/bf16
-  dtype.
+  fused softmax CE / GELU / SiLU, native generic `sum_to` / `sum_all`,
+  vectorized elementwise, 32×32 and small-shape matmul, transpose-free
+  linear/backward, command batching, and storage/uniform buffer pools.
+- Next: faster Vulkan matmul, continuous static batching/request admission,
+  faster long-context low-precision decode, backend-agnostic Static Step trait,
+  full-model f16/bf16 dtype.
 
 ## v0.7 — Training-By-Run
 

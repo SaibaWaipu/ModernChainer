@@ -65,16 +65,18 @@ cached per context, and adapters can be selected by index with
 | adam_update | fused single kernel (`m`, `v`, bias correction and parameter update) |
 | softmax_cross_entropy | fused row softmax and NLL; backward in one kernel |
 | sum_all | two-stage GPU reduction |
-| sum_to | native bias-column reduction; other patterns still CPU |
+| sum_to | native bias-column and generic rank≤8 broadcast reduction |
 
 Persistent storage and uniform buffers are pooled per device. Compute pipelines
-are cached per context.
+are cached per context. Linear forward/backward and reduction chains prepare
+multiple dispatches and submit them in one command encoder.
 
 ### Host fallbacks (correctness-first)
 
-Generic `sum_to` patterns other than bias still copy to the CPU backend.
-`sum_all`, bias `sum_to`, softmax cross entropy and its backward now run on the
-GPU. The fused kernels and native reductions removed the largest round trips.
+`sum_all`, bias/generic `sum_to`, softmax cross entropy and its backward now
+run on the GPU. Only unusual `sum_to` ranks above 8 fall back to CPU. The fused
+kernels, native reductions and command batching removed the largest round
+trips.
 
 ### Dispatch and synchronization
 

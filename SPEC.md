@@ -1,6 +1,6 @@
 # Modern Chainer — Specification
 
-Status: v0.14.0 implementation. This document records the product intent, the
+Status: v0.15.0 implementation. This document records the product intent, the
 implemented surface, and the deliberately deferred work.
 
 ## 1. Vision
@@ -273,9 +273,10 @@ subclassing; custom ops must currently be written in Rust.
   by naga.
 - Kernels: vec4 add/sub/mul/div, unary ops, GELU/SiLU, tiled transpose,
   32×32 and small-shape matmul, transpose-free linear/backward, fused Adam,
-  fused softmax cross entropy, two-stage `sum_all`, and bias `sum_to`.
+  fused softmax cross entropy, two-stage `sum_all`, and generic rank≤8
+  broadcast `sum_to`.
 - Storage and uniform buffers are pooled; pipelines are cached per context.
-- Non-bias `sum_to` still round-trips through the CPU backend.
+  Linear forward/backward and reduction chains submit batched command encoders.
 - Verified on RTX 2070 SUPER and Mesa lavapipe; tests skip when no adapter is
   available.
 
