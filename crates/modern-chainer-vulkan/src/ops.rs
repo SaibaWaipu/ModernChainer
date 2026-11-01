@@ -830,11 +830,20 @@ impl VulkanOps {
             self.uniform(&params)
         };
         let small = m <= 128 || n <= 128;
-        let (label, code) = match (transposed_b, small) {
-            (true, true) => ("matmul_nt_small", shaders::MATMUL_NT_SMALL),
-            (false, true) => ("matmul_small", shaders::MATMUL_SMALL),
-            (true, false) => ("matmul_nt", shaders::MATMUL_NT),
-            (false, false) => ("matmul", shaders::MATMUL),
+        let aligned = !transposed_b
+            && !small
+            && m.is_multiple_of(32)
+            && n.is_multiple_of(32)
+            && k.is_multiple_of(32);
+        let (label, code) = if aligned {
+            ("matmul_aligned", shaders::MATMUL_ALIGNED)
+        } else {
+            match (transposed_b, small) {
+                (true, true) => ("matmul_nt_small", shaders::MATMUL_NT_SMALL),
+                (false, true) => ("matmul_small", shaders::MATMUL_SMALL),
+                (true, false) => ("matmul_nt", shaders::MATMUL_NT),
+                (false, false) => ("matmul", shaders::MATMUL),
+            }
         };
         let (pipeline, layout) = self.pipeline(
             label,

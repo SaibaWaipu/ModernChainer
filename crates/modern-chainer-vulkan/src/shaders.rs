@@ -67,9 +67,9 @@ struct Params { m: u32, k: u32, n: u32, pad: u32 };
 @group(0) @binding(3) var<uniform> params: Params;
 
 const TILE: u32 = 32u;
-const KTILE: u32 = 64u;
-var<workgroup> tile_a: array<f32, 2048>;
-var<workgroup> tile_b: array<f32, 2048>;
+const KTILE: u32 = 32u;
+var<workgroup> tile_a: array<f32, 1024>;
+var<workgroup> tile_b: array<f32, 1024>;
 
 @compute @workgroup_size(16, 16)
 fn main(
@@ -785,5 +785,60 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         sum = sum + input[idx];
     }
     output[out_idx] = sum;
+}
+"#;
+
+pub(crate) const MATMUL_ALIGNED: &str = r#"
+struct Params { m: u32, k: u32, n: u32, pad: u32 };
+@group(0) @binding(0) var<storage, read> a: array<f32>;
+@group(0) @binding(1) var<storage, read> b: array<f32>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+@group(0) @binding(3) var<uniform> params: Params;
+
+const TILE: u32 = 32u;
+const KTILE: u32 = 64u;
+var<workgroup> tile_a: array<f32, 2048>;
+var<workgroup> tile_b: array<f32, 2048>;
+
+@compute @workgroup_size(16, 16)
+fn main(
+    @builtin(local_invocation_id) lid: vec3<u32>,
+    @builtin(workgroup_id) wid: vec3<u32>,
+) {
+    let row0 = wid.y * TILE;
+    let col0 = wid.x * TILE;
+    let tid = lid.y * 16u + lid.x;
+    var acc00 = 0.0;
+    var acc01 = 0.0;
+    var acc10 = 0.0;
+    var acc11 = 0.0;
+    for (var kt: u32 = 0u; kt < params.k; kt = kt + KTILE) {
+        for (var i: u32 = tid; i < TILE * KTILE; i = i + 256u) {
+            let r = i / KTILE;
+            let kk = i % KTILE;
+            tile_a[i] = a[(row0 + r) * params.k + kt + kk];
+            tile_b[i] = b[(kt + i / TILE) * params.n + col0 + i % TILE];
+        }
+        workgroupBarrier();
+        for (var kk: u32 = 0u; kk < KTILE; kk = kk + 1u) {
+            let a0 = tile_a[lid.y * KTILE + kk];
+            let a1 = tile_a[(lid.y + 16u) * KTILE + kk];
+            let b0 = tile_b[kk * TILE + lid.x];
+            let b1 = tile_b[kk * TILE + lid.x + 16u];
+            acc00 = acc00 + a0 * b0;
+            acc01 = acc01 + a0 * b1;
+            acc10 = acc10 + a1 * b0;
+            acc11 = acc11 + a1 * b1;
+        }
+        workgroupBarrier();
+    }
+    let row1 = row0 + lid.y;
+    let row2 = row1 + 16u;
+    let col1 = col0 + lid.x;
+    let col2 = col1 + 16u;
+    out[row1 * params.n + col1] = acc00;
+    out[row1 * params.n + col2] = acc01;
+    out[row2 * params.n + col1] = acc10;
+    out[row2 * params.n + col2] = acc11;
 }
 "#;
