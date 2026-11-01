@@ -11,3 +11,7 @@ build/
 .coverage
 
 .claude/
+
+data/*
+!data/iris.data
+!data/README.md

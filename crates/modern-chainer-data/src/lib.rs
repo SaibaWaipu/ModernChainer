@@ -1,7 +1,10 @@
 //! Dataset and iteration primitives.
 
 pub mod audio;
+pub mod cifar10;
 pub mod image;
+pub mod iris;
+pub mod mnist;
 pub mod text;
 
 use modern_chainer_core::Rng;
