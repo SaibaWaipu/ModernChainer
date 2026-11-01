@@ -71,8 +71,8 @@ Remaining: block-level in-place COW, wider kernels, CUDA.
   vectorized elementwise, 32×32 and small-shape matmul, transpose-free
   linear/backward, fused bias gradients, TN-small matmul, local command
   batching, GPU-side scalar broadcast, and storage/uniform buffer pools.
-- Done: image / CNN / GAN / VAE / VQ-VAE / audio / Transformer examples with
-  synthetic data, Conv2d/ConvTranspose2d/pooling/BatchNorm/MultiHeadAttention,
+- Done: Iris / MNIST / CIFAR-10 / Wikipedia generation examples plus image /
+  CNN / GAN / VAE / VQ-VAE / audio / Transformer examples with synthetic data, Conv2d/ConvTranspose2d/pooling/BatchNorm/MultiHeadAttention,
   reshape/permute, image/audio/text tokenizers and loaders, Python F/L
   exposure, and CUDA/Vulkan backward for embedding/LayerNorm/softmax.
 - Next: CPU-side bind-group/autograd overhead, multi-tile cooperative-matrix

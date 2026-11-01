@@ -44,7 +44,7 @@ class MLP(chainer.Chain):
 | シリアライズ | ネイティブ `.mcn`、Chainer `.npz` は計画中 |
 | Trainer / Updater / Extensions | 計画中 |
 | ドキュメント | README（日本語）、SPEC / docs（英語） |
-| Examples | MLP / CNN / decoder / batching / static / CUDA / Vulkan、GAN・VAE・VQ-VAE・音声・Transformer（batch attention） |
+| Examples | Iris / MNIST / CIFAR-10 / Wikipedia 生成 / CNN / GAN / VAE / VQ-VAE / 音声 / Transformer |
 
 Python パッケージは Chainer 7 の完全互換ではありません。API の形と Define-by-Run の感触を残しつつ、現代の Python に合わない部分は整理しています。State by Run は v0.4 時点では Rust ファーストです。
 
@@ -65,6 +65,10 @@ cargo run --release --example static_batched_decoder
 cargo run --release --example vulkan_matmul   # Vulkan ローダ/ICD が必要
 
 # 画像 / 生成モデル / 音声 / Transformer（合成データ、CPU）
+cargo run --release --example iris
+cargo run --release --example mnist          # scripts/download_mnist.sh
+cargo run --release --example cifar10        # scripts/download_cifar10.sh
+cargo run --release --example wikipedia      # scripts/download_wikipedia.sh
 cargo run --release --example image_classification
 cargo run --release --example image_classification_cnn
 cargo run --release --example gan

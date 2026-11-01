@@ -1,6 +1,6 @@
 # Modern Chainer — Specification
 
-Status: v0.21.0 implementation. This document records the product intent, the
+Status: v0.22.0 implementation. This document records the product intent, the
 implemented surface, and the deliberately deferred work.
 
 ## 1. Vision
@@ -292,9 +292,11 @@ subclassing; custom ops must currently be written in Rust.
 - Links: `Conv2d`, `ConvTranspose2d`, `BatchNorm`, `LayerNorm`, `Embedding`,
   `MultiHeadAttention`, `MaxPool2d`, `AveragePool2d`.
 - Tokenizers/loaders: image patch tokenizer + PPM loader, audio frame tokenizer
-  + WAV loader, character/word text tokenizers.
-- Examples: synthetic image classification (MLP and CNN), LSGAN, VAE, VQ-VAE,
-  keyword spotting, single-head and batched Transformer attention.
+  + WAV loader, character/word text tokenizers, Iris, IDX MNIST, CIFAR-10
+  binary and PNG-folder loaders.
+- Examples: Iris, MNIST, CIFAR-10, Wikipedia character generation, synthetic
+  image classification (MLP and CNN), LSGAN, VAE, VQ-VAE, keyword spotting,
+  single-head and batched Transformer attention.
 - CUDA/Vulkan native backward for embedding, LayerNorm and softmax; conv,
   pooling, BatchNorm and attention use host fallbacks with gradients.
 

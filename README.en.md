@@ -51,7 +51,7 @@ class MLP(chainer.Chain):
 | Serialization | Native `.mcn`; Chainer `.npz` reader planned |
 | Trainer / Updater / Extensions | Planned |
 | Documentation | README (Japanese default + English), `SPEC.md` / `docs/` (English) |
-| Examples | MLP / CNN / decoder / batching / static / CUDA / Vulkan plus image classification, GAN, VAE, VQ-VAE, audio and Transformer (batch attention) |
+| Examples | Iris / MNIST / CIFAR-10 / Wikipedia generation / CNN / GAN / VAE / VQ-VAE / audio / Transformer |
 
 The Python package is intentionally not a byte-for-byte reimplementation of
 Chainer 7. It keeps the shape of the API and the define-by-run feel while
@@ -75,6 +75,10 @@ cargo run --release --example static_batched_decoder
 cargo run --release --example vulkan_matmul   # requires a Vulkan loader/ICD
 
 # Vision / generative models / audio / Transformer (synthetic, CPU)
+cargo run --release --example iris
+cargo run --release --example mnist          # scripts/download_mnist.sh
+cargo run --release --example cifar10        # scripts/download_cifar10.sh
+cargo run --release --example wikipedia      # scripts/download_wikipedia.sh
 cargo run --release --example image_classification
 cargo run --release --example image_classification_cnn
 cargo run --release --example gan

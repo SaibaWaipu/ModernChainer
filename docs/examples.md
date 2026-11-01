@@ -4,6 +4,13 @@ All examples are CPU-first and use synthetic data so they run without dataset
 downloads or extra dependencies. Run them from the repository root:
 
 ```bash
+cargo run --release --example iris
+bash scripts/download_mnist.sh
+cargo run --release --example mnist
+bash scripts/download_cifar10.sh
+cargo run --release --example cifar10
+bash scripts/download_wikipedia.sh
+cargo run --release --example wikipedia
 cargo run --release --example image_classification
 cargo run --release --example image_classification_cnn
 cargo run --release --example gan
@@ -13,6 +20,38 @@ cargo run --release --example speech_recognition
 cargo run --release --example transformer
 cargo run --release --example transformer_batch
 ```
+
+## Iris
+
+`examples/iris.rs`
+
+Loads the committed `data/iris.data`, standardizes the four features, and
+trains a 4-16-3 MLP. Typical test accuracy is 29/30.
+
+## MNIST
+
+`examples/mnist.rs`
+
+Downloads via `scripts/download_mnist.sh`, reads the IDX files, and trains a
+784-128-10 MLP on a 6000-image subset. It reaches about 88% on 1000 test images
+after 300 steps.
+
+## CIFAR-10
+
+`examples/cifar10.rs`
+
+Uses the fast.ai PNG mirror (`scripts/download_cifar10.sh`) and the `image`
+crate. A 3072-128-10 MLP baseline reaches about 29% on 1000 test images. This is
+a loader/optimization example, not a competitive CIFAR model.
+
+## Wikipedia generation
+
+`examples/wikipedia.rs`
+
+Fetches a few Wikipedia extracts with `scripts/download_wikipedia.sh` (or uses a
+built-in sample), trains a character-level causal Transformer for 400 steps and
+generates text. The model is intentionally tiny (context 32, d_model 32, one
+block), so output is rough but shows the full pipeline.
 
 ## Image classification
 
@@ -77,6 +116,16 @@ ones vector. The task is learned to near-perfect accuracy.
 
 Runs `MultiHeadAttention` on `[batch, seq, dim]` input, with internal
 reshape/flatten projections, and demonstrates `F::reshape` / `F::permute`.
+
+## Data preparation
+
+```bash
+bash scripts/download_mnist.sh
+bash scripts/download_cifar10.sh
+bash scripts/download_wikipedia.sh
+```
+
+Iris data is committed. MNIST/CIFAR/Wikipedia files are ignored by git.
 
 ## Data utilities
 
