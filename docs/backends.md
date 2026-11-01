@@ -55,21 +55,26 @@ cached per context, and adapters can be selected by index with
 
 | Kernel | Notes |
 |---|---|
-| add / sub / mul / div | equal shapes, 4 elements/thread; bias add for `[rows, cols] + [cols]` |
-| sqrt, relu, relu backward, scale, fill | elementwise |
-| transpose2d | linear index remap |
-| matmul | 32×32 tile, 2×2 register blocking, shared memory |
-| linear | transpose-free matmul against `[out, in]` weights |
+| add / sub / mul / div | equal shapes, vec4; bias add for `[rows, cols] + [cols]` |
+| sqrt, relu, scale, fill | vec4 elementwise; relu backward scalar |
+| gelu, silu | native activations |
+| transpose2d | 16×16 shared-memory tile |
+| matmul | 32×32 tile with 2×2 blocking; 16×16 small-shape variant |
+| linear | transpose-free matmul against `[out, in]` weights, fused bias for large batches |
+| linear_backward | transposed-input matmul avoids materializing `gradᵀ` |
 | adam_update | fused single kernel (`m`, `v`, bias correction and parameter update) |
+| softmax_cross_entropy | fused row softmax and NLL; backward in one kernel |
 | sum_all | two-stage GPU reduction |
 | sum_to | native bias-column reduction; other patterns still CPU |
 
+Persistent storage and uniform buffers are pooled per device. Compute pipelines
+are cached per context.
+
 ### Host fallbacks (correctness-first)
 
-`softmax_cross_entropy` and its backward, plus generic `sum_to` patterns other
-than bias, still copy to the CPU backend. `sum_all` and bias `sum_to` now run on
-the GPU. The fused Adam and native reductions removed the largest round trips,
-but softmax CE still incurs PCIe traffic.
+Generic `sum_to` patterns other than bias still copy to the CPU backend.
+`sum_all`, bias `sum_to`, softmax cross entropy and its backward now run on the
+GPU. The fused kernels and native reductions removed the largest round trips.
 
 ### Dispatch and synchronization
 
@@ -95,8 +100,8 @@ layer = chainer.links.Linear(16, 8, device="vulkan:1")
 device share one backend context. The unified benchmark
 (`scripts/bench_vs_pytorch.py`) reports Vulkan against PyTorch CUDA; on this
 machine `vulkan:1` is the RTX 2070 SUPER. The current suite is about 0.11×
-PyTorch. Fused Adam and native reductions helped, but the scalar 32×32 matmul
-and remaining softmax-CE fallback still dominate.
+PyTorch. Fused kernels, small-shape matmul and buffer pools helped, but the
+scalar WGSL matmul and generic `sum_to` fallback still dominate.
 
 ### Verification
 

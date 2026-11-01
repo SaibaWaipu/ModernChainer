@@ -1,6 +1,6 @@
 # Modern Chainer — Specification
 
-Status: v0.13.0 implementation. This document records the product intent, the
+Status: v0.14.0 implementation. This document records the product intent, the
 implemented surface, and the deliberately deferred work.
 
 ## 1. Vision
@@ -271,11 +271,11 @@ subclassing; custom ops must currently be written in Rust.
 
 - `wgpu` with the Vulkan backend on Linux; WGSL kernels compiled at build time
   by naga.
-- Kernels: vec4 add/sub/mul/div, sqrt, relu, relu backward, scale, fill, bias
-  add, transpose, 32×32 tiled matmul, transpose-free linear, fused Adam,
-  two-stage `sum_all`, and bias `sum_to`.
-- Softmax cross entropy and non-bias `sum_to` still round-trip through the CPU
-  backend. The fused kernels removed the largest GPU/CPU round trips.
+- Kernels: vec4 add/sub/mul/div, unary ops, GELU/SiLU, tiled transpose,
+  32×32 and small-shape matmul, transpose-free linear/backward, fused Adam,
+  fused softmax cross entropy, two-stage `sum_all`, and bias `sum_to`.
+- Storage and uniform buffers are pooled; pipelines are cached per context.
+- Non-bias `sum_to` still round-trips through the CPU backend.
 - Verified on RTX 2070 SUPER and Mesa lavapipe; tests skip when no adapter is
   available.
 

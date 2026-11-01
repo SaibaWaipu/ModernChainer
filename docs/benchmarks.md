@@ -195,14 +195,14 @@ Milliseconds, `ours / torch`; PyTorch 2.11.0+cu128, 5 warmups, median of 30
 |---|---:|---:|---:|---:|---:|
 | CPU | 0.49 / 0.43 | 2.19 / 8.00 | 0.58 / 0.32 | 3.56 / 4.94 | 1.22 / 1.53 (1.25×) |
 | CUDA | 0.074 / 0.070 | 0.185 / 0.142 | 0.207 / 0.198 | 0.457 / 0.526 | 0.190 / 0.179 (0.94×) |
-| Vulkan:1 | 0.87 / 0.071 | 0.56 / 0.142 | 3.92 / 0.216 | 4.60 / 0.572 | 1.72 / 0.188 (0.11×) |
+| Vulkan:1 | 0.85 / 0.071 | 0.44 / 0.141 | 3.20 / 0.197 | 3.84 / 0.511 | 1.46 / 0.178 (0.12×) |
 
 Python/CUDA is close to PyTorch for this suite; Adam is slightly ahead.
-Python/Vulkan improved from 2.11 to 1.72 ms geomean: fused Adam (10.7 → 4.6 ms),
-native `sum_all` / bias `sum_to`, a 32×32 matmul with 2×2 register blocking, a
-transpose-free linear path, and vec4 elementwise kernels. It is still about
-0.11× PyTorch; matmul and the remaining softmax-CE / generic `sum_to` CPU
-fallbacks dominate.
+Python/Vulkan improved from 2.11 to 1.46 ms geomean: fused Adam (10.7 → 3.84 ms),
+fused softmax CE and GELU/SiLU, native `sum_all` / bias `sum_to`, 32×32 and
+small-shape matmul kernels, transpose-free linear and linear backward,
+vec4 elementwise kernels, and storage/uniform buffer pools. It is still about
+0.12× PyTorch; the scalar WGSL matmul and generic `sum_to` fallback dominate.
 
 ## Reproducing the Vulkan numbers
 
