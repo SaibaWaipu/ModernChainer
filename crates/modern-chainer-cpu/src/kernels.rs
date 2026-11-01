@@ -1387,3 +1387,144 @@ pub(crate) fn gelu(x: &Tensor<CpuBackend>) -> Result<Tensor<CpuBackend>> {
         0.5 * v * (1.0 + ((2.0f32 / std::f32::consts::PI).sqrt() * (v + 0.044715 * v3)).tanh())
     })
 }
+
+pub(crate) fn exp(x: &Tensor<CpuBackend>) -> Result<Tensor<CpuBackend>> {
+    unary_map(x, f32::exp)
+}
+
+pub(crate) fn log(x: &Tensor<CpuBackend>) -> Result<Tensor<CpuBackend>> {
+    unary_map(x, f32::ln)
+}
+
+pub(crate) fn sigmoid(x: &Tensor<CpuBackend>) -> Result<Tensor<CpuBackend>> {
+    unary_map(x, |v| 1.0 / (1.0 + (-v).exp()))
+}
+
+pub(crate) fn softmax_last_dim_backward(
+    x: &Tensor<CpuBackend>,
+    grad: &Tensor<CpuBackend>,
+) -> Result<Tensor<CpuBackend>> {
+    if x.shape() != grad.shape() || x.rank() != 2 {
+        return Err(Error::invalid("softmax backward expects equal 2-D tensors"));
+    }
+    let rows = x.shape().dims()[0];
+    let cols = x.shape().dims()[1];
+    let xv = f32_slice(x)?;
+    let gv = f32_slice(grad)?;
+    let mut out = vec![0f32; xv.len()];
+    for row in 0..rows {
+        let base = row * cols;
+        let xs = &xv[base..base + cols];
+        let gs = &gv[base..base + cols];
+        let maxv = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let mut sum = 0f64;
+        for &v in xs {
+            sum += ((v - maxv) as f64).exp();
+        }
+        let mut probs = vec![0f32; cols];
+        for c in 0..cols {
+            probs[c] = (((xs[c] - maxv) as f64).exp() / sum) as f32;
+        }
+        let dot: f32 = probs.iter().zip(gs).map(|(p, g)| p * g).sum();
+        for c in 0..cols {
+            out[base + c] = probs[c] * (gs[c] - dot);
+        }
+    }
+    make_f32(x, out, x.shape().clone())
+}
+
+pub(crate) fn layer_norm_backward(
+    x: &Tensor<CpuBackend>,
+    gamma: &Tensor<CpuBackend>,
+    beta: &Tensor<CpuBackend>,
+    grad: &Tensor<CpuBackend>,
+    eps: f64,
+) -> Result<(Tensor<CpuBackend>, Tensor<CpuBackend>, Tensor<CpuBackend>)> {
+    if x.rank() < 2 || x.shape() != grad.shape() {
+        return Err(Error::invalid("layer_norm backward shape mismatch"));
+    }
+    let dim = *x.shape().dims().last().unwrap();
+    if gamma.numel() != dim || beta.numel() != dim {
+        return Err(Error::invalid("layer_norm gamma/beta shape mismatch"));
+    }
+    let xv = f32_slice(x)?;
+    let gv = f32_slice(grad)?;
+    let gam = f32_slice(gamma)?;
+    let rows = xv.len() / dim;
+    let mut dx = vec![0f32; xv.len()];
+    let mut dgamma = vec![0f32; dim];
+    let mut dbeta = vec![0f32; dim];
+    for row in 0..rows {
+        let base = row * dim;
+        let xs = &xv[base..base + dim];
+        let gs = &gv[base..base + dim];
+        let mean = xs.iter().map(|&v| v as f64).sum::<f64>() / dim as f64;
+        let var = xs
+            .iter()
+            .map(|&v| {
+                let d = v as f64 - mean;
+                d * d
+            })
+            .sum::<f64>()
+            / dim as f64;
+        let inv = 1.0 / (var + eps).sqrt();
+        let mut norm = vec![0f32; dim];
+        for i in 0..dim {
+            norm[i] = ((xs[i] as f64 - mean) * inv) as f32;
+        }
+        let mut sum_dy = 0f32;
+        let mut sum_dy_norm = 0f32;
+        for i in 0..dim {
+            let dy = gs[i] * gam[i];
+            sum_dy += dy;
+            sum_dy_norm += dy * norm[i];
+            dgamma[i] += gs[i] * norm[i];
+            dbeta[i] += gs[i];
+        }
+        for i in 0..dim {
+            let dy = gs[i] * gam[i];
+            dx[base + i] = ((dim as f32 * dy - sum_dy - norm[i] * sum_dy_norm) * inv as f32
+                / dim as f32)
+                * 1.0;
+        }
+    }
+    Ok((
+        make_f32(x, dx, x.shape().clone())?,
+        make_f32(gamma, dgamma, gamma.shape().clone())?,
+        make_f32(beta, dbeta, beta.shape().clone())?,
+    ))
+}
+
+pub(crate) fn embedding_backward(
+    ids: &Tensor<CpuBackend>,
+    weight: &Tensor<CpuBackend>,
+    grad: &Tensor<CpuBackend>,
+) -> Result<Tensor<CpuBackend>> {
+    if weight.rank() != 2 {
+        return Err(Error::invalid("embedding weight must be [vocab, dim]"));
+    }
+    let vocab = weight.shape().dims()[0];
+    let dim = weight.shape().dims()[1];
+    let indices: Vec<usize> = match ids.dtype() {
+        DType::I64 => ids.as_slice::<i64>()?.iter().map(|&x| x as usize).collect(),
+        DType::I32 => ids.as_slice::<i32>()?.iter().map(|&x| x as usize).collect(),
+        DType::U8 => ids.as_slice::<u8>()?.iter().map(|&x| x as usize).collect(),
+        other => return Err(Error::UnsupportedDType(other)),
+    };
+    let gv = f32_slice(grad)?;
+    if gv.len() != indices.len() * dim {
+        return Err(Error::invalid("embedding grad shape mismatch"));
+    }
+    let mut out = vec![0f32; vocab * dim];
+    for (row, &index) in indices.iter().enumerate() {
+        if index >= vocab {
+            return Err(Error::invalid(format!(
+                "embedding index {index} out of range for vocab {vocab}"
+            )));
+        }
+        for d in 0..dim {
+            out[index * dim + d] += gv[row * dim + d];
+        }
+    }
+    make_f32(weight, out, weight.shape().clone())
+}

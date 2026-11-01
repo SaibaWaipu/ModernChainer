@@ -124,6 +124,94 @@ impl<B: Backend> Module<B> for Linear<B> {
     }
 }
 
+/// Layer normalization over the last dimension.
+pub struct LayerNorm<B: Backend> {
+    gamma: Variable<B>,
+    beta: Variable<B>,
+    eps: f64,
+}
+
+impl LayerNorm<CpuBackend> {
+    pub fn new(dim: usize, eps: f64) -> Result<Self> {
+        Self::with_backend(CpuBackend::new(), dim, eps)
+    }
+}
+
+impl<B: Backend> LayerNorm<B> {
+    pub fn with_backend(backend: B, dim: usize, eps: f64) -> Result<Self> {
+        Ok(Self {
+            gamma: Variable::new(Tensor::from_f32(backend.clone(), &vec![1.0; dim], [dim])?),
+            beta: Variable::new(Tensor::from_f32(backend, &vec![0.0; dim], [dim])?),
+            eps,
+        })
+    }
+
+    pub fn gamma(&self) -> &Variable<B> {
+        &self.gamma
+    }
+
+    pub fn beta(&self) -> &Variable<B> {
+        &self.beta
+    }
+}
+
+impl<B: Backend> Module<B> for LayerNorm<B> {
+    fn forward(&self, x: &Variable<B>) -> Result<Variable<B>> {
+        ops::layer_norm(x, &self.gamma, &self.beta, self.eps)
+    }
+
+    fn parameters(&self) -> Vec<Parameter<B>> {
+        vec![
+            Parameter::new("gamma", self.gamma.clone()),
+            Parameter::new("beta", self.beta.clone()),
+        ]
+    }
+}
+
+/// Token embedding table.
+pub struct Embedding<B: Backend> {
+    weight: Variable<B>,
+    vocab: usize,
+    dim: usize,
+}
+
+impl Embedding<CpuBackend> {
+    pub fn new(vocab: usize, dim: usize, seed: u64) -> Result<Self> {
+        Self::with_backend(CpuBackend::new(), vocab, dim, seed)
+    }
+}
+
+impl<B: Backend> Embedding<B> {
+    pub fn with_backend(backend: B, vocab: usize, dim: usize, seed: u64) -> Result<Self> {
+        let data = he_normal([vocab, dim], dim, seed);
+        Ok(Self {
+            weight: Variable::new(Tensor::from_f32(backend, &data, [vocab, dim])?),
+            vocab,
+            dim,
+        })
+    }
+
+    pub fn weight(&self) -> &Variable<B> {
+        &self.weight
+    }
+
+    pub fn vocab(&self) -> usize {
+        self.vocab
+    }
+
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
+    pub fn forward(&self, ids: &Variable<B>) -> Result<Variable<B>> {
+        ops::embedding(ids, &self.weight)
+    }
+
+    pub fn parameters(&self) -> Vec<Parameter<B>> {
+        vec![Parameter::new("W", self.weight.clone())]
+    }
+}
+
 /// Sequential container.
 pub struct Sequential<B: Backend> {
     layers: Vec<Box<dyn Module<B>>>,

@@ -421,3 +421,186 @@ pub fn linear<B: Backend>(
     let mut out = apply(LinearOp, &inputs)?;
     Ok(out.remove(0))
 }
+
+pub struct Exp;
+
+impl<B: Backend> Op<B> for Exp {
+    const NAME: &'static str = "Exp";
+
+    fn forward(&self, inputs: &[&Tensor<B>]) -> Result<Vec<Tensor<B>>> {
+        check_arity(inputs, 1, "Exp")?;
+        Ok(vec![inputs[0].backend().ops().exp(inputs[0])?])
+    }
+
+    fn backward(
+        &self,
+        grad: &Tensor<B>,
+        _inputs: &[&Tensor<B>],
+        outputs: &[&Tensor<B>],
+    ) -> Result<Vec<Option<Tensor<B>>>> {
+        Ok(vec![Some(grad.backend().ops().mul(grad, outputs[0])?)])
+    }
+}
+
+pub struct Log;
+
+impl<B: Backend> Op<B> for Log {
+    const NAME: &'static str = "Log";
+
+    fn forward(&self, inputs: &[&Tensor<B>]) -> Result<Vec<Tensor<B>>> {
+        check_arity(inputs, 1, "Log")?;
+        Ok(vec![inputs[0].backend().ops().log(inputs[0])?])
+    }
+
+    fn backward(
+        &self,
+        grad: &Tensor<B>,
+        inputs: &[&Tensor<B>],
+        _outputs: &[&Tensor<B>],
+    ) -> Result<Vec<Option<Tensor<B>>>> {
+        let ops = grad.backend().ops();
+        Ok(vec![Some(ops.div(grad, inputs[0])?)])
+    }
+}
+
+pub struct Sigmoid;
+
+impl<B: Backend> Op<B> for Sigmoid {
+    const NAME: &'static str = "Sigmoid";
+
+    fn forward(&self, inputs: &[&Tensor<B>]) -> Result<Vec<Tensor<B>>> {
+        check_arity(inputs, 1, "Sigmoid")?;
+        Ok(vec![inputs[0].backend().ops().sigmoid(inputs[0])?])
+    }
+
+    fn backward(
+        &self,
+        grad: &Tensor<B>,
+        _inputs: &[&Tensor<B>],
+        outputs: &[&Tensor<B>],
+    ) -> Result<Vec<Option<Tensor<B>>>> {
+        let ops = grad.backend().ops();
+        let one = ops.ones_like(outputs[0])?;
+        let inv = ops.sub(&one, outputs[0])?;
+        let local = ops.mul(outputs[0], &inv)?;
+        Ok(vec![Some(ops.mul(grad, &local)?)])
+    }
+}
+
+pub struct Softmax;
+
+impl<B: Backend> Op<B> for Softmax {
+    const NAME: &'static str = "Softmax";
+
+    fn forward(&self, inputs: &[&Tensor<B>]) -> Result<Vec<Tensor<B>>> {
+        check_arity(inputs, 1, "Softmax")?;
+        Ok(vec![inputs[0].backend().ops().softmax_last_dim(inputs[0])?])
+    }
+
+    fn backward(
+        &self,
+        grad: &Tensor<B>,
+        inputs: &[&Tensor<B>],
+        _outputs: &[&Tensor<B>],
+    ) -> Result<Vec<Option<Tensor<B>>>> {
+        Ok(vec![Some(
+            grad.backend()
+                .ops()
+                .softmax_last_dim_backward(inputs[0], grad)?,
+        )])
+    }
+}
+
+pub struct LayerNorm {
+    eps: f64,
+}
+
+impl LayerNorm {
+    pub fn new(eps: f64) -> Self {
+        Self { eps }
+    }
+}
+
+impl<B: Backend> Op<B> for LayerNorm {
+    const NAME: &'static str = "LayerNorm";
+
+    fn forward(&self, inputs: &[&Tensor<B>]) -> Result<Vec<Tensor<B>>> {
+        check_arity(inputs, 3, "LayerNorm")?;
+        let ops = inputs[0].backend().ops();
+        Ok(vec![
+            ops.layer_norm(inputs[0], inputs[1], inputs[2], self.eps)?,
+        ])
+    }
+
+    fn backward(
+        &self,
+        grad: &Tensor<B>,
+        inputs: &[&Tensor<B>],
+        _outputs: &[&Tensor<B>],
+    ) -> Result<Vec<Option<Tensor<B>>>> {
+        let ops = grad.backend().ops();
+        let (dx, dgamma, dbeta) =
+            ops.layer_norm_backward(inputs[0], inputs[1], inputs[2], grad, self.eps)?;
+        Ok(vec![Some(dx), Some(dgamma), Some(dbeta)])
+    }
+}
+
+pub struct Embedding;
+
+impl<B: Backend> Op<B> for Embedding {
+    const NAME: &'static str = "Embedding";
+
+    fn forward(&self, inputs: &[&Tensor<B>]) -> Result<Vec<Tensor<B>>> {
+        check_arity(inputs, 2, "Embedding")?;
+        Ok(vec![
+            inputs[0].backend().ops().embedding(inputs[0], inputs[1])?,
+        ])
+    }
+
+    fn backward(
+        &self,
+        grad: &Tensor<B>,
+        inputs: &[&Tensor<B>],
+        _outputs: &[&Tensor<B>],
+    ) -> Result<Vec<Option<Tensor<B>>>> {
+        let grad_weight = grad
+            .backend()
+            .ops()
+            .embedding_backward(inputs[0], inputs[1], grad)?;
+        Ok(vec![None, Some(grad_weight)])
+    }
+}
+
+pub fn exp<B: Backend>(x: &Variable<B>) -> Result<Variable<B>> {
+    apply1(Exp, x)
+}
+
+pub fn log<B: Backend>(x: &Variable<B>) -> Result<Variable<B>> {
+    apply1(Log, x)
+}
+
+pub fn sigmoid<B: Backend>(x: &Variable<B>) -> Result<Variable<B>> {
+    apply1(Sigmoid, x)
+}
+
+pub fn softmax<B: Backend>(x: &Variable<B>) -> Result<Variable<B>> {
+    apply1(Softmax, x)
+}
+
+pub fn layer_norm<B: Backend>(
+    x: &Variable<B>,
+    gamma: &Variable<B>,
+    beta: &Variable<B>,
+    eps: f64,
+) -> Result<Variable<B>> {
+    let mut out = apply(
+        LayerNorm::new(eps),
+        &[x.clone(), gamma.clone(), beta.clone()],
+    )?;
+    Ok(out.remove(0))
+}
+
+pub fn embedding<B: Backend>(ids: &Variable<B>, weight: &Variable<B>) -> Result<Variable<B>> {
+    let mut out = apply(Embedding, &[ids.clone(), weight.clone()])?;
+    Ok(out.remove(0))
+}

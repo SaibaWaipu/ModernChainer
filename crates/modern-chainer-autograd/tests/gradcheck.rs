@@ -161,3 +161,73 @@ fn fused_linear() -> Result<()> {
         &[x, w, b],
     )
 }
+
+#[test]
+fn softmax_and_layer_norm() -> Result<()> {
+    let x = var(&[0.2, -0.4, 0.7, 0.1, 0.3, -0.2], [2, 3]);
+    check(
+        |xs| {
+            let y = ops::softmax(&xs[0])?;
+            ops::sum(&y)
+        },
+        std::slice::from_ref(&x),
+    )?;
+    let gamma = var(&[1.0, 0.9, 1.1], [3]);
+    let beta = var(&[0.1, -0.1, 0.0], [3]);
+    check(
+        |xs| {
+            let y = ops::layer_norm(&xs[0], &xs[1], &xs[2], 1e-5)?;
+            let y = ops::mul(&y, &y)?;
+            ops::sum(&y)
+        },
+        &[x, gamma, beta],
+    )
+}
+
+#[test]
+fn embedding_gradient() -> Result<()> {
+    let weight = var(&[0.1, 0.2, -0.3, 0.4, 0.5, -0.6], [3, 2]);
+    let ids = Variable::constant(
+        Tensor::from_slice(
+            CpuBackend::new(),
+            &[0i64, 2, 0],
+            [3],
+            modern_chainer_core::DType::I64,
+        )
+        .unwrap(),
+    );
+    check(
+        |xs| {
+            let y = ops::embedding(&xs[0], &xs[1])?;
+            ops::sum(&y)
+        },
+        &[ids, weight],
+    )
+}
+
+#[test]
+fn exp_log_sigmoid() -> Result<()> {
+    let x = var(&[0.2, -0.1, 0.4, 0.3], [2, 2]);
+    check(
+        |xs| {
+            let y = ops::exp(&xs[0])?;
+            ops::sum(&y)
+        },
+        std::slice::from_ref(&x),
+    )?;
+    let positive = var(&[0.5, 1.2, 0.7, 2.0], [2, 2]);
+    check(
+        |xs| {
+            let y = ops::log(&xs[0])?;
+            ops::sum(&y)
+        },
+        &[positive],
+    )?;
+    check(
+        |xs| {
+            let y = ops::sigmoid(&xs[0])?;
+            ops::sum(&y)
+        },
+        &[x],
+    )
+}

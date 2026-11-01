@@ -1,5 +1,8 @@
 //! Dataset and iteration primitives.
 
+pub mod audio;
+pub mod image;
+
 use modern_chainer_core::Rng;
 
 pub trait Dataset {

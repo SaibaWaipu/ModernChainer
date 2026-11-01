@@ -24,6 +24,18 @@ impl Ops<CpuBackend> for CpuOps {
         kernels::unary_map(a, f32::sqrt)
     }
 
+    fn exp(&self, a: &Tensor<CpuBackend>) -> Result<Tensor<CpuBackend>> {
+        kernels::exp(a)
+    }
+
+    fn log(&self, a: &Tensor<CpuBackend>) -> Result<Tensor<CpuBackend>> {
+        kernels::log(a)
+    }
+
+    fn sigmoid(&self, a: &Tensor<CpuBackend>) -> Result<Tensor<CpuBackend>> {
+        kernels::sigmoid(a)
+    }
+
     fn relu(&self, a: &Tensor<CpuBackend>) -> Result<Tensor<CpuBackend>> {
         kernels::relu(a)
     }
@@ -48,6 +60,15 @@ impl Ops<CpuBackend> for CpuOps {
         kernels::embedding(ids, weight)
     }
 
+    fn embedding_backward(
+        &self,
+        ids: &Tensor<CpuBackend>,
+        weight: &Tensor<CpuBackend>,
+        grad: &Tensor<CpuBackend>,
+    ) -> Result<Tensor<CpuBackend>> {
+        kernels::embedding_backward(ids, weight, grad)
+    }
+
     fn layer_norm(
         &self,
         x: &Tensor<CpuBackend>,
@@ -58,8 +79,27 @@ impl Ops<CpuBackend> for CpuOps {
         kernels::layer_norm(x, gamma, beta, eps)
     }
 
+    fn layer_norm_backward(
+        &self,
+        x: &Tensor<CpuBackend>,
+        gamma: &Tensor<CpuBackend>,
+        beta: &Tensor<CpuBackend>,
+        grad: &Tensor<CpuBackend>,
+        eps: f64,
+    ) -> Result<(Tensor<CpuBackend>, Tensor<CpuBackend>, Tensor<CpuBackend>)> {
+        kernels::layer_norm_backward(x, gamma, beta, grad, eps)
+    }
+
     fn softmax_last_dim(&self, x: &Tensor<CpuBackend>) -> Result<Tensor<CpuBackend>> {
         kernels::softmax_last_dim(x)
+    }
+
+    fn softmax_last_dim_backward(
+        &self,
+        x: &Tensor<CpuBackend>,
+        grad: &Tensor<CpuBackend>,
+    ) -> Result<Tensor<CpuBackend>> {
+        kernels::softmax_last_dim_backward(x, grad)
     }
 
     fn silu(&self, x: &Tensor<CpuBackend>) -> Result<Tensor<CpuBackend>> {

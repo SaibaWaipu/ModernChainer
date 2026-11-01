@@ -49,6 +49,18 @@ pub trait Ops<B: Backend>: Send + Sync + 'static {
         Err(Error::unsupported("sqrt"))
     }
 
+    fn exp(&self, _a: &Tensor<B>) -> Result<Tensor<B>> {
+        Err(Error::unsupported("exp"))
+    }
+
+    fn log(&self, _a: &Tensor<B>) -> Result<Tensor<B>> {
+        Err(Error::unsupported("log"))
+    }
+
+    fn sigmoid(&self, _a: &Tensor<B>) -> Result<Tensor<B>> {
+        Err(Error::unsupported("sigmoid"))
+    }
+
     fn relu(&self, _a: &Tensor<B>) -> Result<Tensor<B>> {
         Err(Error::unsupported("relu"))
     }
@@ -67,6 +79,15 @@ pub trait Ops<B: Backend>: Send + Sync + 'static {
         Err(Error::unsupported("embedding"))
     }
 
+    fn embedding_backward(
+        &self,
+        _ids: &Tensor<B>,
+        _weight: &Tensor<B>,
+        _grad: &Tensor<B>,
+    ) -> Result<Tensor<B>> {
+        Err(Error::unsupported("embedding_backward"))
+    }
+
     /// Normalise the last dimension, then apply `gamma * x + beta`.
     fn layer_norm(
         &self,
@@ -78,8 +99,23 @@ pub trait Ops<B: Backend>: Send + Sync + 'static {
         Err(Error::unsupported("layer_norm"))
     }
 
+    fn layer_norm_backward(
+        &self,
+        _x: &Tensor<B>,
+        _gamma: &Tensor<B>,
+        _beta: &Tensor<B>,
+        _grad: &Tensor<B>,
+        _eps: f64,
+    ) -> Result<(Tensor<B>, Tensor<B>, Tensor<B>)> {
+        Err(Error::unsupported("layer_norm_backward"))
+    }
+
     fn softmax_last_dim(&self, _x: &Tensor<B>) -> Result<Tensor<B>> {
         Err(Error::unsupported("softmax_last_dim"))
+    }
+
+    fn softmax_last_dim_backward(&self, _x: &Tensor<B>, _grad: &Tensor<B>) -> Result<Tensor<B>> {
+        Err(Error::unsupported("softmax_last_dim_backward"))
     }
 
     fn silu(&self, _x: &Tensor<B>) -> Result<Tensor<B>> {
