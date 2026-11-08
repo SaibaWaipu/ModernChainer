@@ -56,12 +56,12 @@ cached per context, and adapters can be selected by index with
 | Kernel | Notes |
 |---|---|
 | add / sub / mul / div | equal shapes, vec4; bias add for `[rows, cols] + [cols]` |
-| sqrt, relu, scale, fill | vec4 elementwise; relu backward scalar |
-| gelu, silu | native activations |
+| sqrt, relu, scale, fill, exp, log, sigmoid | vec4 elementwise; relu backward vec4 |
+| gelu, silu, clamp, abs | vec4 native activations |
 | transpose2d | 16×16 shared-memory tile |
 | matmul | 32×32 tile with 2×2 blocking; aligned fast path; 16×16 small-shape variant |
 | conv2d / conv_transpose2d / pool / batch_norm / attention | host fallback with gradients, usable on any backend |
-| linear | transpose-free matmul against `[out, in]` weights, fused bias for small/large batches |
+| linear | transpose-free matmul against `[out, in]` weights, fused bias+ReLU/GELU/SiLU for small/large batches |
 | linear_backward | transposed-input matmul avoids materializing `gradᵀ`; fuses bias-gradient reduction |
 | adam_update | fused single kernel (`m`, `v`, bias correction and parameter update) |
 | softmax_cross_entropy | fused row softmax and NLL; backward in one kernel |

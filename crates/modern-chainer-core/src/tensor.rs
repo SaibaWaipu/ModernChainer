@@ -195,6 +195,132 @@ impl<B: Backend> Tensor<B> {
         Ok(whole[start..start + len].to_vec())
     }
 
+    pub fn full(backend: B, shape: impl Into<Shape>, value: f64, dtype: DType) -> Result<Self> {
+        let shape = shape.into();
+        let n = shape.numel();
+        let bytes: Vec<u8> = match dtype {
+            DType::F32 => bytemuck::cast_slice(&vec![value as f32; n]).to_vec(),
+            DType::F64 => bytemuck::cast_slice(&vec![value; n]).to_vec(),
+            DType::I32 => bytemuck::cast_slice(&vec![value as i32; n]).to_vec(),
+            DType::I64 => bytemuck::cast_slice(&vec![value as i64; n]).to_vec(),
+            DType::U8 => vec![value as u8; n],
+            DType::Bool => vec![if value != 0.0 { 1u8 } else { 0u8 }; n],
+            DType::F16 => {
+                bytemuck::cast_slice(&vec![crate::dtype::f32_to_f16_bits(value as f32); n]).to_vec()
+            }
+            DType::BF16 => {
+                bytemuck::cast_slice(&vec![crate::dtype::f32_to_bf16_bits(value as f32); n])
+                    .to_vec()
+            }
+        };
+        Self::from_bytes(backend, &bytes, shape, dtype)
+    }
+
+    pub fn ones(backend: B, shape: impl Into<Shape>, dtype: DType) -> Result<Self> {
+        Self::full(backend, shape, 1.0, dtype)
+    }
+
+    pub fn eye(backend: B, n: usize) -> Result<Self> {
+        let mut data = vec![0f32; n * n];
+        for i in 0..n {
+            data[i * n + i] = 1.0;
+        }
+        Self::from_f32(backend, &data, [n, n])
+    }
+
+    /// Returns a contiguous clone (no-op when already contiguous).
+    pub fn contiguous(&self) -> Result<Self> {
+        if self.is_contiguous() {
+            return Ok(self.clone());
+        }
+        let bytes = self.to_strided_bytes()?;
+        Self::from_bytes(self.backend.clone(), &bytes, self.shape.clone(), self.dtype)
+    }
+
+    fn to_strided_bytes(&self) -> Result<Vec<u8>> {
+        let elem = self.dtype.size_in_bytes();
+        let src = {
+            let mut whole = vec![0u8; self.storage.len_bytes()];
+            self.backend.copy_to_host(&self.storage, &mut whole)?;
+            whole
+        };
+        let dims = self.shape.dims();
+        let strides = self.strides.as_slice();
+        let out_len = self.numel() * elem;
+        let mut out = vec![0u8; out_len];
+        let rank = dims.len();
+        if rank == 0 {
+            let start = self.offset * elem;
+            out[..elem].copy_from_slice(&src[start..start + elem]);
+            return Ok(out);
+        }
+        for linear in 0..self.numel() {
+            let mut index = linear;
+            let mut offset = self.offset as isize;
+            for d in (0..rank).rev() {
+                let dim = dims[d];
+                let coord = if dim == 0 { 0 } else { index % dim };
+                index /= dim.max(1);
+                offset += coord as isize * strides[d];
+            }
+            let s = offset as usize * elem;
+            let d = linear * elem;
+            out[d..d + elem].copy_from_slice(&src[s..s + elem]);
+        }
+        Ok(out)
+    }
+
+    /// Copy contents to host `f32` values (casts f16/bf16/f64/int dtypes).
+    pub fn to_host_f32(&self) -> Result<Vec<f32>> {
+        let bytes = self.contiguous()?.to_bytes()?;
+        match self.dtype {
+            DType::F32 => {
+                let (chunks, _) = bytes.as_chunks::<4>();
+                Ok(chunks.iter().map(|c| f32::from_ne_bytes(*c)).collect())
+            }
+            DType::F64 => {
+                let (chunks, _) = bytes.as_chunks::<8>();
+                Ok(chunks
+                    .iter()
+                    .map(|c| f64::from_ne_bytes(*c) as f32)
+                    .collect())
+            }
+            DType::F16 => {
+                let (chunks, _) = bytes.as_chunks::<2>();
+                Ok(chunks
+                    .iter()
+                    .map(|c| crate::dtype::f16_bits_to_f32(u16::from_ne_bytes(*c)))
+                    .collect())
+            }
+            DType::BF16 => {
+                let (chunks, _) = bytes.as_chunks::<2>();
+                Ok(chunks
+                    .iter()
+                    .map(|c| crate::dtype::bf16_bits_to_f32(u16::from_ne_bytes(*c)))
+                    .collect())
+            }
+            DType::I32 => {
+                let (chunks, _) = bytes.as_chunks::<4>();
+                Ok(chunks
+                    .iter()
+                    .map(|c| i32::from_ne_bytes(*c) as f32)
+                    .collect())
+            }
+            DType::I64 => {
+                let (chunks, _) = bytes.as_chunks::<8>();
+                Ok(chunks
+                    .iter()
+                    .map(|c| i64::from_ne_bytes(*c) as f32)
+                    .collect())
+            }
+            DType::U8 => Ok(bytes.iter().map(|&b| b as f32).collect()),
+            DType::Bool => Ok(bytes
+                .iter()
+                .map(|&b| if b != 0 { 1.0 } else { 0.0 })
+                .collect()),
+        }
+    }
+
     pub fn reshape(&self, shape: impl Into<Shape>) -> Result<Self> {
         let shape = shape.into();
         if !self.is_contiguous() {

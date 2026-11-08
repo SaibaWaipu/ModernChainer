@@ -326,3 +326,31 @@ fn reshape_permute_attention() -> Result<()> {
         &[q, k, v],
     )
 }
+
+#[test]
+fn silu_gelu() -> Result<()> {
+    let x = var(&[0.2, -0.3, 0.5, 0.1], [2, 2]);
+    check(|xs| ops::sum(&ops::silu(&xs[0])?), std::slice::from_ref(&x))?;
+    check(|xs| ops::sum(&ops::gelu(&xs[0])?), std::slice::from_ref(&x))
+}
+
+#[test]
+fn rms_norm_clamp_abs() -> Result<()> {
+    let x = var(&[0.2, -0.3, 0.5, 0.1], [2, 2]);
+    let w = var(&[1.0, 0.8], [2]);
+    check(
+        |xs| {
+            let y = ops::rms_norm(&xs[0], &xs[1], 1e-6)?;
+            ops::sum(&y)
+        },
+        &[x.clone(), w],
+    )?;
+    check(
+        |xs| {
+            let y = ops::clamp(&xs[0], -0.2, 0.4)?;
+            ops::sum(&y)
+        },
+        std::slice::from_ref(&x),
+    )?;
+    check(|xs| ops::sum(&ops::abs(&xs[0])?), std::slice::from_ref(&x))
+}

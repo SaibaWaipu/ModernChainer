@@ -360,6 +360,57 @@ pub trait Ops<B: Backend>: Send + Sync + 'static {
     ) -> Result<Tensor<B>> {
         Err(Error::unsupported("softmax_cross_entropy_backward"))
     }
+
+    /// Root-mean-square normalisation over the last dimension:
+    /// `y = x * rsqrt(mean(x^2) + eps) * weight`.
+    fn rms_norm(&self, _x: &Tensor<B>, _weight: &Tensor<B>, _eps: f64) -> Result<Tensor<B>> {
+        Err(Error::unsupported("rms_norm"))
+    }
+
+    fn rms_norm_backward(
+        &self,
+        _x: &Tensor<B>,
+        _weight: &Tensor<B>,
+        _grad: &Tensor<B>,
+        _eps: f64,
+    ) -> Result<(Tensor<B>, Tensor<B>)> {
+        Err(Error::unsupported("rms_norm_backward"))
+    }
+
+    fn clamp(&self, _x: &Tensor<B>, _min: f64, _max: f64) -> Result<Tensor<B>> {
+        Err(Error::unsupported("clamp"))
+    }
+
+    fn abs(&self, _x: &Tensor<B>) -> Result<Tensor<B>> {
+        Err(Error::unsupported("abs"))
+    }
+
+    /// Rotary position embedding.  `q`/`k` are `[heads, seq, head_dim]`,
+    /// `positions` is `[seq]` (i64) or scalar broadcast.  `interleaved`
+    /// selects interleaved (GPT-NeoX) vs half-split (GPT-J) pairing.
+    fn apply_rope(
+        &self,
+        _q: &Tensor<B>,
+        _k: &Tensor<B>,
+        _positions: &Tensor<B>,
+        _theta: f64,
+        _interleaved: bool,
+    ) -> Result<(Tensor<B>, Tensor<B>)> {
+        Err(Error::unsupported("apply_rope"))
+    }
+
+    /// Cast between float dtypes (f32/f16/bf16/f64).  Integer casts are
+    /// supported on the host via `to_scalar`-style paths in backends that
+    /// implement it.
+    fn cast(&self, _x: &Tensor<B>, _dtype: DType) -> Result<Tensor<B>> {
+        Err(Error::unsupported("cast"))
+    }
+
+    /// Dropout with a pre-generated mask (1.0 = keep, scaled by 1/(1-p)).
+    /// The mask is a same-shape f32 tensor on the same backend.
+    fn dropout(&self, _x: &Tensor<B>, _mask: &Tensor<B>, _p: f64) -> Result<Tensor<B>> {
+        Err(Error::unsupported("dropout"))
+    }
 }
 
 pub trait Backend: Clone + Send + Sync + 'static {

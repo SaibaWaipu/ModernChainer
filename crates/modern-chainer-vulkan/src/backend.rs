@@ -109,7 +109,16 @@ impl VulkanBackend {
     }
 
     pub(crate) fn read_buffer(&self, buffer: &wgpu::Buffer, len: usize) -> Result<Vec<u8>> {
-        let size = aligned(len.max(4));
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        if len as u64 > buffer.size() {
+            return Err(Error::invalid(format!(
+                "readback length {len} exceeds buffer size {}",
+                buffer.size()
+            )));
+        }
+        let size = aligned(len.max(4)).min(buffer.size() as usize);
         let staging = self.ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("modern-chainer readback"),
             size: size as u64,

@@ -666,6 +666,48 @@ impl Ops<CudaBackend> for CudaOps {
         self.unary(&self.runtime.kernels.gelu, a)
     }
 
+    fn exp(&self, a: &Tensor<CudaBackend>) -> Result<Tensor<CudaBackend>> {
+        self.unary(&self.runtime.kernels.exp, a)
+    }
+
+    fn log(&self, a: &Tensor<CudaBackend>) -> Result<Tensor<CudaBackend>> {
+        self.unary(&self.runtime.kernels.log, a)
+    }
+
+    fn sigmoid(&self, a: &Tensor<CudaBackend>) -> Result<Tensor<CudaBackend>> {
+        self.unary(&self.runtime.kernels.sigmoid, a)
+    }
+
+    fn clamp(&self, x: &Tensor<CudaBackend>, min: f64, max: f64) -> Result<Tensor<CudaBackend>> {
+        if min > max {
+            return Err(Error::invalid("clamp min > max"));
+        }
+        let n = x.numel();
+        let (backend, mut storage) = self.out_f32(x.shape())?;
+        {
+            let a = self.f32(x)?;
+            let out = storage.f32_mut()?;
+            let n_i = i32::try_from(n).map_err(|_| Error::invalid("tensor too large"))?;
+            let min_f = min as f32;
+            let max_f = max as f32;
+            let mut builder = self
+                .runtime
+                .stream
+                .launch_builder(&self.runtime.kernels.clamp);
+            builder.arg(a).arg(out).arg(&min_f).arg(&max_f).arg(&n_i);
+            unsafe {
+                builder
+                    .launch(LaunchConfig::for_num_elems(n as u32))
+                    .map_err(|error| cuda_error("launch", error))?;
+            }
+        }
+        self.tensor_from_storage(backend, storage, x.shape())
+    }
+
+    fn abs(&self, x: &Tensor<CudaBackend>) -> Result<Tensor<CudaBackend>> {
+        self.unary(&self.runtime.kernels.abs, x)
+    }
+
     fn matmul(
         &self,
         a: &Tensor<CudaBackend>,
@@ -1819,5 +1861,65 @@ impl Ops<CudaBackend> for CudaOps {
             }
         }
         self.tensor_from_storage(backend, storage, q.shape())
+    }
+
+    fn rms_norm(
+        &self,
+        x: &Tensor<CudaBackend>,
+        weight: &Tensor<CudaBackend>,
+        eps: f64,
+    ) -> Result<Tensor<CudaBackend>> {
+        let xc = self.to_cpu(x)?;
+        let wc = self.to_cpu(weight)?;
+        self.upload(&CpuBackend::new().ops().rms_norm(&xc, &wc, eps)?)
+    }
+
+    fn rms_norm_backward(
+        &self,
+        x: &Tensor<CudaBackend>,
+        weight: &Tensor<CudaBackend>,
+        grad: &Tensor<CudaBackend>,
+        eps: f64,
+    ) -> Result<(Tensor<CudaBackend>, Tensor<CudaBackend>)> {
+        let xc = self.to_cpu(x)?;
+        let wc = self.to_cpu(weight)?;
+        let gc = self.to_cpu(grad)?;
+        let (dx, dw) = CpuBackend::new()
+            .ops()
+            .rms_norm_backward(&xc, &wc, &gc, eps)?;
+        Ok((self.upload(&dx)?, self.upload(&dw)?))
+    }
+
+    fn apply_rope(
+        &self,
+        q: &Tensor<CudaBackend>,
+        k: &Tensor<CudaBackend>,
+        positions: &Tensor<CudaBackend>,
+        theta: f64,
+        interleaved: bool,
+    ) -> Result<(Tensor<CudaBackend>, Tensor<CudaBackend>)> {
+        let qc = self.to_cpu(q)?;
+        let kc = self.to_cpu(k)?;
+        let pc = self.to_cpu(positions)?;
+        let (rq, rk) = CpuBackend::new()
+            .ops()
+            .apply_rope(&qc, &kc, &pc, theta, interleaved)?;
+        Ok((self.upload(&rq)?, self.upload(&rk)?))
+    }
+
+    fn cast(&self, x: &Tensor<CudaBackend>, dtype: DType) -> Result<Tensor<CudaBackend>> {
+        let xc = self.to_cpu(x)?;
+        self.upload(&CpuBackend::new().ops().cast(&xc, dtype)?)
+    }
+
+    fn dropout(
+        &self,
+        x: &Tensor<CudaBackend>,
+        mask: &Tensor<CudaBackend>,
+        p: f64,
+    ) -> Result<Tensor<CudaBackend>> {
+        let xc = self.to_cpu(x)?;
+        let mc = self.to_cpu(mask)?;
+        self.upload(&CpuBackend::new().ops().dropout(&xc, &mc, p)?)
     }
 }

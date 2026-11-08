@@ -8,6 +8,7 @@ from ._chainer import (
     LayerNorm,
     Linear,
     MultiHeadAttention,
+    RMSNorm,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "LayerNorm",
     "Linear",
     "MultiHeadAttention",
+    "RMSNorm",
 ]

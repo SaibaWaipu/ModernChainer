@@ -1,19 +1,6 @@
 //! WGSL compute kernels.  All kernels use 2-D dispatch to lift the 65535
 //! workgroup limit of a single dimension.
 
-pub(crate) const RELU_BACKWARD: &str = r#"
-@group(0) @binding(0) var<storage, read> x: array<f32>;
-@group(0) @binding(1) var<storage, read> g: array<f32>;
-@group(0) @binding(2) var<storage, read_write> out: array<f32>;
-
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x + gid.y * 4194240u;
-    if (i >= arrayLength(&out)) { return; }
-    out[i] = select(0.0, g[i], x[i] > 0.0);
-}
-"#;
-
 pub(crate) const BIAS_ADD: &str = r#"
 struct Params { cols: u32, pad0: u32, pad1: u32, pad2: u32 };
 @group(0) @binding(0) var<storage, read> a: array<f32>;
@@ -534,33 +521,6 @@ fn main(
         if (c == label) { value = value - 1.0; }
         grad[base + c] = value / f32(params.rows);
     }
-}
-"#;
-
-pub(crate) const GELU: &str = r#"
-@group(0) @binding(0) var<storage, read> input: array<f32>;
-@group(0) @binding(1) var<storage, read_write> output: array<f32>;
-
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x + gid.y * 4194240u;
-    if (i >= arrayLength(&output)) { return; }
-    let x = input[i];
-    let c = 0.7978845608 * (x + 0.044715 * x * x * x);
-    output[i] = 0.5 * x * (1.0 + tanh(c));
-}
-"#;
-
-pub(crate) const SILU: &str = r#"
-@group(0) @binding(0) var<storage, read> input: array<f32>;
-@group(0) @binding(1) var<storage, read_write> output: array<f32>;
-
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x + gid.y * 4194240u;
-    if (i >= arrayLength(&output)) { return; }
-    let x = input[i];
-    output[i] = x / (1.0 + exp(-x));
 }
 "#;
 
@@ -1189,6 +1149,283 @@ fn main(
     for (var i: u32 = lid.x; i < params.dim; i = i + 256u) {
         out[base + i] = (x[base + i] - mean) * inv * gamma[i] + beta[i];
     }
+}
+"#;
+
+pub(crate) const EXP4: &str = r#"
+@group(0) @binding(0) var<storage, read> input: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> output: array<vec4<f32>>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x + gid.y * 16776960u;
+    if (i >= arrayLength(&output)) { return; }
+    output[i] = exp(input[i]);
+}
+"#;
+
+pub(crate) const LOG4: &str = r#"
+@group(0) @binding(0) var<storage, read> input: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> output: array<vec4<f32>>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x + gid.y * 16776960u;
+    if (i >= arrayLength(&output)) { return; }
+    output[i] = log(input[i]);
+}
+"#;
+
+pub(crate) const SIGMOID4: &str = r#"
+@group(0) @binding(0) var<storage, read> input: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> output: array<vec4<f32>>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x + gid.y * 16776960u;
+    if (i >= arrayLength(&output)) { return; }
+    output[i] = vec4<f32>(1.0) / (vec4<f32>(1.0) + exp(-input[i]));
+}
+"#;
+
+pub(crate) const SILU4: &str = r#"
+@group(0) @binding(0) var<storage, read> input: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> output: array<vec4<f32>>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x + gid.y * 16776960u;
+    if (i >= arrayLength(&output)) { return; }
+    let x = input[i];
+    output[i] = x / (vec4<f32>(1.0) + exp(-x));
+}
+"#;
+
+pub(crate) const GELU4: &str = r#"
+@group(0) @binding(0) var<storage, read> input: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> output: array<vec4<f32>>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x + gid.y * 16776960u;
+    if (i >= arrayLength(&output)) { return; }
+    let x = input[i];
+    let c = 0.7978845608 * (x + 0.044715 * x * x * x);
+    output[i] = 0.5 * x * (vec4<f32>(1.0) + tanh(c));
+}
+"#;
+
+pub(crate) const CLAMP4: &str = r#"
+struct Params { minv: f32, maxv: f32, pad0: f32, pad1: f32 };
+@group(0) @binding(0) var<storage, read> input: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> output: array<vec4<f32>>;
+@group(0) @binding(2) var<uniform> params: Params;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x + gid.y * 16776960u;
+    if (i >= arrayLength(&output)) { return; }
+    output[i] = clamp(input[i], vec4<f32>(params.minv), vec4<f32>(params.maxv));
+}
+"#;
+
+pub(crate) const ABS4: &str = r#"
+@group(0) @binding(0) var<storage, read> input: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> output: array<vec4<f32>>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x + gid.y * 16776960u;
+    if (i >= arrayLength(&output)) { return; }
+    output[i] = abs(input[i]);
+}
+"#;
+
+pub(crate) const RELU_BACKWARD4: &str = r#"
+@group(0) @binding(0) var<storage, read> x: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> g: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> out: array<vec4<f32>>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x + gid.y * 16776960u;
+    if (i >= arrayLength(&out)) { return; }
+    out[i] = select(vec4<f32>(0.0), g[i], x[i] > vec4<f32>(0.0));
+}
+"#;
+
+pub(crate) const MATMUL_NT_BIAS_SILU: &str = r#"
+struct Params { m: u32, k: u32, n: u32, pad: u32 };
+@group(0) @binding(0) var<storage, read> a: array<f32>;
+@group(0) @binding(1) var<storage, read> b: array<f32>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+@group(0) @binding(3) var<storage, read> bias: array<f32>;
+@group(0) @binding(4) var<uniform> params: Params;
+const TILE: u32 = 32u;
+var<workgroup> tile_a: array<f32, 1024>;
+var<workgroup> tile_b: array<f32, 1024>;
+@compute @workgroup_size(16, 16)
+fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+    let row0 = wid.y * TILE;
+    let col0 = wid.x * TILE;
+    let tid = lid.y * 16u + lid.x;
+    var acc00 = 0.0; var acc01 = 0.0; var acc10 = 0.0; var acc11 = 0.0;
+    let tiles = (params.k + TILE - 1u) / TILE;
+    for (var t: u32 = 0u; t < tiles; t = t + 1u) {
+        let kt = t * TILE;
+        for (var i: u32 = tid; i < TILE * TILE; i = i + 256u) {
+            let r = i / TILE; let c = i % TILE;
+            let ar = row0 + r; let ak = kt + c;
+            if (ar < params.m && ak < params.k) { tile_a[i] = a[ar * params.k + ak]; } else { tile_a[i] = 0.0; }
+            let br = kt + r; let bc = col0 + c;
+            if (br < params.k && bc < params.n) { tile_b[i] = b[bc * params.k + br]; } else { tile_b[i] = 0.0; }
+        }
+        workgroupBarrier();
+        for (var j: u32 = 0u; j < TILE; j = j + 1u) {
+            let a0 = tile_a[lid.y * TILE + j]; let a1 = tile_a[(lid.y + 16u) * TILE + j];
+            let b0 = tile_b[j * TILE + lid.x]; let b1 = tile_b[j * TILE + lid.x + 16u];
+            acc00 = acc00 + a0 * b0; acc01 = acc01 + a0 * b1; acc10 = acc10 + a1 * b0; acc11 = acc11 + a1 * b1;
+        }
+        workgroupBarrier();
+    }
+    let row1 = row0 + lid.y; let row2 = row1 + 16u;
+    let col1 = col0 + lid.x; let col2 = col1 + 16u;
+    if (row1 < params.m && col1 < params.n) { let v = acc00 + bias[col1]; out[row1 * params.n + col1] = v / (1.0 + exp(-v)); }
+    if (row1 < params.m && col2 < params.n) { let v = acc01 + bias[col2]; out[row1 * params.n + col2] = v / (1.0 + exp(-v)); }
+    if (row2 < params.m && col1 < params.n) { let v = acc10 + bias[col1]; out[row2 * params.n + col1] = v / (1.0 + exp(-v)); }
+    if (row2 < params.m && col2 < params.n) { let v = acc11 + bias[col2]; out[row2 * params.n + col2] = v / (1.0 + exp(-v)); }
+}
+"#;
+
+pub(crate) const MATMUL_NT_BIAS_GELU: &str = r#"
+struct Params { m: u32, k: u32, n: u32, pad: u32 };
+@group(0) @binding(0) var<storage, read> a: array<f32>;
+@group(0) @binding(1) var<storage, read> b: array<f32>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+@group(0) @binding(3) var<storage, read> bias: array<f32>;
+@group(0) @binding(4) var<uniform> params: Params;
+const TILE: u32 = 32u;
+var<workgroup> tile_a: array<f32, 1024>;
+var<workgroup> tile_b: array<f32, 1024>;
+@compute @workgroup_size(16, 16)
+fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+    let row0 = wid.y * TILE;
+    let col0 = wid.x * TILE;
+    let tid = lid.y * 16u + lid.x;
+    var acc00 = 0.0; var acc01 = 0.0; var acc10 = 0.0; var acc11 = 0.0;
+    let tiles = (params.k + TILE - 1u) / TILE;
+    for (var t: u32 = 0u; t < tiles; t = t + 1u) {
+        let kt = t * TILE;
+        for (var i: u32 = tid; i < TILE * TILE; i = i + 256u) {
+            let r = i / TILE; let c = i % TILE;
+            let ar = row0 + r; let ak = kt + c;
+            if (ar < params.m && ak < params.k) { tile_a[i] = a[ar * params.k + ak]; } else { tile_a[i] = 0.0; }
+            let br = kt + r; let bc = col0 + c;
+            if (br < params.k && bc < params.n) { tile_b[i] = b[bc * params.k + br]; } else { tile_b[i] = 0.0; }
+        }
+        workgroupBarrier();
+        for (var j: u32 = 0u; j < TILE; j = j + 1u) {
+            let a0 = tile_a[lid.y * TILE + j]; let a1 = tile_a[(lid.y + 16u) * TILE + j];
+            let b0 = tile_b[j * TILE + lid.x]; let b1 = tile_b[j * TILE + lid.x + 16u];
+            acc00 = acc00 + a0 * b0; acc01 = acc01 + a0 * b1; acc10 = acc10 + a1 * b0; acc11 = acc11 + a1 * b1;
+        }
+        workgroupBarrier();
+    }
+    let row1 = row0 + lid.y; let row2 = row1 + 16u;
+    let col1 = col0 + lid.x; let col2 = col1 + 16u;
+    if (row1 < params.m && col1 < params.n) { let v = acc00 + bias[col1]; let c = 0.7978845608 * (v + 0.044715 * v * v * v); out[row1 * params.n + col1] = 0.5 * v * (1.0 + tanh(c)); }
+    if (row1 < params.m && col2 < params.n) { let v = acc01 + bias[col2]; let c = 0.7978845608 * (v + 0.044715 * v * v * v); out[row1 * params.n + col2] = 0.5 * v * (1.0 + tanh(c)); }
+    if (row2 < params.m && col1 < params.n) { let v = acc10 + bias[col1]; let c = 0.7978845608 * (v + 0.044715 * v * v * v); out[row2 * params.n + col1] = 0.5 * v * (1.0 + tanh(c)); }
+    if (row2 < params.m && col2 < params.n) { let v = acc11 + bias[col2]; let c = 0.7978845608 * (v + 0.044715 * v * v * v); out[row2 * params.n + col2] = 0.5 * v * (1.0 + tanh(c)); }
+}
+"#;
+
+pub(crate) const MATMUL_NT_SMALL_BIAS_SILU: &str = r#"
+struct Params { m: u32, k: u32, n: u32, pad: u32 };
+@group(0) @binding(0) var<storage, read> a: array<f32>;
+@group(0) @binding(1) var<storage, read> b: array<f32>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+@group(0) @binding(3) var<storage, read> bias: array<f32>;
+@group(0) @binding(4) var<uniform> params: Params;
+const TILE: u32 = 16u;
+var<workgroup> tile_a: array<f32, 256>;
+var<workgroup> tile_b: array<f32, 256>;
+@compute @workgroup_size(16, 16)
+fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+    let row = wid.y * TILE + lid.y; let col = wid.x * TILE + lid.x;
+    var acc = 0.0;
+    let tiles = (params.k + TILE - 1u) / TILE;
+    for (var t: u32 = 0u; t < tiles; t = t + 1u) {
+        let ka = t * TILE + lid.x; let kb = t * TILE + lid.y;
+        if (row < params.m && ka < params.k) { tile_a[lid.y * TILE + lid.x] = a[row * params.k + ka]; } else { tile_a[lid.y * TILE + lid.x] = 0.0; }
+        if (col < params.n && kb < params.k) { tile_b[lid.y * TILE + lid.x] = b[col * params.k + kb]; } else { tile_b[lid.y * TILE + lid.x] = 0.0; }
+        workgroupBarrier();
+        for (var j: u32 = 0u; j < TILE; j = j + 1u) { acc = acc + tile_a[lid.y * TILE + j] * tile_b[j * TILE + lid.x]; }
+        workgroupBarrier();
+    }
+    if (row < params.m && col < params.n) { let v = acc + bias[col]; out[row * params.n + col] = v / (1.0 + exp(-v)); }
+}
+"#;
+
+pub(crate) const MATMUL_NT_SMALL_BIAS_GELU: &str = r#"
+struct Params { m: u32, k: u32, n: u32, pad: u32 };
+@group(0) @binding(0) var<storage, read> a: array<f32>;
+@group(0) @binding(1) var<storage, read> b: array<f32>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+@group(0) @binding(3) var<storage, read> bias: array<f32>;
+@group(0) @binding(4) var<uniform> params: Params;
+const TILE: u32 = 16u;
+var<workgroup> tile_a: array<f32, 256>;
+var<workgroup> tile_b: array<f32, 256>;
+@compute @workgroup_size(16, 16)
+fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+    let row = wid.y * TILE + lid.y; let col = wid.x * TILE + lid.x;
+    var acc = 0.0;
+    let tiles = (params.k + TILE - 1u) / TILE;
+    for (var t: u32 = 0u; t < tiles; t = t + 1u) {
+        let ka = t * TILE + lid.x; let kb = t * TILE + lid.y;
+        if (row < params.m && ka < params.k) { tile_a[lid.y * TILE + lid.x] = a[row * params.k + ka]; } else { tile_a[lid.y * TILE + lid.x] = 0.0; }
+        if (col < params.n && kb < params.k) { tile_b[lid.y * TILE + lid.x] = b[col * params.k + kb]; } else { tile_b[lid.y * TILE + lid.x] = 0.0; }
+        workgroupBarrier();
+        for (var j: u32 = 0u; j < TILE; j = j + 1u) { acc = acc + tile_a[lid.y * TILE + j] * tile_b[j * TILE + lid.x]; }
+        workgroupBarrier();
+    }
+    if (row < params.m && col < params.n) { let v = acc + bias[col]; let c = 0.7978845608 * (v + 0.044715 * v * v * v); out[row * params.n + col] = 0.5 * v * (1.0 + tanh(c)); }
+}
+"#;
+
+pub(crate) const MATMUL_NT_BIAS_RELU: &str = r#"
+struct Params { m: u32, k: u32, n: u32, pad: u32 };
+@group(0) @binding(0) var<storage, read> a: array<f32>;
+@group(0) @binding(1) var<storage, read> b: array<f32>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+@group(0) @binding(3) var<storage, read> bias: array<f32>;
+@group(0) @binding(4) var<uniform> params: Params;
+const TILE: u32 = 32u;
+var<workgroup> tile_a: array<f32, 1024>;
+var<workgroup> tile_b: array<f32, 1024>;
+@compute @workgroup_size(16, 16)
+fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+    let row0 = wid.y * TILE;
+    let col0 = wid.x * TILE;
+    let tid = lid.y * 16u + lid.x;
+    var acc00 = 0.0; var acc01 = 0.0; var acc10 = 0.0; var acc11 = 0.0;
+    let tiles = (params.k + TILE - 1u) / TILE;
+    for (var t: u32 = 0u; t < tiles; t = t + 1u) {
+        let kt = t * TILE;
+        for (var i: u32 = tid; i < TILE * TILE; i = i + 256u) {
+            let r = i / TILE; let c = i % TILE;
+            let ar = row0 + r; let ak = kt + c;
+            if (ar < params.m && ak < params.k) { tile_a[i] = a[ar * params.k + ak]; } else { tile_a[i] = 0.0; }
+            let br = kt + r; let bc = col0 + c;
+            if (br < params.k && bc < params.n) { tile_b[i] = b[bc * params.k + br]; } else { tile_b[i] = 0.0; }
+        }
+        workgroupBarrier();
+        for (var j: u32 = 0u; j < TILE; j = j + 1u) {
+            let a0 = tile_a[lid.y * TILE + j]; let a1 = tile_a[(lid.y + 16u) * TILE + j];
+            let b0 = tile_b[j * TILE + lid.x]; let b1 = tile_b[j * TILE + lid.x + 16u];
+            acc00 = acc00 + a0 * b0; acc01 = acc01 + a0 * b1; acc10 = acc10 + a1 * b0; acc11 = acc11 + a1 * b1;
+        }
+        workgroupBarrier();
+    }
+    let row1 = row0 + lid.y; let row2 = row1 + 16u;
+    let col1 = col0 + lid.x; let col2 = col1 + 16u;
+    if (row1 < params.m && col1 < params.n) { out[row1 * params.n + col1] = max(acc00 + bias[col1], 0.0); }
+    if (row1 < params.m && col2 < params.n) { out[row1 * params.n + col2] = max(acc01 + bias[col2], 0.0); }
+    if (row2 < params.m && col1 < params.n) { out[row2 * params.n + col1] = max(acc10 + bias[col1], 0.0); }
+    if (row2 < params.m && col2 < params.n) { out[row2 * params.n + col2] = max(acc11 + bias[col2], 0.0); }
 }
 "#;
 

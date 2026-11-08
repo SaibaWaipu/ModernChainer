@@ -18,7 +18,7 @@ pub mod tensor;
 pub use activation::Activation;
 pub use autocast::{AutocastGuard, autocast, autocast_dtype, is_autocast_enabled};
 pub use device::Device;
-pub use dtype::DType;
+pub use dtype::{DType, bf16_bits_to_f32, f16_bits_to_f32, f32_to_bf16_bits, f32_to_f16_bits};
 pub use error::{Error, Result};
 pub use init::he_normal;
 pub use rng::Rng;

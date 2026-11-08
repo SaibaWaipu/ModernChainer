@@ -2,7 +2,7 @@
 
 use modern_chainer_autograd::Variable;
 use modern_chainer_autograd::ops;
-use modern_chainer_core::{Backend, Error, Result, Tensor, he_normal};
+use modern_chainer_core::{Backend, Error, Ops, Result, Tensor, he_normal};
 use modern_chainer_cpu::CpuBackend;
 
 #[derive(Clone)]
@@ -559,3 +559,274 @@ impl<B: Backend> Module<B> for Sequential<B> {
 pub use modern_chainer_autograd::ops::{
     add, div, matmul, mean, mul, neg, relu, scale, softmax_cross_entropy, sqrt, sub, sum,
 };
+
+/// RMSNorm over last dim (modern LLM norm).
+pub struct RMSNorm<B: Backend> {
+    weight: Variable<B>,
+    eps: f64,
+}
+
+impl RMSNorm<CpuBackend> {
+    pub fn new(dim: usize, eps: f64) -> Result<Self> {
+        Self::with_backend(CpuBackend::new(), dim, eps)
+    }
+}
+
+impl<B: Backend> RMSNorm<B> {
+    pub fn with_backend(backend: B, dim: usize, eps: f64) -> Result<Self> {
+        Ok(Self {
+            weight: Variable::new(Tensor::from_f32(backend, &vec![1.0; dim], [dim])?),
+            eps,
+        })
+    }
+    pub fn weight(&self) -> &Variable<B> {
+        &self.weight
+    }
+}
+
+impl<B: Backend> Module<B> for RMSNorm<B> {
+    fn forward(&self, x: &Variable<B>) -> Result<Variable<B>> {
+        ops::rms_norm(x, &self.weight, self.eps)
+    }
+    fn parameters(&self) -> Vec<Parameter<B>> {
+        vec![Parameter::new("weight", self.weight.clone())]
+    }
+}
+
+/// Dropout with externally supplied mask (training scaling 1/(1-p)).
+pub struct Dropout {
+    pub p: f64,
+    pub training: bool,
+}
+
+impl Dropout {
+    pub fn new(p: f64) -> Self {
+        if !(0.0..1.0).contains(&p) {
+            panic!("Dropout p must be in [0,1), got {p}");
+        }
+        Self { p, training: true }
+    }
+    pub fn eval(mut self) -> Self {
+        self.training = false;
+        self
+    }
+    pub fn forward<B: Backend>(&self, x: &Variable<B>, mask: &Variable<B>) -> Result<Variable<B>> {
+        if !self.training || self.p == 0.0 {
+            return Ok(x.clone());
+        }
+        ops::dropout(x, mask, self.p)
+    }
+}
+
+/// Grouped-query attention: `heads` query heads, `kv_heads` KV heads.
+pub struct GroupedQueryAttention<B: Backend> {
+    wq: Linear<B>,
+    wk: Linear<B>,
+    wv: Linear<B>,
+    wo: Linear<B>,
+    heads: usize,
+    kv_heads: usize,
+    causal: bool,
+}
+
+impl<B: Backend> GroupedQueryAttention<B> {
+    pub fn with_backend(
+        backend: B,
+        dim: usize,
+        heads: usize,
+        kv_heads: usize,
+        causal: bool,
+    ) -> Result<Self> {
+        if heads == 0 || kv_heads == 0 || !heads.is_multiple_of(kv_heads) {
+            return Err(Error::invalid("heads must be multiple of kv_heads"));
+        }
+        if !dim.is_multiple_of(heads) {
+            return Err(Error::invalid("dim must divide heads"));
+        }
+        let kv_dim = dim * kv_heads / heads;
+        Ok(Self {
+            wq: Linear::with_backend(backend.clone(), dim, dim, 1)?,
+            wk: Linear::with_backend(backend.clone(), dim, kv_dim, 2)?,
+            wv: Linear::with_backend(backend.clone(), dim, kv_dim, 3)?,
+            wo: Linear::with_backend(backend, dim, dim, 4)?,
+            heads,
+            kv_heads,
+            causal,
+        })
+    }
+    pub fn forward(&self, x: &Variable<B>) -> Result<Variable<B>> {
+        let data = x.data();
+        let dims = data.shape().dims();
+        if dims.len() != 3 {
+            return Err(Error::invalid("GQA expects [N, S, D]"));
+        }
+        let (batch, seq, dim) = (dims[0], dims[1], dims[2]);
+        let hd = dim / self.heads;
+        let flat = ops::reshape(x, [batch * seq, dim])?;
+        let q2d = self.wq.forward(&flat)?;
+        let kv_dim = dim * self.kv_heads / self.heads;
+        let k2d = self.wk.forward(&flat)?;
+        let v2d = self.wv.forward(&flat)?;
+        let group = self.heads / self.kv_heads;
+        let expand = |tensor: &Tensor<B>, kv_heads: usize| -> Result<Vec<f32>> {
+            let bytes = tensor.to_bytes()?;
+            let (chunks, _) = bytes.as_chunks::<4>();
+            let values: Vec<f32> = chunks.iter().map(|c| f32::from_ne_bytes(*c)).collect();
+            if group == 1 {
+                return Ok(values);
+            }
+            let mut out = Vec::with_capacity(batch * self.heads * seq * hd);
+            for b in 0..batch {
+                for h in 0..kv_heads {
+                    let base = (b * kv_heads + h) * seq * hd;
+                    let slice = &values[base..base + seq * hd];
+                    for _ in 0..group {
+                        out.extend_from_slice(slice);
+                    }
+                }
+            }
+            let _ = kv_dim;
+            Ok(out)
+        };
+        let dq = {
+            let bytes = q2d.data().to_bytes()?;
+            let (chunks, _) = bytes.as_chunks::<4>();
+            chunks
+                .iter()
+                .map(|c| f32::from_ne_bytes(*c))
+                .collect::<Vec<f32>>()
+        };
+        let dk = expand(&k2d.data(), self.kv_heads)?;
+        let dv = expand(&v2d.data(), self.kv_heads)?;
+        let backend = data.backend().clone();
+        let q = Tensor::from_f32(backend.clone(), &dq, [batch * self.heads, seq, hd])?;
+        let ke = Tensor::from_f32(backend.clone(), &dk, [batch * self.heads, seq, hd])?;
+        let ve = Tensor::from_f32(backend.clone(), &dv, [batch * self.heads, seq, hd])?;
+        let qv = Variable::new(q);
+        let kv_var = Variable::new(ke);
+        let vv_var = Variable::new(ve);
+        let scale = 1.0 / (hd as f64).sqrt();
+        let out = {
+            let ops = backend.ops();
+            let att = ops.attention(
+                &qv.data(),
+                &kv_var.data(),
+                &vv_var.data(),
+                scale,
+                self.causal,
+            )?;
+            Variable::new(att)
+        };
+        let flat_out = ops::reshape(&out, [batch * seq, dim])?;
+        self.wo.forward(&flat_out)
+    }
+    pub fn parameters(&self) -> Vec<Parameter<B>> {
+        let mut p = self.wq.parameters();
+        p.extend(self.wk.parameters());
+        p.extend(self.wv.parameters());
+        p.extend(self.wo.parameters());
+        p
+    }
+}
+
+/// Pre-norm transformer block: RMSNorm -> GQA/MHA -> residual -> RMSNorm -> MLP(SiLU).
+pub struct TransformerBlock<B: Backend> {
+    pub norm1: RMSNorm<B>,
+    pub norm2: RMSNorm<B>,
+    pub attn: MultiHeadAttention<B>,
+    pub w1: Linear<B>,
+    pub w2: Linear<B>,
+    pub eps: f64,
+}
+
+impl<B: Backend> TransformerBlock<B> {
+    pub fn with_backend(backend: B, dim: usize, heads: usize, eps: f64) -> Result<Self> {
+        Ok(Self {
+            norm1: RMSNorm::with_backend(backend.clone(), dim, eps)?,
+            norm2: RMSNorm::with_backend(backend.clone(), dim, eps)?,
+            attn: MultiHeadAttention::with_backend(backend.clone(), dim, heads, true)?,
+            w1: Linear::with_backend(backend.clone(), dim, 4 * dim, 11)?,
+            w2: Linear::with_backend(backend, 4 * dim, dim, 12)?,
+            eps,
+        })
+    }
+    pub fn forward(&self, x: &Variable<B>) -> Result<Variable<B>> {
+        let h = self.norm1.forward(x)?;
+        let a = self.attn.forward(&h)?;
+        let h = ops::add(x, &a)?;
+        let n = self.norm2.forward(&h)?;
+        let data = n.data();
+        let dims = data.shape().dims();
+        if dims.len() != 3 {
+            return Err(Error::invalid("TransformerBlock expects [B, T, D]"));
+        }
+        let (batch, seq, dim) = (dims[0], dims[1], dims[2]);
+        let flat = ops::reshape(&n, [batch * seq, dim])?;
+        let hidden = ops::linear_activation(
+            &flat,
+            self.w1.weight(),
+            Some(self.w1.bias().unwrap()),
+            modern_chainer_core::Activation::Silu,
+        )?;
+        let out = self.w2.forward(&hidden)?;
+        let out = ops::reshape(&out, [batch, seq, dim])?;
+        ops::add(&h, &out)
+    }
+    pub fn parameters(&self) -> Vec<Parameter<B>> {
+        let mut p = self.norm1.parameters();
+        p.extend(self.norm2.parameters());
+        p.extend(self.attn.parameters());
+        p.extend(self.w1.parameters());
+        p.extend(self.w2.parameters());
+        p
+    }
+}
+
+/// LoRA adapter: frozen base linear + trainable low-rank A/B.
+pub struct LoRA<B: Backend> {
+    base: Linear<B>,
+    a: Variable<B>,
+    b: Variable<B>,
+    alpha: f64,
+}
+
+impl<B: Backend> LoRA<B> {
+    pub fn with_backend(
+        backend: B,
+        base_in: usize,
+        base_out: usize,
+        rank: usize,
+        alpha: f64,
+        seed: u64,
+    ) -> Result<Self> {
+        if rank == 0 || rank > base_in.min(base_out) {
+            return Err(Error::invalid("LoRA rank out of range"));
+        }
+        let base = Linear::with_backend(backend.clone(), base_in, base_out, seed)?;
+        let a_data = he_normal([rank, base_in], base_in, seed + 101);
+        let a = Variable::new(Tensor::from_f32(backend.clone(), &a_data, [rank, base_in])?);
+        let b = Variable::new(Tensor::from_f32(
+            backend,
+            &vec![0.0; base_out * rank],
+            [base_out, rank],
+        )?);
+        Ok(Self { base, a, b, alpha })
+    }
+    pub fn forward(&self, x: &Variable<B>) -> Result<Variable<B>> {
+        let base = self.base.forward(x)?;
+        let scale = self.alpha;
+        let low = ops::linear(x, &self.a, None)?;
+        let delta = ops::linear(&low, &self.b, None)?;
+        let delta = ops::scale(&delta, scale)?;
+        ops::add(&base, &delta)
+    }
+    pub fn parameters(&self) -> Vec<Parameter<B>> {
+        vec![
+            Parameter::new("lora_A", self.a.clone()),
+            Parameter::new("lora_B", self.b.clone()),
+        ]
+    }
+    pub fn base_parameters(&self) -> Vec<Parameter<B>> {
+        self.base.parameters()
+    }
+}

@@ -169,7 +169,8 @@ impl VulkanOps {
         if n == 0 {
             return;
         }
-        let workgroups = (n as u64).div_ceil(256 * 4);
+        let vec4_count = (n as u64).div_ceil(4);
+        let workgroups = vec4_count.div_ceil(256);
         let x = workgroups.min(65_535) as u32;
         let y = workgroups.div_ceil(65_535) as u32;
         self.dispatch_2d(pipeline, bind_group, x, y.max(1));
@@ -235,25 +236,6 @@ impl VulkanOps {
         Ok(out)
     }
 
-    fn unary(
-        &self,
-        label: &str,
-        code: &str,
-        a: &Tensor<VulkanBackend>,
-    ) -> Result<Tensor<VulkanBackend>> {
-        let out = self.empty(a.shape(), DType::F32)?;
-        let (pipeline, layout) = self.pipeline(label, code, &[storage(0, true), storage(1, false)]);
-        let group = self.bind_group(
-            &layout,
-            &[
-                (0, a.storage().buffer.as_ref()),
-                (1, out.storage().buffer.as_ref()),
-            ],
-        );
-        self.dispatch(&pipeline, &group, out.numel());
-        Ok(out)
-    }
-
     fn unary_vec4(
         &self,
         label: &str,
@@ -270,6 +252,102 @@ impl VulkanOps {
             ],
         );
         self.dispatch_vec4(&pipeline, &group, out.numel());
+        Ok(out)
+    }
+
+    fn check_f32(&self, tensor: &Tensor<VulkanBackend>, op: &str) -> Result<()> {
+        if tensor.dtype() != DType::F32 {
+            return Err(Error::UnsupportedDType(tensor.dtype()));
+        }
+        if !tensor.is_contiguous() {
+            return Err(Error::invalid(format!("{op} requires contiguous tensor")));
+        }
+        Ok(())
+    }
+
+    fn cpu_binary(
+        &self,
+        op: &str,
+        a: &Tensor<VulkanBackend>,
+        b: &Tensor<VulkanBackend>,
+        f: impl FnOnce(&Tensor<CpuBackend>, &Tensor<CpuBackend>) -> Result<Tensor<CpuBackend>>,
+    ) -> Result<Tensor<VulkanBackend>> {
+        let ac = self.to_cpu(a)?;
+        let bc = self.to_cpu(b)?;
+        let out = f(&ac, &bc)?;
+        let _ = op;
+        self.upload(&out)
+    }
+
+    fn binary_broadcast(
+        &self,
+        label: &str,
+        a: &Tensor<VulkanBackend>,
+        b: &Tensor<VulkanBackend>,
+        cpu_f: impl FnOnce(&Tensor<CpuBackend>, &Tensor<CpuBackend>) -> Result<Tensor<CpuBackend>>,
+    ) -> Result<Tensor<VulkanBackend>> {
+        self.check_f32(a, label)?;
+        self.check_f32(b, label)?;
+        if a.shape() == b.shape() {
+            return match label {
+                "add" => self.binary_vec4("add4", shaders::ADD_VEC, a, b),
+                "sub" => self.binary_vec4("sub4", shaders::SUB_VEC, a, b),
+                "mul" => self.binary_vec4("mul4", shaders::MUL_VEC, a, b),
+                _ => self.binary_vec4("div4", shaders::DIV_VEC, a, b),
+            };
+        }
+        if a.rank() == 2 && b.rank() == 1 && b.shape().dims()[0] == a.shape().dims()[1] {
+            return self.bias_broadcast(label, a, b);
+        }
+        if b.rank() == 2 && a.rank() == 1 && a.shape().dims()[0] == b.shape().dims()[1] {
+            return self.cpu_binary(label, a, b, cpu_f);
+        }
+        if a.numel() == 1 || b.numel() == 1 {
+            return self.cpu_binary(label, a, b, cpu_f);
+        }
+        self.cpu_binary(label, a, b, cpu_f)
+    }
+
+    fn bias_broadcast(
+        &self,
+        label: &str,
+        a: &Tensor<VulkanBackend>,
+        b: &Tensor<VulkanBackend>,
+    ) -> Result<Tensor<VulkanBackend>> {
+        let out = self.empty(a.shape(), DType::F32)?;
+        let params = self.uniform(&(b.shape().dims()[0] as u32).to_ne_bytes());
+        let (code, lbl) = match label {
+            "add" => (shaders::BIAS_ADD, "bias_add"),
+            "sub" => {
+                return self.cpu_binary(label, a, b, |x, y| CpuBackend::new().ops().sub(x, y));
+            }
+            "mul" => {
+                return self.cpu_binary(label, a, b, |x, y| CpuBackend::new().ops().mul(x, y));
+            }
+            _ => {
+                return self.cpu_binary(label, a, b, |x, y| CpuBackend::new().ops().div(x, y));
+            }
+        };
+        let (pipeline, layout) = self.pipeline(
+            lbl,
+            code,
+            &[
+                storage(0, true),
+                storage(1, true),
+                storage(2, false),
+                uniform(3),
+            ],
+        );
+        let group = self.bind_group(
+            &layout,
+            &[
+                (0, a.storage().buffer.as_ref()),
+                (1, b.storage().buffer.as_ref()),
+                (2, out.storage().buffer.as_ref()),
+                (3, &params),
+            ],
+        );
+        self.dispatch(&pipeline, &group, out.numel());
         Ok(out)
     }
 
@@ -333,35 +411,7 @@ impl Ops<VulkanBackend> for VulkanOps {
         a: &Tensor<VulkanBackend>,
         b: &Tensor<VulkanBackend>,
     ) -> Result<Tensor<VulkanBackend>> {
-        if a.shape() == b.shape() {
-            return self.binary_vec4("add4", shaders::ADD_VEC, a, b);
-        }
-        if a.rank() == 2 && b.rank() == 1 && b.shape().dims()[0] == a.shape().dims()[1] {
-            let out = self.empty(a.shape(), DType::F32)?;
-            let params = self.uniform(&(b.shape().dims()[0] as u32).to_ne_bytes());
-            let (pipeline, layout) = self.pipeline(
-                "bias_add",
-                shaders::BIAS_ADD,
-                &[
-                    storage(0, true),
-                    storage(1, true),
-                    storage(2, false),
-                    uniform(3),
-                ],
-            );
-            let group = self.bind_group(
-                &layout,
-                &[
-                    (0, a.storage().buffer.as_ref()),
-                    (1, b.storage().buffer.as_ref()),
-                    (2, out.storage().buffer.as_ref()),
-                    (3, &params),
-                ],
-            );
-            self.dispatch(&pipeline, &group, out.numel());
-            return Ok(out);
-        }
-        Err(Error::unsupported("vulkan add with this broadcast pattern"))
+        self.binary_broadcast("add", a, b, |x, y| CpuBackend::new().ops().add(x, y))
     }
 
     fn sub(
@@ -369,7 +419,7 @@ impl Ops<VulkanBackend> for VulkanOps {
         a: &Tensor<VulkanBackend>,
         b: &Tensor<VulkanBackend>,
     ) -> Result<Tensor<VulkanBackend>> {
-        self.binary_vec4("sub4", shaders::SUB_VEC, a, b)
+        self.binary_broadcast("sub", a, b, |x, y| CpuBackend::new().ops().sub(x, y))
     }
 
     fn mul(
@@ -377,7 +427,7 @@ impl Ops<VulkanBackend> for VulkanOps {
         a: &Tensor<VulkanBackend>,
         b: &Tensor<VulkanBackend>,
     ) -> Result<Tensor<VulkanBackend>> {
-        self.binary_vec4("mul4", shaders::MUL_VEC, a, b)
+        self.binary_broadcast("mul", a, b, |x, y| CpuBackend::new().ops().mul(x, y))
     }
 
     fn div(
@@ -385,14 +435,31 @@ impl Ops<VulkanBackend> for VulkanOps {
         a: &Tensor<VulkanBackend>,
         b: &Tensor<VulkanBackend>,
     ) -> Result<Tensor<VulkanBackend>> {
-        self.binary_vec4("div4", shaders::DIV_VEC, a, b)
+        self.binary_broadcast("div", a, b, |x, y| CpuBackend::new().ops().div(x, y))
+    }
+
+    fn exp(&self, a: &Tensor<VulkanBackend>) -> Result<Tensor<VulkanBackend>> {
+        self.check_f32(a, "exp")?;
+        self.unary_vec4("exp4", shaders::EXP4, a)
+    }
+
+    fn log(&self, a: &Tensor<VulkanBackend>) -> Result<Tensor<VulkanBackend>> {
+        self.check_f32(a, "log")?;
+        self.unary_vec4("log4", shaders::LOG4, a)
+    }
+
+    fn sigmoid(&self, a: &Tensor<VulkanBackend>) -> Result<Tensor<VulkanBackend>> {
+        self.check_f32(a, "sigmoid")?;
+        self.unary_vec4("sigmoid4", shaders::SIGMOID4, a)
     }
 
     fn sqrt(&self, a: &Tensor<VulkanBackend>) -> Result<Tensor<VulkanBackend>> {
+        self.check_f32(a, "sqrt")?;
         self.unary_vec4("sqrt4", shaders::SQRT4, a)
     }
 
     fn relu(&self, a: &Tensor<VulkanBackend>) -> Result<Tensor<VulkanBackend>> {
+        self.check_f32(a, "relu")?;
         self.unary_vec4("relu4", shaders::RELU4, a)
     }
 
@@ -408,10 +475,12 @@ impl Ops<VulkanBackend> for VulkanOps {
                 grad.shape().clone(),
             ));
         }
+        self.check_f32(x, "relu_backward")?;
+        self.check_f32(grad, "relu_backward")?;
         let out = self.empty(x.shape(), DType::F32)?;
         let (pipeline, layout) = self.pipeline(
-            "relu_backward",
-            shaders::RELU_BACKWARD,
+            "relu_backward4",
+            shaders::RELU_BACKWARD4,
             &[storage(0, true), storage(1, true), storage(2, false)],
         );
         let group = self.bind_group(
@@ -422,7 +491,7 @@ impl Ops<VulkanBackend> for VulkanOps {
                 (2, out.storage().buffer.as_ref()),
             ],
         );
-        self.dispatch(&pipeline, &group, out.numel());
+        self.dispatch_vec4(&pipeline, &group, out.numel());
         Ok(out)
     }
 
@@ -431,6 +500,8 @@ impl Ops<VulkanBackend> for VulkanOps {
         a: &Tensor<VulkanBackend>,
         b: &Tensor<VulkanBackend>,
     ) -> Result<Tensor<VulkanBackend>> {
+        self.check_f32(a, "matmul")?;
+        self.check_f32(b, "matmul")?;
         if a.rank() != 2 || b.rank() != 2 {
             return Err(Error::invalid("vulkan matmul expects 2-D tensors"));
         }
@@ -442,6 +513,9 @@ impl Ops<VulkanBackend> for VulkanOps {
                 a.shape().clone(),
                 b.shape().clone(),
             ));
+        }
+        if m == 0 || n == 0 || k == 0 {
+            return self.empty(&Shape::new([m, n]), DType::F32);
         }
         self.matmul_with(a, b, m, k, n, false)
     }
@@ -588,11 +662,106 @@ impl Ops<VulkanBackend> for VulkanOps {
     }
 
     fn silu(&self, a: &Tensor<VulkanBackend>) -> Result<Tensor<VulkanBackend>> {
-        self.unary("silu", shaders::SILU, a)
+        self.check_f32(a, "silu")?;
+        self.unary_vec4("silu4", shaders::SILU4, a)
     }
 
     fn gelu(&self, a: &Tensor<VulkanBackend>) -> Result<Tensor<VulkanBackend>> {
-        self.unary("gelu", shaders::GELU, a)
+        self.check_f32(a, "gelu")?;
+        self.unary_vec4("gelu4", shaders::GELU4, a)
+    }
+
+    fn linear_activation(
+        &self,
+        x: &Tensor<VulkanBackend>,
+        weight: &Tensor<VulkanBackend>,
+        bias: Option<&Tensor<VulkanBackend>>,
+        activation: modern_chainer_core::Activation,
+    ) -> Result<Tensor<VulkanBackend>> {
+        self.check_f32(x, "linear_activation")?;
+        self.check_f32(weight, "linear_activation")?;
+        if let Some(b) = bias {
+            self.check_f32(b, "linear_activation")?;
+        }
+        if x.rank() != 2 || weight.rank() != 2 {
+            return Err(Error::invalid("linear_activation expects 2-D tensors"));
+        }
+        let (batch, in_features) = (x.shape().dims()[0], x.shape().dims()[1]);
+        let (out_features, k2) = (weight.shape().dims()[0], weight.shape().dims()[1]);
+        if in_features != k2 {
+            return Err(Error::shape_mismatch(
+                "linear_activation inner",
+                x.shape().clone(),
+                weight.shape().clone(),
+            ));
+        }
+        if batch == 0 || out_features == 0 || in_features == 0 {
+            return self.empty(&Shape::new([batch, out_features]), DType::F32);
+        }
+        if let Some(b) = bias {
+            let small = batch <= 128;
+            let (label, code) = match (small, activation) {
+                (true, modern_chainer_core::Activation::Silu) => (
+                    "matmul_nt_small_bias_silu",
+                    shaders::MATMUL_NT_SMALL_BIAS_SILU,
+                ),
+                (true, modern_chainer_core::Activation::Gelu) => (
+                    "matmul_nt_small_bias_gelu",
+                    shaders::MATMUL_NT_SMALL_BIAS_GELU,
+                ),
+                (false, modern_chainer_core::Activation::Silu) => {
+                    ("matmul_nt_bias_silu", shaders::MATMUL_NT_BIAS_SILU)
+                }
+                (false, modern_chainer_core::Activation::Gelu) => {
+                    ("matmul_nt_bias_gelu", shaders::MATMUL_NT_BIAS_GELU)
+                }
+                (false, modern_chainer_core::Activation::Relu) => {
+                    ("matmul_nt_bias_relu", shaders::MATMUL_NT_BIAS_RELU)
+                }
+                (true, modern_chainer_core::Activation::Relu) => {
+                    let y = self.linear(x, weight, Some(b))?;
+                    return self.relu(&y);
+                }
+            };
+            let out = self.empty(&Shape::new([batch, out_features]), DType::F32)?;
+            let mut params = Vec::with_capacity(16);
+            for v in [batch as u32, in_features as u32, out_features as u32, 0] {
+                params.extend_from_slice(&v.to_ne_bytes());
+            }
+            let dims = self.uniform_unique(&params);
+            let (pipeline, layout) = self.pipeline(
+                label,
+                code,
+                &[
+                    storage(0, true),
+                    storage(1, true),
+                    storage(2, false),
+                    storage(3, true),
+                    uniform(4),
+                ],
+            );
+            let group = self.bind_group(
+                &layout,
+                &[
+                    (0, x.storage().buffer.as_ref()),
+                    (1, weight.storage().buffer.as_ref()),
+                    (2, out.storage().buffer.as_ref()),
+                    (3, b.storage().buffer.as_ref()),
+                    (4, &dims),
+                ],
+            );
+            let tile = if small { 16u64 } else { 32u64 };
+            let px = (out_features as u64).div_ceil(tile).min(65_535) as u32;
+            let py = (batch as u64).div_ceil(tile).min(65_535) as u32;
+            self.dispatch_2d(&pipeline, &group, px.max(1), py.max(1));
+            return Ok(out);
+        }
+        let y = self.linear(x, weight, None)?;
+        match activation {
+            modern_chainer_core::Activation::Relu => self.relu(&y),
+            modern_chainer_core::Activation::Gelu => self.gelu(&y),
+            modern_chainer_core::Activation::Silu => self.silu(&y),
+        }
     }
 
     fn scale(&self, a: &Tensor<VulkanBackend>, factor: f64) -> Result<Tensor<VulkanBackend>> {
@@ -1098,6 +1267,219 @@ impl Ops<VulkanBackend> for VulkanOps {
         );
         self.dispatch_2d(&pipeline, &group, rows as u32, 1);
         Ok(grad)
+    }
+
+    fn split_heads(
+        &self,
+        x: &Tensor<VulkanBackend>,
+        heads: usize,
+        head_dim: usize,
+    ) -> Result<Tensor<VulkanBackend>> {
+        let xc = self.to_cpu(x)?;
+        self.upload(&CpuBackend::new().ops().split_heads(&xc, heads, head_dim)?)
+    }
+
+    fn merge_heads(
+        &self,
+        x: &Tensor<VulkanBackend>,
+        heads: usize,
+    ) -> Result<Tensor<VulkanBackend>> {
+        let xc = self.to_cpu(x)?;
+        self.upload(&CpuBackend::new().ops().merge_heads(&xc, heads)?)
+    }
+
+    fn attention(
+        &self,
+        q: &Tensor<VulkanBackend>,
+        k: &Tensor<VulkanBackend>,
+        v: &Tensor<VulkanBackend>,
+        scale: f64,
+        causal: bool,
+    ) -> Result<Tensor<VulkanBackend>> {
+        let qc = self.to_cpu(q)?;
+        let kc = self.to_cpu(k)?;
+        let vc = self.to_cpu(v)?;
+        self.upload(
+            &CpuBackend::new()
+                .ops()
+                .attention(&qc, &kc, &vc, scale, causal)?,
+        )
+    }
+
+    fn concat_seq(
+        &self,
+        a: &Tensor<VulkanBackend>,
+        b: &Tensor<VulkanBackend>,
+    ) -> Result<Tensor<VulkanBackend>> {
+        let ac = self.to_cpu(a)?;
+        let bc = self.to_cpu(b)?;
+        self.upload(&CpuBackend::new().ops().concat_seq(&ac, &bc)?)
+    }
+
+    fn last_row(&self, x: &Tensor<VulkanBackend>) -> Result<Tensor<VulkanBackend>> {
+        let xc = self.to_cpu(x)?;
+        self.upload(&CpuBackend::new().ops().last_row(&xc)?)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn paged_attention(
+        &self,
+        q: &Tensor<VulkanBackend>,
+        k_blocks: &Tensor<VulkanBackend>,
+        v_blocks: &Tensor<VulkanBackend>,
+        block_table: &Tensor<VulkanBackend>,
+        seq_len: usize,
+        scale: f64,
+        causal: bool,
+    ) -> Result<Tensor<VulkanBackend>> {
+        let qc = self.to_cpu(q)?;
+        let kc = self.to_cpu(k_blocks)?;
+        let vc = self.to_cpu(v_blocks)?;
+        let tc = self.to_cpu(block_table)?;
+        self.upload(
+            &CpuBackend::new()
+                .ops()
+                .paged_attention(&qc, &kc, &vc, &tc, seq_len, scale, causal)?,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn paged_append(
+        &self,
+        k_blocks: &Tensor<VulkanBackend>,
+        v_blocks: &Tensor<VulkanBackend>,
+        block_table: &Tensor<VulkanBackend>,
+        len: usize,
+        k_new: &Tensor<VulkanBackend>,
+        v_new: &Tensor<VulkanBackend>,
+    ) -> Result<(Tensor<VulkanBackend>, Tensor<VulkanBackend>)> {
+        let kc = self.to_cpu(k_blocks)?;
+        let vc = self.to_cpu(v_blocks)?;
+        let tc = self.to_cpu(block_table)?;
+        let knc = self.to_cpu(k_new)?;
+        let vnc = self.to_cpu(v_new)?;
+        let (nk, nv) = CpuBackend::new()
+            .ops()
+            .paged_append(&kc, &vc, &tc, len, &knc, &vnc)?;
+        Ok((self.upload(&nk)?, self.upload(&nv)?))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn paged_attention_batch(
+        &self,
+        q: &Tensor<VulkanBackend>,
+        k_blocks: &Tensor<VulkanBackend>,
+        v_blocks: &Tensor<VulkanBackend>,
+        block_tables: &Tensor<VulkanBackend>,
+        seq_lens: &Tensor<VulkanBackend>,
+        scale: f64,
+        causal: bool,
+    ) -> Result<Tensor<VulkanBackend>> {
+        let qc = self.to_cpu(q)?;
+        let kc = self.to_cpu(k_blocks)?;
+        let vc = self.to_cpu(v_blocks)?;
+        let tc = self.to_cpu(block_tables)?;
+        let sc = self.to_cpu(seq_lens)?;
+        self.upload(
+            &CpuBackend::new()
+                .ops()
+                .paged_attention_batch(&qc, &kc, &vc, &tc, &sc, scale, causal)?,
+        )
+    }
+
+    fn rms_norm(
+        &self,
+        x: &Tensor<VulkanBackend>,
+        weight: &Tensor<VulkanBackend>,
+        eps: f64,
+    ) -> Result<Tensor<VulkanBackend>> {
+        let xc = self.to_cpu(x)?;
+        let wc = self.to_cpu(weight)?;
+        self.upload(&CpuBackend::new().ops().rms_norm(&xc, &wc, eps)?)
+    }
+
+    fn rms_norm_backward(
+        &self,
+        x: &Tensor<VulkanBackend>,
+        weight: &Tensor<VulkanBackend>,
+        grad: &Tensor<VulkanBackend>,
+        eps: f64,
+    ) -> Result<(Tensor<VulkanBackend>, Tensor<VulkanBackend>)> {
+        let xc = self.to_cpu(x)?;
+        let wc = self.to_cpu(weight)?;
+        let gc = self.to_cpu(grad)?;
+        let (dx, dw) = CpuBackend::new()
+            .ops()
+            .rms_norm_backward(&xc, &wc, &gc, eps)?;
+        Ok((self.upload(&dx)?, self.upload(&dw)?))
+    }
+
+    fn clamp(
+        &self,
+        x: &Tensor<VulkanBackend>,
+        min: f64,
+        max: f64,
+    ) -> Result<Tensor<VulkanBackend>> {
+        self.check_f32(x, "clamp")?;
+        let out = self.empty(x.shape(), DType::F32)?;
+        let mut raw = Vec::with_capacity(16);
+        raw.extend_from_slice(&(min as f32).to_ne_bytes());
+        raw.extend_from_slice(&(max as f32).to_ne_bytes());
+        raw.extend_from_slice(&[0u8; 8]);
+        let params = self.uniform(&raw);
+        let (pipeline, layout) = self.pipeline(
+            "clamp4",
+            shaders::CLAMP4,
+            &[storage(0, true), storage(1, false), uniform(2)],
+        );
+        let group = self.bind_group(
+            &layout,
+            &[
+                (0, x.storage().buffer.as_ref()),
+                (1, out.storage().buffer.as_ref()),
+                (2, &params),
+            ],
+        );
+        self.dispatch_vec4(&pipeline, &group, out.numel());
+        Ok(out)
+    }
+
+    fn abs(&self, x: &Tensor<VulkanBackend>) -> Result<Tensor<VulkanBackend>> {
+        self.check_f32(x, "abs")?;
+        self.unary_vec4("abs4", shaders::ABS4, x)
+    }
+
+    fn apply_rope(
+        &self,
+        q: &Tensor<VulkanBackend>,
+        k: &Tensor<VulkanBackend>,
+        positions: &Tensor<VulkanBackend>,
+        theta: f64,
+        interleaved: bool,
+    ) -> Result<(Tensor<VulkanBackend>, Tensor<VulkanBackend>)> {
+        let qc = self.to_cpu(q)?;
+        let kc = self.to_cpu(k)?;
+        let pc = self.to_cpu(positions)?;
+        let (rq, rk) = CpuBackend::new()
+            .ops()
+            .apply_rope(&qc, &kc, &pc, theta, interleaved)?;
+        Ok((self.upload(&rq)?, self.upload(&rk)?))
+    }
+
+    fn cast(&self, x: &Tensor<VulkanBackend>, dtype: DType) -> Result<Tensor<VulkanBackend>> {
+        let xc = self.to_cpu(x)?;
+        self.upload(&CpuBackend::new().ops().cast(&xc, dtype)?)
+    }
+
+    fn dropout(
+        &self,
+        x: &Tensor<VulkanBackend>,
+        mask: &Tensor<VulkanBackend>,
+        p: f64,
+    ) -> Result<Tensor<VulkanBackend>> {
+        let xc = self.to_cpu(x)?;
+        let mc = self.to_cpu(mask)?;
+        self.upload(&CpuBackend::new().ops().dropout(&xc, &mc, p)?)
     }
 }
 

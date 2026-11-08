@@ -609,3 +609,437 @@ pub fn embedding<B: Backend>(ids: &Variable<B>, weight: &Variable<B>) -> Result<
     let mut out = apply(Embedding, &[ids.clone(), weight.clone()])?;
     Ok(out.remove(0))
 }
+
+pub struct Silu;
+
+impl<B: Backend> Op<B> for Silu {
+    const NAME: &'static str = "SiLU";
+    fn forward(&self, inputs: &[&Tensor<B>]) -> Result<Vec<Tensor<B>>> {
+        check_arity(inputs, 1, "SiLU")?;
+        Ok(vec![inputs[0].backend().ops().silu(inputs[0])?])
+    }
+    fn backward(
+        &self,
+        grad: &Tensor<B>,
+        inputs: &[&Tensor<B>],
+        _outputs: &[&Tensor<B>],
+    ) -> Result<Vec<Option<Tensor<B>>>> {
+        let ops = grad.backend().ops();
+        let sig = ops.sigmoid(inputs[0])?;
+        let one = ops.ones_like(inputs[0])?;
+        let inv = ops.sub(&one, &sig)?;
+        let ds = ops.mul(&sig, &inv)?;
+        let x_ds = ops.mul(inputs[0], &ds)?;
+        let local = ops.add(&sig, &x_ds)?;
+        Ok(vec![Some(ops.mul(grad, &local)?)])
+    }
+}
+
+pub struct Gelu;
+
+impl<B: Backend> Op<B> for Gelu {
+    const NAME: &'static str = "GELU";
+    fn forward(&self, inputs: &[&Tensor<B>]) -> Result<Vec<Tensor<B>>> {
+        check_arity(inputs, 1, "GELU")?;
+        Ok(vec![inputs[0].backend().ops().gelu(inputs[0])?])
+    }
+    fn backward(
+        &self,
+        grad: &Tensor<B>,
+        inputs: &[&Tensor<B>],
+        _outputs: &[&Tensor<B>],
+    ) -> Result<Vec<Option<Tensor<B>>>> {
+        let ops = grad.backend().ops();
+        let x = inputs[0];
+        let xx = ops.mul(x, x)?;
+        let x3 = ops.mul(&xx, x)?;
+        let inner = ops.add(x, &ops.scale(&x3, 0.044715)?)?;
+        let c = ops.scale(&inner, (2.0 / std::f64::consts::PI).sqrt())?;
+        let tanh = {
+            let e2 = ops.exp(&ops.scale(&c, -2.0)?)?;
+            let denom = ops.add(&ops.ones_like(&c)?, &e2)?;
+            let numer = ops.sub(&ops.ones_like(&c)?, &e2)?;
+            ops.div(&numer, &denom)?
+        };
+        let phi = ops.scale(&ops.add(&ops.ones_like(&c)?, &tanh)?, 0.5)?;
+        let dphi_dc = {
+            let sech = ops.sub(&ops.ones_like(&c)?, &ops.mul(&tanh, &tanh)?)?;
+            ops.scale(&sech, 0.5)?
+        };
+        let three_x = ops.scale(x, 3.0)?;
+        let three_xx = ops.mul(&three_x, x)?;
+        let d_inner = ops.add(&ops.ones_like(x)?, &ops.scale(&three_xx, 0.044715)?)?;
+        let coeff = ops.scale(&d_inner, (2.0 / std::f64::consts::PI).sqrt())?;
+        let x_dphi = ops.mul(x, &dphi_dc)?;
+        let local = ops.add(&phi, &ops.mul(&x_dphi, &coeff)?)?;
+        Ok(vec![Some(ops.mul(grad, &local)?)])
+    }
+}
+
+pub struct RmsNorm {
+    eps: f64,
+}
+
+impl RmsNorm {
+    pub fn new(eps: f64) -> Self {
+        Self { eps }
+    }
+}
+
+impl<B: Backend> Op<B> for RmsNorm {
+    const NAME: &'static str = "RMSNorm";
+    fn forward(&self, inputs: &[&Tensor<B>]) -> Result<Vec<Tensor<B>>> {
+        check_arity(inputs, 2, "RMSNorm")?;
+        Ok(vec![
+            inputs[0]
+                .backend()
+                .ops()
+                .rms_norm(inputs[0], inputs[1], self.eps)?,
+        ])
+    }
+    fn backward(
+        &self,
+        grad: &Tensor<B>,
+        inputs: &[&Tensor<B>],
+        _outputs: &[&Tensor<B>],
+    ) -> Result<Vec<Option<Tensor<B>>>> {
+        let (dx, dw) = grad
+            .backend()
+            .ops()
+            .rms_norm_backward(inputs[0], inputs[1], grad, self.eps)?;
+        Ok(vec![Some(dx), Some(dw)])
+    }
+}
+
+pub struct Clamp {
+    min: f64,
+    max: f64,
+}
+
+impl<B: Backend> Op<B> for Clamp {
+    const NAME: &'static str = "Clamp";
+    fn forward(&self, inputs: &[&Tensor<B>]) -> Result<Vec<Tensor<B>>> {
+        check_arity(inputs, 1, "Clamp")?;
+        Ok(vec![
+            inputs[0]
+                .backend()
+                .ops()
+                .clamp(inputs[0], self.min, self.max)?,
+        ])
+    }
+    fn backward(
+        &self,
+        grad: &Tensor<B>,
+        inputs: &[&Tensor<B>],
+        _outputs: &[&Tensor<B>],
+    ) -> Result<Vec<Option<Tensor<B>>>> {
+        let ops = grad.backend().ops();
+        let x = inputs[0];
+        let bytes = x.to_bytes()?;
+        let (chunks, _) = bytes.as_chunks::<4>();
+        let mask: Vec<f32> = chunks
+            .iter()
+            .map(|c| {
+                let v = f32::from_ne_bytes(*c) as f64;
+                if v >= self.min && v <= self.max {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let mask = Tensor::from_f32(x.backend().clone(), &mask, x.shape().clone())?;
+        Ok(vec![Some(ops.mul(grad, &mask)?)])
+    }
+}
+
+pub struct Abs;
+
+impl<B: Backend> Op<B> for Abs {
+    const NAME: &'static str = "Abs";
+    fn forward(&self, inputs: &[&Tensor<B>]) -> Result<Vec<Tensor<B>>> {
+        check_arity(inputs, 1, "Abs")?;
+        Ok(vec![inputs[0].backend().ops().abs(inputs[0])?])
+    }
+    fn backward(
+        &self,
+        grad: &Tensor<B>,
+        inputs: &[&Tensor<B>],
+        _outputs: &[&Tensor<B>],
+    ) -> Result<Vec<Option<Tensor<B>>>> {
+        let ops = grad.backend().ops();
+        let x = inputs[0];
+        let sign = {
+            let bytes = x.to_bytes()?;
+            let (chunks, _) = bytes.as_chunks::<4>();
+            let mask: Vec<f32> = chunks
+                .iter()
+                .map(|c| {
+                    let v = f32::from_ne_bytes(*c);
+                    if v > 0.0 {
+                        1.0
+                    } else if v < 0.0 {
+                        -1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            Tensor::from_f32(x.backend().clone(), &mask, x.shape().clone())?
+        };
+        Ok(vec![Some(ops.mul(grad, &sign)?)])
+    }
+}
+
+pub struct Rope {
+    theta: f64,
+    interleaved: bool,
+}
+
+impl Rope {
+    pub fn new(theta: f64, interleaved: bool) -> Self {
+        Self { theta, interleaved }
+    }
+}
+
+impl<B: Backend> Op<B> for Rope {
+    const NAME: &'static str = "RoPE";
+    fn forward(&self, inputs: &[&Tensor<B>]) -> Result<Vec<Tensor<B>>> {
+        check_arity(inputs, 3, "RoPE")?;
+        let (q, k) = inputs[0].backend().ops().apply_rope(
+            inputs[0],
+            inputs[1],
+            inputs[2],
+            self.theta,
+            self.interleaved,
+        )?;
+        Ok(vec![q, k])
+    }
+    fn backward(
+        &self,
+        _grad: &Tensor<B>,
+        _inputs: &[&Tensor<B>],
+        _outputs: &[&Tensor<B>],
+    ) -> Result<Vec<Option<Tensor<B>>>> {
+        Ok(vec![None, None, None])
+    }
+}
+
+pub struct Cast {
+    dtype: modern_chainer_core::DType,
+}
+
+impl Cast {
+    pub fn new(dtype: modern_chainer_core::DType) -> Self {
+        Self { dtype }
+    }
+}
+
+impl<B: Backend> Op<B> for Cast {
+    const NAME: &'static str = "Cast";
+    fn forward(&self, inputs: &[&Tensor<B>]) -> Result<Vec<Tensor<B>>> {
+        check_arity(inputs, 1, "Cast")?;
+        Ok(vec![inputs[0].backend().ops().cast(inputs[0], self.dtype)?])
+    }
+    fn backward(
+        &self,
+        grad: &Tensor<B>,
+        _inputs: &[&Tensor<B>],
+        _outputs: &[&Tensor<B>],
+    ) -> Result<Vec<Option<Tensor<B>>>> {
+        Ok(vec![Some(grad.clone())])
+    }
+}
+
+pub struct Dropout {
+    p: f64,
+}
+
+impl Dropout {
+    pub fn new(p: f64) -> Self {
+        Self { p }
+    }
+}
+
+impl<B: Backend> Op<B> for Dropout {
+    const NAME: &'static str = "Dropout";
+    fn forward(&self, inputs: &[&Tensor<B>]) -> Result<Vec<Tensor<B>>> {
+        check_arity(inputs, 2, "Dropout")?;
+        Ok(vec![
+            inputs[0]
+                .backend()
+                .ops()
+                .dropout(inputs[0], inputs[1], self.p)?,
+        ])
+    }
+    fn backward(
+        &self,
+        grad: &Tensor<B>,
+        inputs: &[&Tensor<B>],
+        _outputs: &[&Tensor<B>],
+    ) -> Result<Vec<Option<Tensor<B>>>> {
+        let ops = grad.backend().ops();
+        let scale = 1.0 / (1.0 - self.p);
+        let g = ops.mul(grad, inputs[1])?;
+        Ok(vec![Some(ops.scale(&g, scale)?), None])
+    }
+}
+
+pub fn silu<B: Backend>(x: &Variable<B>) -> Result<Variable<B>> {
+    apply1(Silu, x)
+}
+
+pub fn gelu<B: Backend>(x: &Variable<B>) -> Result<Variable<B>> {
+    apply1(Gelu, x)
+}
+
+pub fn rms_norm<B: Backend>(
+    x: &Variable<B>,
+    weight: &Variable<B>,
+    eps: f64,
+) -> Result<Variable<B>> {
+    let mut out = apply(RmsNorm::new(eps), &[x.clone(), weight.clone()])?;
+    Ok(out.remove(0))
+}
+
+pub fn clamp<B: Backend>(x: &Variable<B>, min: f64, max: f64) -> Result<Variable<B>> {
+    apply1(Clamp { min, max }, x)
+}
+
+pub fn abs<B: Backend>(x: &Variable<B>) -> Result<Variable<B>> {
+    apply1(Abs, x)
+}
+
+pub fn apply_rope<B: Backend>(
+    q: &Variable<B>,
+    k: &Variable<B>,
+    positions: &Variable<B>,
+    theta: f64,
+    interleaved: bool,
+) -> Result<(Variable<B>, Variable<B>)> {
+    let out = apply(
+        Rope::new(theta, interleaved),
+        &[q.clone(), k.clone(), positions.clone()],
+    )?;
+    Ok((out[0].clone(), out[1].clone()))
+}
+
+pub fn cast<B: Backend>(x: &Variable<B>, dtype: modern_chainer_core::DType) -> Result<Variable<B>> {
+    apply1(Cast::new(dtype), x)
+}
+
+pub fn dropout<B: Backend>(x: &Variable<B>, mask: &Variable<B>, p: f64) -> Result<Variable<B>> {
+    let mut out = apply(Dropout::new(p), &[x.clone(), mask.clone()])?;
+    Ok(out.remove(0))
+}
+
+pub fn linear_activation<B: Backend>(
+    x: &Variable<B>,
+    weight: &Variable<B>,
+    bias: Option<&Variable<B>>,
+    activation: modern_chainer_core::Activation,
+) -> Result<Variable<B>> {
+    struct LinearActOp {
+        activation: modern_chainer_core::Activation,
+    }
+    impl<B: Backend> Op<B> for LinearActOp {
+        const NAME: &'static str = "LinearActivation";
+        fn forward(&self, inputs: &[&Tensor<B>]) -> Result<Vec<Tensor<B>>> {
+            if inputs.len() != 2 && inputs.len() != 3 {
+                return Err(modern_chainer_core::Error::invalid(
+                    "linear_activation expects (x, weight[, bias])",
+                ));
+            }
+            let bias = inputs.get(2).copied();
+            Ok(vec![inputs[0].backend().ops().linear_activation(
+                inputs[0],
+                inputs[1],
+                bias,
+                self.activation,
+            )?])
+        }
+        fn backward(
+            &self,
+            grad: &Tensor<B>,
+            inputs: &[&Tensor<B>],
+            outputs: &[&Tensor<B>],
+        ) -> Result<Vec<Option<Tensor<B>>>> {
+            let ops = grad.backend().ops();
+            let pre = ops.linear(inputs[0], inputs[1], inputs.get(2).copied())?;
+            let _ = outputs;
+            let dy = match self.activation {
+                modern_chainer_core::Activation::Relu => ops.relu(&pre)?,
+                modern_chainer_core::Activation::Gelu => ops.gelu(&pre)?,
+                modern_chainer_core::Activation::Silu => ops.silu(&pre)?,
+            };
+            let _ = dy;
+            let grad_pre = match self.activation {
+                modern_chainer_core::Activation::Relu => {
+                    let mask = ops.relu_backward(&pre, &ops.ones_like(grad)?)?;
+                    let _ = mask;
+                    let bytes = pre.to_bytes()?;
+                    let (chunks, _) = bytes.as_chunks::<4>();
+                    let m: Vec<f32> = chunks
+                        .iter()
+                        .map(|c| {
+                            if f32::from_ne_bytes(*c) > 0.0 {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        })
+                        .collect();
+                    let t = Tensor::from_f32(pre.backend().clone(), &m, pre.shape().clone())?;
+                    ops.mul(grad, &t)?
+                }
+                modern_chainer_core::Activation::Gelu => {
+                    let x = &pre;
+                    let xx = ops.mul(x, x)?;
+                    let x3 = ops.mul(&xx, x)?;
+                    let inner = ops.add(x, &ops.scale(&x3, 0.044715)?)?;
+                    let c = ops.scale(&inner, (2.0 / std::f64::consts::PI).sqrt())?;
+                    let e2 = ops.exp(&ops.scale(&c, -2.0)?)?;
+                    let denom = ops.add(&ops.ones_like(&c)?, &e2)?;
+                    let numer = ops.sub(&ops.ones_like(&c)?, &e2)?;
+                    let tanh = ops.div(&numer, &denom)?;
+                    let phi = ops.scale(&ops.add(&ops.ones_like(&c)?, &tanh)?, 0.5)?;
+                    let sech = ops.sub(&ops.ones_like(&c)?, &ops.mul(&tanh, &tanh)?)?;
+                    let dphi_dc = ops.scale(&sech, 0.5)?;
+                    let three_x = ops.scale(x, 3.0)?;
+                    let three_xx = ops.mul(&three_x, x)?;
+                    let d_inner = ops.add(&ops.ones_like(x)?, &ops.scale(&three_xx, 0.044715)?)?;
+                    let coeff = ops.scale(&d_inner, (2.0 / std::f64::consts::PI).sqrt())?;
+                    let x_dphi = ops.mul(x, &dphi_dc)?;
+                    let local = ops.add(&phi, &ops.mul(&x_dphi, &coeff)?)?;
+                    ops.mul(grad, &local)?
+                }
+                modern_chainer_core::Activation::Silu => {
+                    let sig = ops.sigmoid(&pre)?;
+                    let inv = ops.sub(&ops.ones_like(&pre)?, &sig)?;
+                    let ds = ops.mul(&sig, &inv)?;
+                    let x_ds = ops.mul(&pre, &ds)?;
+                    let local = ops.add(&sig, &x_ds)?;
+                    ops.mul(grad, &local)?
+                }
+            };
+            if inputs.len() == 3 {
+                let (gx, gw, gb) = ops.linear_backward_with_bias(
+                    &grad_pre,
+                    inputs[0],
+                    inputs[1],
+                    inputs[2].shape(),
+                )?;
+                Ok(vec![Some(gx), Some(gw), Some(gb)])
+            } else {
+                let (gx, gw) = ops.linear_backward(&grad_pre, inputs[0], inputs[1])?;
+                Ok(vec![Some(gx), Some(gw)])
+            }
+        }
+    }
+    let mut inputs = vec![x.clone(), weight.clone()];
+    if let Some(bias) = bias {
+        inputs.push(bias.clone());
+    }
+    let mut out = apply(LinearActOp { activation }, &inputs)?;
+    Ok(out.remove(0))
+}

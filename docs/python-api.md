@@ -26,6 +26,8 @@ VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release
 | `Tensor.to(device)` | copy to `cpu`, `cuda[:n]` or `vulkan[:n]` |
 | `.shape`, `.dtype`, `.device`, `.ndim`, `.numel()` | metadata |
 | `.tolist()` | flat Python floats |
+| `.astype(dtype)` | cast to `f32/f64/f16/bf16/i32/i64/u8/bool` |
+| `.contiguous()` | materialise contiguous copy |
 
 ### `chainer.Variable`
 
@@ -45,7 +47,8 @@ VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release
 ### `chainer.functions` (`F`)
 
 `add`, `sub`, `mul`, `div`, `sqrt`, `relu`, `neg`, `matmul`, `transpose`,
-`sum`, `mean`, `softmax`, `exp`, `log`, `sigmoid`, `layer_norm`, `batch_norm`,
+`sum`, `mean`, `softmax`, `exp`, `log`, `sigmoid`, `silu`, `gelu`, `abs`, `scale`,
+`clamp`, `rms_norm`, `linear`, `dropout`, `layer_norm`, `batch_norm`,
 `embedding`, `conv2d`, `conv_transpose2d`, `max_pool2d`, `average_pool2d`,
 `reshape`, `permute`, `multi_head_attention`, `softmax_cross_entropy`.
 
@@ -54,7 +57,7 @@ Broadcasting is supported for binary elementwise ops and for
 
 ### `chainer.links` (`L`)
 
-`Linear`, `Conv2d`, `ConvTranspose2d`, `BatchNorm`, `LayerNorm`, `Embedding`
+`Linear`, `Conv2d`, `ConvTranspose2d`, `BatchNorm`, `LayerNorm`, `RMSNorm`, `Embedding`
 and `MultiHeadAttention`, all with `device="cpu|cuda|vulkan:N"`. The layer and
 its input must be on the same device.
 
@@ -76,6 +79,9 @@ independently.
 
 - `SGD(lr)`
 - `Adam(lr=0.001)`
+- `MomentumSGD(lr=0.01, momentum=0.9)`
+- `AdamW(lr=0.001, weight_decay=0.01)`
+- `LinearWarmupCosineLR(warmup_steps, total_steps, base_lr, min_lr)` with `get_lr(step)`
 
 Both implement `setup(parameters)`, `update()` and `zero_grad()`.
 

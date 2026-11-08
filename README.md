@@ -26,7 +26,7 @@ class MLP(chainer.Chain):
         return self.l2(F.relu(self.l1(x)))
 ```
 
-## ステータス（v0.19.0）
+## ステータス（v0.23.0）
 
 | 領域 | 状態 |
 |---|---|

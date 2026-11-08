@@ -1495,6 +1495,291 @@ pub(crate) fn layer_norm_backward(
     ))
 }
 
+pub(crate) fn rms_norm(
+    x: &Tensor<CpuBackend>,
+    weight: &Tensor<CpuBackend>,
+    eps: f64,
+) -> Result<Tensor<CpuBackend>> {
+    if x.rank() < 1 {
+        return Err(Error::invalid("rms_norm expects rank >= 1"));
+    }
+    let dim = *x.shape().dims().last().unwrap();
+    if dim == 0 {
+        return make_f32(x, Vec::new(), x.shape().clone());
+    }
+    if weight.numel() != dim {
+        return Err(Error::invalid(format!(
+            "rms_norm weight must have {dim} elements"
+        )));
+    }
+    let xv = f32_slice(x)?;
+    let wv = f32_slice(weight)?;
+    let rows = xv.len() / dim;
+    let mut out = vec![0f32; xv.len()];
+    let eps = eps as f32;
+    for row in 0..rows {
+        let base = row * dim;
+        let slice = &xv[base..base + dim];
+        let ms: f64 = slice
+            .iter()
+            .map(|&v| {
+                let v = v as f64;
+                v * v
+            })
+            .sum::<f64>()
+            / dim as f64;
+        let inv = 1.0 / (ms + eps as f64).sqrt();
+        for i in 0..dim {
+            out[base + i] = ((slice[i] as f64 * inv) * wv[i] as f64) as f32;
+        }
+    }
+    make_f32(x, out, x.shape().clone())
+}
+
+pub(crate) fn rms_norm_backward(
+    x: &Tensor<CpuBackend>,
+    weight: &Tensor<CpuBackend>,
+    grad: &Tensor<CpuBackend>,
+    eps: f64,
+) -> Result<(Tensor<CpuBackend>, Tensor<CpuBackend>)> {
+    if x.shape() != grad.shape() {
+        return Err(Error::invalid("rms_norm backward shape mismatch"));
+    }
+    let dim = *x.shape().dims().last().unwrap();
+    if weight.numel() != dim {
+        return Err(Error::invalid("rms_norm weight shape mismatch"));
+    }
+    let xv = f32_slice(x)?;
+    let wv = f32_slice(weight)?;
+    let gv = f32_slice(grad)?;
+    let rows = xv.len() / dim;
+    let mut dx = vec![0f32; xv.len()];
+    let mut dweight = vec![0f32; dim];
+    for row in 0..rows {
+        let base = row * dim;
+        let xs = &xv[base..base + dim];
+        let gs = &gv[base..base + dim];
+        let ms: f64 = xs.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>() / dim as f64;
+        let inv = 1.0 / (ms + eps).sqrt();
+        let invf = inv as f32;
+        let mut norm = vec![0f32; dim];
+        for i in 0..dim {
+            norm[i] = xs[i] * invf;
+            dweight[i] += gs[i] * norm[i];
+        }
+        let mut s_raw = 0f64;
+        for i in 0..dim {
+            s_raw += (gs[i] * wv[i]) as f64 * xs[i] as f64;
+        }
+        let r3 = inv * inv * inv;
+        let coef = r3 * s_raw / dim as f64;
+        for i in 0..dim {
+            let dy = (gs[i] * wv[i]) as f64;
+            dx[base + i] = (dy * inv - coef * xs[i] as f64) as f32;
+        }
+    }
+    Ok((
+        make_f32(x, dx, x.shape().clone())?,
+        make_f32(weight, dweight, weight.shape().clone())?,
+    ))
+}
+
+pub(crate) fn clamp(x: &Tensor<CpuBackend>, min: f64, max: f64) -> Result<Tensor<CpuBackend>> {
+    if min > max {
+        return Err(Error::invalid("clamp min > max"));
+    }
+    let lo = min as f32;
+    let hi = max as f32;
+    unary_map(x, move |v| v.clamp(lo, hi))
+}
+
+pub(crate) fn abs(x: &Tensor<CpuBackend>) -> Result<Tensor<CpuBackend>> {
+    unary_map(x, f32::abs)
+}
+
+pub(crate) fn apply_rope(
+    q: &Tensor<CpuBackend>,
+    k: &Tensor<CpuBackend>,
+    positions: &Tensor<CpuBackend>,
+    theta: f64,
+    interleaved: bool,
+) -> Result<(Tensor<CpuBackend>, Tensor<CpuBackend>)> {
+    if q.shape() != k.shape() || q.rank() != 3 {
+        return Err(Error::invalid("apply_rope expects [heads, seq, head_dim]"));
+    }
+    let (heads, seq, head_dim) = (
+        q.shape().dims()[0],
+        q.shape().dims()[1],
+        q.shape().dims()[2],
+    );
+    if !head_dim.is_multiple_of(2) {
+        return Err(Error::invalid("apply_rope head_dim must be even"));
+    }
+    let pos: Vec<i64> = match positions.dtype() {
+        DType::I64 => positions.as_slice::<i64>()?.to_vec(),
+        DType::I32 => positions
+            .as_slice::<i32>()?
+            .iter()
+            .map(|&v| v as i64)
+            .collect(),
+        DType::U8 => positions
+            .as_slice::<u8>()?
+            .iter()
+            .map(|&v| v as i64)
+            .collect(),
+        other => return Err(Error::UnsupportedDType(other)),
+    };
+    if pos.is_empty() {
+        return Err(Error::invalid("apply_rope positions empty"));
+    }
+    let broadcast = pos.len() == 1;
+    if !broadcast && pos.len() != seq {
+        return Err(Error::invalid(format!(
+            "apply_rope positions len {} != seq {seq}",
+            pos.len()
+        )));
+    }
+    let qv = f32_slice(q)?;
+    let kv = f32_slice(k)?;
+    let half = head_dim / 2;
+    let mut q_out = qv.to_vec();
+    let mut k_out = kv.to_vec();
+    let inv_freq: Vec<f64> = (0..half)
+        .map(|i| {
+            let exp = if head_dim == 0 {
+                0.0
+            } else {
+                (2 * i) as f64 / head_dim as f64
+            };
+            theta.powf(-exp)
+        })
+        .collect();
+    let rotate = |data: &mut [f32]| {
+        for h in 0..heads {
+            for s in 0..seq {
+                let p = if broadcast { pos[0] } else { pos[s] } as f64;
+                let base = (h * seq + s) * head_dim;
+                for i in 0..half {
+                    let angle = p * inv_freq[i];
+                    let (cos, sin) = (angle.cos() as f32, angle.sin() as f32);
+                    let (a, b) = if interleaved {
+                        (data[base + 2 * i], data[base + 2 * i + 1])
+                    } else {
+                        (data[base + i], data[base + i + half])
+                    };
+                    let (ra, rb) = (a * cos - b * sin, a * sin + b * cos);
+                    if interleaved {
+                        data[base + 2 * i] = ra;
+                        data[base + 2 * i + 1] = rb;
+                    } else {
+                        data[base + i] = ra;
+                        data[base + i + half] = rb;
+                    }
+                }
+            }
+        }
+    };
+    rotate(&mut q_out);
+    rotate(&mut k_out);
+    Ok((
+        make_f32(q, q_out, q.shape().clone())?,
+        make_f32(k, k_out, k.shape().clone())?,
+    ))
+}
+
+pub(crate) fn cast_to(x: &Tensor<CpuBackend>, dtype: DType) -> Result<Tensor<CpuBackend>> {
+    let values = x.to_host_f32()?;
+    match dtype {
+        DType::F32 => make_f32(x, values, x.shape().clone()),
+        DType::F64 => {
+            let data: Vec<f64> = values.into_iter().map(|v| v as f64).collect();
+            Tensor::from_bytes(
+                *x.backend(),
+                bytemuck::cast_slice(&data),
+                x.shape().clone(),
+                DType::F64,
+            )
+        }
+        DType::F16 => {
+            let data: Vec<u16> = values
+                .iter()
+                .map(|&v| modern_chainer_core::f32_to_f16_bits(v))
+                .collect();
+            Tensor::from_bytes(
+                *x.backend(),
+                bytemuck::cast_slice(&data),
+                x.shape().clone(),
+                DType::F16,
+            )
+        }
+        DType::BF16 => {
+            let data: Vec<u16> = values
+                .iter()
+                .map(|&v| modern_chainer_core::f32_to_bf16_bits(v))
+                .collect();
+            Tensor::from_bytes(
+                *x.backend(),
+                bytemuck::cast_slice(&data),
+                x.shape().clone(),
+                DType::BF16,
+            )
+        }
+        DType::I32 => {
+            let data: Vec<i32> = values.into_iter().map(|v| v as i32).collect();
+            Tensor::from_bytes(
+                *x.backend(),
+                bytemuck::cast_slice(&data),
+                x.shape().clone(),
+                DType::I32,
+            )
+        }
+        DType::I64 => {
+            let data: Vec<i64> = values.into_iter().map(|v| v as i64).collect();
+            Tensor::from_bytes(
+                *x.backend(),
+                bytemuck::cast_slice(&data),
+                x.shape().clone(),
+                DType::I64,
+            )
+        }
+        DType::U8 => {
+            let data: Vec<u8> = values.into_iter().map(|v| v as u8).collect();
+            Tensor::from_bytes(*x.backend(), &data, x.shape().clone(), DType::U8)
+        }
+        DType::Bool => {
+            let data: Vec<u8> = values
+                .into_iter()
+                .map(|v| if v != 0.0 { 1 } else { 0 })
+                .collect();
+            Tensor::from_bytes(*x.backend(), &data, x.shape().clone(), DType::Bool)
+        }
+    }
+}
+
+pub(crate) fn dropout(
+    x: &Tensor<CpuBackend>,
+    mask: &Tensor<CpuBackend>,
+    p: f64,
+) -> Result<Tensor<CpuBackend>> {
+    if !(0.0..1.0).contains(&p) {
+        return Err(Error::invalid(format!(
+            "dropout p must be in [0,1), got {p}"
+        )));
+    }
+    let xv = f32_slice(x)?;
+    let mv = f32_slice(mask)?;
+    if xv.len() != mv.len() {
+        return Err(Error::invalid("dropout mask shape mismatch"));
+    }
+    let scale = 1.0 / (1.0 - p) as f32;
+    let out: Vec<f32> = xv
+        .iter()
+        .zip(mv.iter())
+        .map(|(&x, &m)| x * m * scale)
+        .collect();
+    make_f32(x, out, x.shape().clone())
+}
+
 pub(crate) fn embedding_backward(
     ids: &Tensor<CpuBackend>,
     weight: &Tensor<CpuBackend>,

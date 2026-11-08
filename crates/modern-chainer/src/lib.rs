@@ -21,7 +21,7 @@ pub use modern_chainer_core::autocast::{
 };
 pub use modern_chainer_core::{
     Activation, AdamConfig, Backend, DType, Device, Error, Ops, Result, Shape, Strides, Tensor,
-    he_normal,
+    bf16_bits_to_f32, f16_bits_to_f32, f32_to_bf16_bits, f32_to_f16_bits, he_normal,
 };
 pub use modern_chainer_cpu::{CpuBackend, CpuOps, CpuStorage};
 pub use modern_chainer_cuda::{
@@ -35,13 +35,18 @@ pub use modern_chainer_cuda::{
 pub use modern_chainer_llm::{
     BatchOutput, BatchPlan, BlockAllocator, ContinuousBatcher, Decoder, DecoderConfig,
     DecoderHandles, PagedBatchOutput, PagedBatchRequest, PagedBatchRunner, PagedKvCache, RequestId,
-    RequestState, Sampler, argmax_token, generate, sample_token, speculative_generate,
+    RequestState, Sampler, SamplingConfig, argmax_token, generate, sample_token,
+    speculative_generate, top_p_filter,
 };
 pub use modern_chainer_nn::{
-    AveragePool2d, BatchNorm, Conv2d, ConvTranspose2d, Embedding, LayerNorm, Linear, MaxPool2d,
-    Module, MultiHeadAttention, Parameter, Sequential,
+    AveragePool2d, BatchNorm, Conv2d, ConvTranspose2d, Dropout, Embedding, GroupedQueryAttention,
+    LayerNorm, Linear, LoRA, MaxPool2d, Module, MultiHeadAttention, Parameter, RMSNorm, Sequential,
+    TransformerBlock,
 };
-pub use modern_chainer_optim::{Adam, GradScaler, MomentumSGD, Optimizer, SGD, zero_grad};
+pub use modern_chainer_optim::{
+    Adam, AdamW, ConstantLR, GradScaler, LinearWarmupCosineLR, MomentumSGD, Optimizer,
+    PolynomialLR, SGD, StepLR, clip_grad_norm, zero_grad,
+};
 pub use modern_chainer_run::{
     Run, RunContext, RunMode, ScalarValue, StateBuilder, StateId, StateKey, StateSpec, StateStore,
     Step, Transaction,
@@ -95,15 +100,17 @@ pub mod prelude {
     pub use crate::F as functional;
     pub use crate::L;
     pub use crate::{
-        Activation, Adam, AdamConfig, AutocastGuard, AveragePool2d, Backend, BatchNorm, BatchPlan,
-        BatchedStaticDecoder, BlockAllocator, ComputeType, ContinuousBatcher, Conv2d,
-        ConvTranspose2d, CpuBackend, CudaBackend, DType, Decoder, DecoderConfig, Device, Embedding,
-        Error, GradScaler, GraphLinearTrainer, GraphTrainerConfig, KvDType, LayerNorm, Linear,
-        LinearMseAdamStep, MaxPool2d, Module, MomentumSGD, MultiHeadAttention, Ops, Optimizer,
-        PagedBatchRunner, Parameter, RequestId, Result, Run, RunMode, SGD, Sampler, Shape, StateId,
+        Activation, Adam, AdamConfig, AdamW, AutocastGuard, AveragePool2d, Backend, BatchNorm,
+        BatchPlan, BatchedStaticDecoder, BlockAllocator, ComputeType, ContinuousBatcher, Conv2d,
+        ConvTranspose2d, CpuBackend, CudaBackend, DType, Decoder, DecoderConfig, Device, Dropout,
+        Embedding, Error, GradScaler, GraphLinearTrainer, GraphTrainerConfig,
+        GroupedQueryAttention, KvDType, LayerNorm, Linear, LinearMseAdamStep, LoRA, MaxPool2d,
+        Module, MomentumSGD, MultiHeadAttention, Ops, Optimizer, PagedBatchRunner, Parameter,
+        RMSNorm, RequestId, Result, Run, RunMode, SGD, Sampler, SamplingConfig, Shape, StateId,
         StateKey, StateSpec, StateStore, StaticDecoderInput, StaticDecoderStep, StaticLinearConfig,
-        StaticLinearInput, StaticRun, Step, Tensor, Variable, ZeroGrad, autocast, autocast_dtype,
-        generate, is_autocast_enabled, no_grad, speculative_generate, zero_grad,
+        StaticLinearInput, StaticRun, Step, Tensor, TransformerBlock, Variable, ZeroGrad, autocast,
+        autocast_dtype, clip_grad_norm, generate, is_autocast_enabled, no_grad,
+        speculative_generate, top_p_filter, zero_grad,
     };
 }
 

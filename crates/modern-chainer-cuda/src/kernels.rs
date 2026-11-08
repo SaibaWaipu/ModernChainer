@@ -1119,6 +1119,26 @@ extern "C" __global__ void gelu_f32(const float* a, float* out, int n) {
         out[i] = 0.5f * x * (1.0f + tanhf(0.7978845608f * (x + 0.044715f * x * x * x)));
     }
 }
+extern "C" __global__ void exp_f32(const float* a, float* out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = expf(a[i]);
+}
+extern "C" __global__ void log_f32(const float* a, float* out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = logf(a[i]);
+}
+extern "C" __global__ void sigmoid_f32(const float* a, float* out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = 1.0f / (1.0f + expf(-a[i]));
+}
+extern "C" __global__ void clamp_f32(const float* a, float* out, float minv, float maxv, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = fminf(fmaxf(a[i], minv), maxv);
+}
+extern "C" __global__ void abs_f32(const float* a, float* out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = fabsf(a[i]);
+}
 
 extern "C" __global__ void paged_attention_wide_f32(
     const float* q, const float* k_blocks, const float* v_blocks,
@@ -1782,6 +1802,11 @@ pub(crate) struct Kernels {
     pub relu_backward: CudaFunction,
     pub silu: CudaFunction,
     pub gelu: CudaFunction,
+    pub exp: CudaFunction,
+    pub log: CudaFunction,
+    pub sigmoid: CudaFunction,
+    pub clamp: CudaFunction,
+    pub abs: CudaFunction,
     pub f32_to_f16: CudaFunction,
     pub f16_to_f32: CudaFunction,
     pub f32_to_bf16: CudaFunction,
@@ -1878,6 +1903,11 @@ impl Kernels {
             relu_backward: load("relu_backward_f32")?,
             silu: load("silu_f32")?,
             gelu: load("gelu_f32")?,
+            exp: load("exp_f32")?,
+            log: load("log_f32")?,
+            sigmoid: load("sigmoid_f32")?,
+            clamp: load("clamp_f32")?,
+            abs: load("abs_f32")?,
             f32_to_f16: load("f32_to_f16_f32")?,
             f16_to_f32: load("f16_to_f32_f32")?,
             f32_to_bf16: load("f32_to_bf16_f32")?,

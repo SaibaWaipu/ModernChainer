@@ -1,11 +1,10 @@
 //! Vulkan compute backend.
 //!
-//! The backend is implemented on top of `wgpu`, which selects Vulkan on Linux.
-//! It therefore runs on NVIDIA, AMD, Intel and Mesa's lavapipe CPU device.  The
-//! kernel set covers the hot path of a define-by-run training loop: elementwise
-//! arithmetic, ReLU, scaling, matrix multiplication, transpose and bias add.
-//! Reduction-heavy operations (sum, softmax cross entropy, broadcast reduction)
-//! currently round-trip through the CPU backend; see `docs/backends.md`.
+//! Implemented on `wgpu` (Vulkan on Linux): NVIDIA / AMD / Intel / Mesa lavapipe.
+//! Covers elementwise, exp/log/sigmoid, silu/gelu, matmul/linear (incl. fused
+//! bias+activation), transpose, fused Adam, softmax CE, softmax, layer norm,
+//! embedding. Attention / paged ops and RMSNorm/RoPE/cast/dropout go through a
+//! CPU round-trip fallback (correct but slower); see `docs/backends.md`.
 
 #[cfg(feature = "wgpu")]
 mod backend;

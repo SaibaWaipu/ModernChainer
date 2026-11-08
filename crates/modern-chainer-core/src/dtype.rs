@@ -66,4 +66,85 @@ impl DType {
             _ => return None,
         })
     }
+
+    pub const fn is_float16(self) -> bool {
+        matches!(self, DType::F16 | DType::BF16)
+    }
+}
+
+pub fn f32_to_f16_bits(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xff) as i16;
+    let frac = bits & 0x7fffff;
+    if exp == 0xff {
+        return sign | 0x7c00 | if frac == 0 { 0 } else { 0x200 };
+    }
+    let h_exp = exp - 112;
+    if h_exp >= 0x1f {
+        return sign | 0x7c00;
+    }
+    if h_exp <= 0 {
+        if h_exp < -10 {
+            return sign;
+        }
+        let m = frac | 0x800000;
+        let shift = 14 - h_exp;
+        let rounding_bias = ((m >> (shift - 1)) & 1) + 0xfff;
+        let h = (m + rounding_bias) >> shift;
+        let h = h as u16;
+        h | sign
+    } else {
+        let h = sign | ((h_exp as u16) << 10) | ((frac >> 13) as u16);
+        let rounding = (frac >> 12) & 1;
+        let sticky = (frac & 0xfff) != 0;
+        let lsb = h & 1;
+        if rounding == 1 && (sticky || lsb == 1) {
+            h + 1
+        } else {
+            h
+        }
+    }
+}
+
+pub fn f16_bits_to_f32(bits: u16) -> f32 {
+    let sign = ((bits & 0x8000) as u32) << 16;
+    let exp = ((bits >> 10) & 0x1f) as u32;
+    let frac = (bits & 0x3ff) as u32;
+    let out = if exp == 0x1f {
+        sign | 0x7f800000 | (frac << 13)
+    } else if exp == 0 {
+        if frac == 0 {
+            sign
+        } else {
+            let mut e = 0u32;
+            let mut f = frac;
+            while f & 0x400 == 0 {
+                f <<= 1;
+                e += 1;
+            }
+            f &= 0x3ff;
+            let exp = 0x7f - 14 - e;
+            sign | (exp << 23) | (f << 13)
+        }
+    } else {
+        sign | ((exp + 112) << 23) | (frac << 13)
+    };
+    f32::from_bits(out)
+}
+
+pub fn f32_to_bf16_bits(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let lsb = (bits >> 16) & 1;
+    let rounding = (bits >> 15) & 1;
+    let sticky = (bits & 0x7fff) != 0;
+    let mut out = (bits >> 16) as u16;
+    if rounding == 1 && (sticky || lsb == 1) {
+        out = out.wrapping_add(1);
+    }
+    out
+}
+
+pub fn bf16_bits_to_f32(bits: u16) -> f32 {
+    f32::from_bits((bits as u32) << 16)
 }
